@@ -38,8 +38,15 @@ _Avoid_: service UI access, unauthenticated host access
 
 **CLI**:
 NominaConnect's only user interface for setup, inspection, and service
-management.
+management. The default experience is an interactive terminal UI started by
+running `nomina` with no arguments; command flags remain for scripts and tests.
 _Avoid_: dashboard, web UI
+
+**Interactive CLI**:
+The guided terminal UI that collects operator choices through menus and prompts
+instead of command-line flags. Every command shares the same prompt functions
+whether it is launched from the main menu or invoked directly.
+_Avoid_: required flags, project path argument
 
 **Proxmox node**:
 The single explicit Proxmox host targeted by the initial NominaConnect setup.

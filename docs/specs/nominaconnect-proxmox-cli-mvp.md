@@ -17,7 +17,9 @@ software choices, and remain useful when users work directly in provider UIs.
 
 ## Solution
 
-Build NominaConnect as a CLI run as root on a Proxmox host. `nomina init`
+Build NominaConnect as a CLI run as root on a Proxmox host. Running `nomina`
+with no arguments opens an interactive terminal UI; subcommands use the same
+guided prompts when flags are omitted. `nomina init`
 creates a visible, human-editable project configuration and guides the operator
 through platform bootstrap in dependency order. `nomina service add` creates a
 dedicated unprivileged Debian LXC for a named service plugin, using the
@@ -79,6 +81,8 @@ expected rather than an HTTP fallback.
 ## Implementation Decisions
 
 - The product is CLI-only and runs as root on a Proxmox host. Its primary Proxmox control surface is local management commands and `pct exec`, not a remote Proxmox API client.
+- The default operator experience is an interactive terminal UI (`nomina` with no arguments). Command flags pre-fill the same prompt functions for scripts and tests; see `docs/tui.md`.
+- NominaConnect discovers `nomina.yaml` from the working directory or a parent folder. Operators are not asked for a project path.
 - A visible project configuration declares the managed inventory. Secure connection secrets, volatile provider references, tracking records, and change history remain outside that file in root-owned local state.
 - The configuration stores permanent NominaConnect IDs for managed items. Provider-native references are stored separately; NominaConnect does not inject markers into provider configuration.
 - Native Proxmox LXC is the first implemented deployment option. It creates one dedicated Debian stable, unprivileged LXC per managed service; the configuration remains extensible for other user-selected deployment options.

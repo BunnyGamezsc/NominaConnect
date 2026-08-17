@@ -1,7 +1,7 @@
 import * as clack from "@clack/prompts";
 import { INITIAL_PLATFORM_CATALOG } from "./catalog.js";
 import { findProjectDirectory, loadProject } from "./config.js";
-import { TECHNITIUM_DEPLOYMENT, CADDY_DEPLOYMENT } from "./provisioning.js";
+import { TECHNITIUM_DEPLOYMENT, CADDY_DEPLOYMENT, TRAEFIK_DEPLOYMENT } from "./provisioning.js";
 
 export function getProjectContext(filesystem, cwd = ".") {
   const projectDirectory = findProjectDirectory(filesystem, cwd);
@@ -23,10 +23,10 @@ export function canProvisionTechnitium(project) {
   return project.state.providerReferences[dnsService.id] === undefined;
 }
 
-export function canProvisionCaddy(project) {
+export function canProvisionReverseProxy(project, serviceName) {
   const dnsService = project?.config.managedInventory.platform.dns;
   const proxyService = project?.config.managedInventory.platform.reverseProxy;
-  if (proxyService?.service !== "caddy") {
+  if (proxyService?.service !== serviceName) {
     return false;
   }
   if (project.state.providerReferences[dnsService?.id] === undefined) {
@@ -35,11 +35,19 @@ export function canProvisionCaddy(project) {
   return project.state.providerReferences[proxyService.id] === undefined;
 }
 
+export function canProvisionCaddy(project) {
+  return canProvisionReverseProxy(project, "caddy");
+}
+
+export function canProvisionTraefik(project) {
+  return canProvisionReverseProxy(project, "traefik");
+}
+
 export function canPublishExposure(project) {
   const dnsService = project?.config.managedInventory.platform.dns;
   const proxyService = project?.config.managedInventory.platform.reverseProxy;
   return dnsService?.service === "technitium"
-    && proxyService?.service === "caddy"
+    && (proxyService?.service === "caddy" || proxyService?.service === "traefik")
     && project.state.providerReferences[dnsService.id] !== undefined
     && project.state.providerReferences[proxyService.id] !== undefined;
 }
@@ -57,6 +65,13 @@ export function buildMenuOptions(project) {
     options.push({
       value: "provision-caddy",
       label: "Provision Caddy reverse proxy",
+      hint: "create the proxy LXC"
+    });
+  }
+  if (project !== undefined && canProvisionTraefik(project)) {
+    options.push({
+      value: "provision-traefik",
+      label: "Provision Traefik reverse proxy",
       hint: "create the proxy LXC"
     });
   }
@@ -115,6 +130,11 @@ export async function runInteractiveApp(adapters) {
     clack.outro("Caddy provisioning complete.");
     return result;
   }
+  if (action === "provision-traefik") {
+    const result = await adapters.runCommand(["service", "add", "traefik"], adapters);
+    clack.outro("Traefik provisioning complete.");
+    return result;
+  }
   if (action === "publish-exposure") {
     const result = await adapters.runCommand(["exposure", "publish"], adapters);
     clack.outro("Exposure published.");
@@ -134,6 +154,11 @@ export async function promptServiceName(project, prompts) {
     const description = INITIAL_PLATFORM_CATALOG.reverseProxy.find((option) => option.name === "caddy")?.description
       ?? "reverse proxy";
     choices.push({ value: "caddy", label: "Caddy reverse proxy", hint: description });
+  }
+  if (canProvisionTraefik(project)) {
+    const description = INITIAL_PLATFORM_CATALOG.reverseProxy.find((option) => option.name === "traefik")?.description
+      ?? "reverse proxy";
+    choices.push({ value: "traefik", label: "Traefik reverse proxy", hint: description });
   }
   if (choices.length === 0) {
     throw new Error("No platform services are waiting to be provisioned.");
@@ -224,15 +249,15 @@ export async function promptTechnitiumOptions(project, existingOptions, prompts)
   };
 }
 
-export async function promptCaddyOptions(project, existingOptions, prompts) {
+export async function promptReverseProxyOptions(project, existingOptions, prompts, { deployment, label }) {
   if (prompts?.ask === undefined && prompts?.confirm === undefined) {
     return existingOptions;
   }
 
-  const recommendations = CADDY_DEPLOYMENT.resourceRecommendations;
-  const ip = existingOptions.ip ?? await askRequired(prompts, "Static IP for Caddy", validateIp);
+  const recommendations = deployment.resourceRecommendations;
+  const ip = existingOptions.ip ?? await askRequired(prompts, `Static IP for ${label}`, validateIp);
   const hostname = existingOptions.hostname
-    ?? await askPrompt(prompts, "LXC hostname", CADDY_DEPLOYMENT.defaultHostname);
+    ?? await askPrompt(prompts, "LXC hostname", deployment.defaultHostname);
   const useRecommended = existingOptions.cpus !== undefined
     ? true
     : await confirmPrompt(
@@ -263,6 +288,20 @@ export async function promptCaddyOptions(project, existingOptions, prompts) {
     ...(memoryMb === undefined ? {} : { memoryMb }),
     ...(diskGb === undefined ? {} : { diskGb })
   };
+}
+
+export async function promptCaddyOptions(project, existingOptions, prompts) {
+  return promptReverseProxyOptions(project, existingOptions, prompts, {
+    deployment: CADDY_DEPLOYMENT,
+    label: "Caddy"
+  });
+}
+
+export async function promptTraefikOptions(project, existingOptions, prompts) {
+  return promptReverseProxyOptions(project, existingOptions, prompts, {
+    deployment: TRAEFIK_DEPLOYMENT,
+    label: "Traefik"
+  });
 }
 
 export async function promptExposureOptions(project, existingOptions, prompts) {

@@ -12,23 +12,24 @@ export function publishManagedExposure({
   if (dnsService?.service !== "technitium") {
     throw new Error("Technitium is not selected as the DNS provider for this project.");
   }
-  if (proxyService?.service !== "caddy") {
-    throw new Error("Caddy is not selected as the reverse proxy for this project.");
+  if (proxyService?.service !== "caddy" && proxyService?.service !== "traefik") {
+    throw new Error("A supported reverse proxy (Caddy or Traefik) is not selected for this project.");
   }
+  const proxyLabel = proxyService.service === "traefik" ? "Traefik" : "Caddy";
   if (project.state.providerReferences[dnsService.id] === undefined) {
     throw new Error("Technitium must be provisioned before publishing an exposure.");
   }
   if (project.state.providerReferences[proxyService.id] === undefined) {
-    throw new Error("Caddy must be provisioned before publishing an exposure.");
+    throw new Error(`${proxyLabel} must be provisioned before publishing an exposure.`);
   }
 
   const technitiumAdapter = providerAdapters.technitium;
-  const caddyAdapter = providerAdapters.caddy;
+  const proxyAdapter = providerAdapters[proxyService.service];
   if (technitiumAdapter?.publishRecord === undefined) {
     throw new Error("Technitium provider adapter is unavailable.");
   }
-  if (caddyAdapter?.publishRoute === undefined) {
-    throw new Error("Caddy provider adapter is unavailable.");
+  if (proxyAdapter?.publishRoute === undefined) {
+    throw new Error(`${proxyLabel} provider adapter is unavailable.`);
   }
 
   const { name, hostname, backendIp, backendPort } = options;
@@ -46,20 +47,20 @@ export function publishManagedExposure({
   };
 
   technitiumAdapter.publishRecord(publishRequest);
-  caddyAdapter.publishRoute(routeRequest);
+  proxyAdapter.publishRoute(routeRequest);
 
   const dnsPlugin = getPlatformProvider("technitium");
-  const caddyPlugin = getPlatformProvider("caddy");
+  const proxyPlugin = getPlatformProvider(proxyService.service);
   const dnsInspection = dnsPlugin.inspect(technitiumAdapter, dnsService, {
     providerReferences: collectManagedDnsReferences(project, hostname)
   });
-  const proxyInspection = caddyPlugin.inspect(caddyAdapter, proxyService, {
+  const proxyInspection = proxyPlugin.inspect(proxyAdapter, proxyService, {
     providerReferences: collectManagedProxyReferences(project, hostname)
   });
 
   const dnsExposureHealth = technitiumAdapter.healthCheckExposure?.({ hostname, backendIp, backendPort })
     ?? { dns: "reachable", status: "healthy" };
-  const proxyExposureHealth = caddyAdapter.healthCheckExposure?.({ hostname, backendIp, backendPort })
+  const proxyExposureHealth = proxyAdapter.healthCheckExposure?.({ hostname, backendIp, backendPort })
     ?? { https: "reachable", status: "healthy" };
   const healthy = dnsExposureHealth.status === "healthy" && proxyExposureHealth.status === "healthy";
 

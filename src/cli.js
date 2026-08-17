@@ -14,7 +14,8 @@ import {
   promptExposureOptions,
   promptInitOptions,
   promptServiceName,
-  promptTechnitiumOptions
+  promptTechnitiumOptions,
+  promptTraefikOptions
 } from "./tui.js";
 
 export async function runCli(argumentsList, adapters) {
@@ -57,6 +58,9 @@ async function handleServiceCommand(argumentsList, adapters) {
   }
   if (resolvedServiceName === "caddy") {
     return addCaddyService(options, adapters);
+  }
+  if (resolvedServiceName === "traefik") {
+    return addTraefikService(options, adapters);
   }
   throw new Error(`Unsupported service: ${resolvedServiceName}.`);
 }
@@ -144,22 +148,22 @@ async function addTechnitiumService(options, adapters) {
   };
 }
 
-async function addCaddyService(options, adapters) {
+async function addReverseProxyService(serviceName, serviceLabel, promptOptions, options, adapters) {
   const { filesystem, runtime, proxmox, providerAdapters = {} } = adapters;
   assertProxmoxShell(runtime);
 
   const project = loadProject(filesystem, options.projectDir);
-  const resolvedOptions = await promptCaddyOptions(project, options, adapters.prompts);
+  const resolvedOptions = await promptOptions(project, options, adapters.prompts);
   const dnsService = project.config.managedInventory.platform.dns;
   const proxyService = project.config.managedInventory.platform.reverseProxy;
-  if (proxyService?.service !== "caddy") {
-    throw new Error("Caddy is not selected as the reverse proxy for this project.");
+  if (proxyService?.service !== serviceName) {
+    throw new Error(`${serviceLabel} is not selected as the reverse proxy for this project.`);
   }
-  if (project.state.providerReferences[dnsService.id] === undefined) {
-    throw new Error("Technitium must be provisioned before Caddy.");
+  if (project.state.providerReferences[dnsService?.id] === undefined) {
+    throw new Error(`Technitium must be provisioned before ${serviceLabel}.`);
   }
   if (project.state.providerReferences[proxyService.id] !== undefined) {
-    throw new Error("Caddy is already provisioned for this project.");
+    throw new Error(`${serviceLabel} is already provisioned for this project.`);
   }
   if (resolvedOptions.ip === undefined) {
     throw new Error("Static IP is required.");
@@ -168,9 +172,9 @@ async function addCaddyService(options, adapters) {
     throw new Error(`Invalid static IP: ${resolvedOptions.ip}.`);
   }
 
-  const providerAdapter = providerAdapters.caddy;
+  const providerAdapter = providerAdapters[serviceName];
   if (providerAdapter === undefined) {
-    throw new Error("Caddy provider adapter is unavailable.");
+    throw new Error(`${serviceLabel} provider adapter is unavailable.`);
   }
   if (proxmox === undefined) {
     throw new Error("Proxmox adapter is unavailable.");
@@ -179,7 +183,7 @@ async function addCaddyService(options, adapters) {
   const result = await provisionPlatformService({
     project,
     platformKey: "reverseProxy",
-    serviceName: "caddy",
+    serviceName,
     managedItem: proxyService,
     options: resolvedOptions,
     proxmox,
@@ -208,7 +212,7 @@ async function addCaddyService(options, adapters) {
 
   return {
     ...formatPlatformProvisionResult({
-      serviceLabel: "Caddy",
+      serviceLabel,
       ip: resolvedOptions.ip,
       hostname: result.lxcSpec.hostname,
       providerReference: result.providerReference,
@@ -221,6 +225,14 @@ async function addCaddyService(options, adapters) {
     lxcSpec: result.lxcSpec,
     providerReference: result.providerReference
   };
+}
+
+async function addCaddyService(options, adapters) {
+  return addReverseProxyService("caddy", "Caddy", promptCaddyOptions, options, adapters);
+}
+
+async function addTraefikService(options, adapters) {
+  return addReverseProxyService("traefik", "Traefik", promptTraefikOptions, options, adapters);
 }
 
 async function publishExposure(options, adapters) {

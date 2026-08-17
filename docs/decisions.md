@@ -16,6 +16,8 @@ These are implementation constraints, not aspirational ideas.
 - Keep optional integrations optional; make recommendations without lock-in.
 - Maintain a clear separation: design → manual validation → documentation →
   automation.
+- Use an interactive terminal UI as the default operator experience; flags
+  pre-fill prompts for scripts and tests (see `docs/tui.md`).
 
 The project should make infrastructure visible and teachable without becoming
 verbose. It should preserve a polished, guided experience while remaining

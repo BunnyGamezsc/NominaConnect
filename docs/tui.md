@@ -13,13 +13,15 @@ nomina
        ├─ Initialize a new project       → nomina init            → promptInitOptions
        ├─ Provision Technitium DNS         → service add technitium → promptTechnitiumOptions
        ├─ Provision Caddy reverse proxy  → service add caddy      → promptCaddyOptions
+       ├─ Provision Traefik reverse proxy→ service add traefik    → promptTraefikOptions
        ├─ Publish a web exposure         → exposure publish       → promptExposureOptions
        └─ Exit
 ```
 
-Subcommands such as `nomina init`, `nomina service add caddy`, or
-`nomina exposure publish` skip the main menu but still use the same prompt
-functions whenever a value was not passed on the command line.
+Subcommands such as `nomina init`, `nomina service add caddy`,
+`nomina service add traefik`, or `nomina exposure publish` skip the main menu
+but still use the same prompt functions whenever a value was not passed on the
+command line.
 
 ## Project discovery
 
@@ -39,7 +41,7 @@ src/cli.js
   └─ runCli(argv, adapters)
        ├─ []                    → interactive.run()
        ├─ init                  → promptInitOptions → initializeProject
-       ├─ service add [name]    → promptServiceName? → promptTechnitiumOptions / promptCaddyOptions
+       ├─ service add [name]    → promptServiceName? → promptTechnitiumOptions / promptCaddyOptions / promptTraefikOptions
        └─ exposure publish      → promptExposureOptions → publishExposure
 
 src/tui.js
@@ -47,7 +49,8 @@ src/tui.js
   ├─ buildMenuOptions          context-aware menu entries
   ├─ promptInitOptions         guided platform bootstrap
   ├─ promptTechnitiumOptions   guided DNS LXC setup
-  ├─ promptCaddyOptions        guided reverse-proxy LXC setup
+  ├─ promptCaddyOptions        guided Caddy reverse-proxy LXC setup
+  ├─ promptTraefikOptions      guided Traefik reverse-proxy LXC setup
   ├─ promptExposureOptions     guided DNS + HTTPS exposure setup
   └─ promptServiceName         when service name omitted
 ```
@@ -78,8 +81,8 @@ The main menu is built from project context:
 - **No project found** — offer initialization and exit.
 - **Project found, Technitium not yet provisioned** — offer Technitium provisioning,
   initialization (in another directory), and exit.
-- **Technitium provisioned, Caddy not yet provisioned** — offer Caddy provisioning.
-- **Technitium and Caddy provisioned** — offer web exposure publishing.
+- **Technitium provisioned, reverse proxy (Caddy or Traefik) not yet provisioned** — offer Caddy / Traefik provisioning.
+- **Technitium and reverse proxy provisioned** — offer web exposure publishing.
 - **Action already completed** — hide that menu entry until another command applies.
 
 ## Adding a new interactive command

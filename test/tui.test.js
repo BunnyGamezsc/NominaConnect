@@ -3,7 +3,14 @@ import assert from "node:assert/strict";
 
 import { findProjectDirectory } from "../src/config.js";
 import { runCli } from "../src/cli.js";
-import { buildMenuOptions, canProvisionCaddy, canProvisionTechnitium, canPublishExposure, runInteractiveApp } from "../src/tui.js";
+import {
+  buildMenuOptions,
+  canProvisionCaddy,
+  canProvisionTechnitium,
+  canProvisionTraefik,
+  canPublishExposure,
+  runInteractiveApp
+} from "../src/tui.js";
 
 class FakeFilesystem {
   files = new Map();
@@ -469,4 +476,198 @@ connectionSecretReferences:
   );
 
   assert.match(result.stdout, /Technitium provisioned/);
+});
+
+test("interactive menu can route to service add traefik", async () => {
+  const commands = [];
+  await runInteractiveApp({
+    filesystem: {
+      exists: (path) => path === "/projects/home/nomina.yaml",
+      read: () => ""
+    },
+    cwd: "/projects/home",
+    interactive: {
+      chooseAction: async () => "provision-traefik"
+    },
+    runCommand: async (argumentsList) => {
+      commands.push(argumentsList);
+      return { stdout: "provisioned\n" };
+    }
+  });
+
+  assert.deepEqual(commands, [["service", "add", "traefik"]]);
+});
+
+test("buildMenuOptions offers Traefik after Technitium is provisioned", () => {
+  const project = {
+    config: {
+      managedInventory: {
+        platform: {
+          dns: { id: "nc_dns_test", service: "technitium" },
+          reverseProxy: { id: "nc_proxy_test", service: "traefik" }
+        }
+      }
+    },
+    state: {
+      providerReferences: {
+        nc_dns_test: { vmid: 120, ip: "10.0.0.53" }
+      }
+    }
+  };
+
+  assert.equal(canProvisionTechnitium(project), false);
+  assert.equal(canProvisionTraefik(project), true);
+  assert.equal(canPublishExposure(project), false);
+  assert.deepEqual(
+    buildMenuOptions(project).map((option) => option.value),
+    ["provision-traefik", "init", "exit"]
+  );
+});
+
+test("buildMenuOptions offers exposure publish when DNS and Traefik are provisioned", () => {
+  const project = {
+    config: {
+      managedInventory: {
+        platform: {
+          dns: { id: "nc_dns_test", service: "technitium" },
+          reverseProxy: { id: "nc_proxy_test", service: "traefik" }
+        }
+      }
+    },
+    state: {
+      providerReferences: {
+        nc_dns_test: { vmid: 120, ip: "10.0.0.53" },
+        nc_proxy_test: { vmid: 121, ip: "10.0.0.54" }
+      }
+    }
+  };
+
+  assert.equal(canPublishExposure(project), true);
+  assert.deepEqual(
+    buildMenuOptions(project).map((option) => option.value),
+    ["publish-exposure", "init", "exit"]
+  );
+});
+
+test("nomina service add traefik can prompt for the static IP", async () => {
+  const filesystem = new FakeFilesystem();
+  filesystem.writeFile("/projects/bunnyhome/nomina.yaml", `apiVersion: nomina.connect/v0alpha1
+kind: NominaConnect
+proxmox:
+  node: pve-1
+  defaultBridge: vmbr0
+  defaultStorage: local-lvm
+baseLocalDomain: bunnyhome.test
+managedInventory:
+  platform:
+    dns:
+      id: nc_dns_test
+      service: technitium
+      deployment:
+        ip: 10.0.0.53
+        hostname: technitium
+    reverseProxy:
+      id: nc_proxy_test
+      service: traefik
+    certificateAuthority: null
+    vpn: null
+  services: []
+connectionSecretReferences:
+  nc_dns_test: nominaconnect/provider/nc_dns_test
+  nc_proxy_test: nominaconnect/provider/nc_proxy_test
+`);
+  filesystem.writeFile("/projects/bunnyhome/.nomina/state.json", JSON.stringify({
+    version: 1,
+    providerReferences: { nc_dns_test: { vmid: 120, ip: "10.0.0.53" } },
+    tracking: { notices: [] }
+  }));
+
+  const result = await runCli(
+    ["service", "add", "traefik", "--project-dir", "/projects/bunnyhome"],
+    {
+      filesystem,
+      runtime: { isRoot: () => true, isProxmoxHost: () => true },
+      proxmox: {
+        checkIpAvailability: () => ({ status: "available" }),
+        createLxc: (spec) => ({ vmid: 121, hostname: spec.hostname }),
+        pctExec: () => ({ exitCode: 0 })
+      },
+      providerAdapters: {
+        traefik: {
+          setup: (plan) => ({ ...plan, lxcCommands: ["install-traefik", "configure-https-routes"] }),
+          inspect: () => ({ resources: [{ id: "existing.bunnyhome.test", route: "https://existing.bunnyhome.test" }] }),
+          healthCheck: () => ({ process: "running", endpoint: "reachable" })
+        }
+      },
+      prompts: {
+        ask: async (question, fallback) => {
+          if (question === "Static IP for Traefik") return "10.0.0.54";
+          if (question === "LXC hostname") return fallback;
+          return fallback;
+        },
+        confirm: async () => true
+      }
+    }
+  );
+
+  assert.match(result.stdout, /10\.0\.0\.54/);
+  assert.match(result.stdout, /Traefik provisioned/i);
+});
+
+test("nomina service add without a service name auto-selects traefik when traefik is the only provisionable service", async () => {
+  const filesystem = new FakeFilesystem();
+  filesystem.writeFile("/projects/bunnyhome/nomina.yaml", `apiVersion: nomina.connect/v0alpha1
+kind: NominaConnect
+proxmox:
+  node: pve-1
+  defaultBridge: vmbr0
+  defaultStorage: local-lvm
+baseLocalDomain: bunnyhome.test
+managedInventory:
+  platform:
+    dns:
+      id: nc_dns_test
+      service: technitium
+      deployment:
+        ip: 10.0.0.53
+        hostname: technitium
+    reverseProxy:
+      id: nc_proxy_test
+      service: traefik
+    certificateAuthority: null
+    vpn: null
+  services: []
+connectionSecretReferences:
+  nc_dns_test: nominaconnect/provider/nc_dns_test
+  nc_proxy_test: nominaconnect/provider/nc_proxy_test
+`);
+  filesystem.writeFile("/projects/bunnyhome/.nomina/state.json", JSON.stringify({
+    version: 1,
+    providerReferences: {
+      nc_dns_test: { vmid: 120, ip: "10.0.0.53" }
+    },
+    tracking: { notices: [] }
+  }));
+
+  const result = await runCli(
+    ["service", "add", "--project-dir", "/projects/bunnyhome", "--ip", "10.0.0.54"],
+    {
+      filesystem,
+      runtime: { isRoot: () => true, isProxmoxHost: () => true },
+      proxmox: {
+        checkIpAvailability: () => ({ status: "available" }),
+        createLxc: (spec) => ({ vmid: 121, hostname: spec.hostname }),
+        pctExec: () => ({ exitCode: 0 })
+      },
+      providerAdapters: {
+        traefik: {
+          setup: (plan) => plan,
+          inspect: () => ({ resources: [{ id: "existing.bunnyhome.test", route: "https://existing.bunnyhome.test" }] }),
+          healthCheck: () => ({ process: "running", endpoint: "reachable" })
+        }
+      }
+    }
+  );
+
+  assert.match(result.stdout, /Traefik provisioned/);
 });

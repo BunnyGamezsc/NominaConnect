@@ -108,6 +108,17 @@ each dedicated service LXC. NominaConnect records and uses that address; it does
 not automatically allocate addresses. An IP preflight blocks known collisions
 and warns when wider-network availability cannot be verified.
 
+## Operator interface
+
+NominaConnect is CLI-only (no web dashboard). The default operator experience is
+an interactive terminal UI: run `nomina` with no arguments, choose an action,
+and answer guided prompts. Subcommands such as `nomina init` or
+`nomina service add technitium` use the same prompts when flags are omitted.
+
+NominaConnect discovers `nomina.yaml` from the working directory or a parent
+folder. Operators are not asked for a project path. See `docs/tui.md` for the
+full TUI design pattern, prompt adapter contract, and extension guidelines.
+
 Provider and service configuration changes are inspected and adopted
 asynchronously while CLI commands run, so unrelated work is not delayed by a
 full managed-inventory scan.
