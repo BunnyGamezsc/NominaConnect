@@ -270,10 +270,8 @@ export async function promptExposureOptions(project, existingOptions, prompts) {
     return existingOptions;
   }
 
-  const suggestedHostname = existingOptions.name === undefined
-    ? `${await askPrompt(prompts, "Service name", "app")}.${project.config.baseLocalDomain}`
-    : `${existingOptions.name}.${project.config.baseLocalDomain}`;
   const name = existingOptions.name ?? await askPrompt(prompts, "Service name", "app");
+  const suggestedHostname = `${name}.${project.config.baseLocalDomain}`;
   const hostname = existingOptions.hostname ?? await askPrompt(prompts, "Full hostname", suggestedHostname);
   const backendIp = existingOptions.backendIp
     ?? await askRequired(prompts, "Backend IP", validateIp);
