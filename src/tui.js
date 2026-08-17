@@ -1,7 +1,7 @@
 import * as clack from "@clack/prompts";
 import { INITIAL_PLATFORM_CATALOG } from "./catalog.js";
 import { findProjectDirectory, loadProject } from "./config.js";
-import { TECHNITIUM_DEPLOYMENT, CADDY_DEPLOYMENT, TRAEFIK_DEPLOYMENT } from "./provisioning.js";
+import { TECHNITIUM_DEPLOYMENT, CADDY_DEPLOYMENT, TRAEFIK_DEPLOYMENT, STEP_CA_DEPLOYMENT } from "./provisioning.js";
 
 export function getProjectContext(filesystem, cwd = ".") {
   const projectDirectory = findProjectDirectory(filesystem, cwd);
@@ -43,13 +43,42 @@ export function canProvisionTraefik(project) {
   return canProvisionReverseProxy(project, "traefik");
 }
 
+export function canProvisionCertificateAuthority(project, serviceName) {
+  const dnsService = project?.config.managedInventory.platform.dns;
+  const proxyService = project?.config.managedInventory.platform.reverseProxy;
+  const caService = project?.config.managedInventory.platform.certificateAuthority;
+  if (caService?.service !== serviceName) {
+    return false;
+  }
+  if (project.state.providerReferences[dnsService?.id] === undefined) {
+    return false;
+  }
+  if (project.state.providerReferences[proxyService?.id] === undefined) {
+    return false;
+  }
+  return project.state.providerReferences[caService.id] === undefined;
+}
+
+export function canProvisionStepCa(project) {
+  return canProvisionCertificateAuthority(project, "step-ca");
+}
+
+export function canProvisionCaddyInternalCa(project) {
+  return canProvisionCertificateAuthority(project, "caddy-internal-ca");
+}
+
 export function canPublishExposure(project) {
   const dnsService = project?.config.managedInventory.platform.dns;
   const proxyService = project?.config.managedInventory.platform.reverseProxy;
+  const caService = project?.config.managedInventory.platform.certificateAuthority;
+  const caProvisioned = caService === null || caService === undefined
+    || project.state.providerReferences[caService.id] !== undefined;
+
   return dnsService?.service === "technitium"
     && (proxyService?.service === "caddy" || proxyService?.service === "traefik")
     && project.state.providerReferences[dnsService.id] !== undefined
-    && project.state.providerReferences[proxyService.id] !== undefined;
+    && project.state.providerReferences[proxyService.id] !== undefined
+    && caProvisioned;
 }
 
 export function buildMenuOptions(project) {
@@ -73,6 +102,20 @@ export function buildMenuOptions(project) {
       value: "provision-traefik",
       label: "Provision Traefik reverse proxy",
       hint: "create the proxy LXC"
+    });
+  }
+  if (project !== undefined && canProvisionStepCa(project)) {
+    options.push({
+      value: "provision-step-ca",
+      label: "Provision step-ca certificate authority",
+      hint: "create the step-ca LXC"
+    });
+  }
+  if (project !== undefined && canProvisionCaddyInternalCa(project)) {
+    options.push({
+      value: "provision-caddy-internal-ca",
+      label: "Configure Caddy Internal CA",
+      hint: "configure internal certificates in Caddy"
     });
   }
   if (project !== undefined && canPublishExposure(project)) {
@@ -135,6 +178,16 @@ export async function runInteractiveApp(adapters) {
     clack.outro("Traefik provisioning complete.");
     return result;
   }
+  if (action === "provision-step-ca") {
+    const result = await adapters.runCommand(["service", "add", "step-ca"], adapters);
+    clack.outro("step-ca provisioning complete.");
+    return result;
+  }
+  if (action === "provision-caddy-internal-ca") {
+    const result = await adapters.runCommand(["service", "add", "caddy-internal-ca"], adapters);
+    clack.outro("Caddy Internal CA configuration complete.");
+    return result;
+  }
   if (action === "publish-exposure") {
     const result = await adapters.runCommand(["exposure", "publish"], adapters);
     clack.outro("Exposure published.");
@@ -159,6 +212,16 @@ export async function promptServiceName(project, prompts) {
     const description = INITIAL_PLATFORM_CATALOG.reverseProxy.find((option) => option.name === "traefik")?.description
       ?? "reverse proxy";
     choices.push({ value: "traefik", label: "Traefik reverse proxy", hint: description });
+  }
+  if (canProvisionStepCa(project)) {
+    const description = INITIAL_PLATFORM_CATALOG.certificateAuthority.find((option) => option.name === "step-ca")?.description
+      ?? "certificate authority";
+    choices.push({ value: "step-ca", label: "step-ca certificate authority", hint: description });
+  }
+  if (canProvisionCaddyInternalCa(project)) {
+    const description = INITIAL_PLATFORM_CATALOG.certificateAuthority.find((option) => option.name === "caddy-internal-ca")?.description
+      ?? "internal certificate authority";
+    choices.push({ value: "caddy-internal-ca", label: "Caddy Internal CA", hint: description });
   }
   if (choices.length === 0) {
     throw new Error("No platform services are waiting to be provisioned.");
@@ -301,6 +364,13 @@ export async function promptTraefikOptions(project, existingOptions, prompts) {
   return promptReverseProxyOptions(project, existingOptions, prompts, {
     deployment: TRAEFIK_DEPLOYMENT,
     label: "Traefik"
+  });
+}
+
+export async function promptStepCaOptions(project, existingOptions, prompts) {
+  return promptReverseProxyOptions(project, existingOptions, prompts, {
+    deployment: STEP_CA_DEPLOYMENT,
+    label: "step-ca"
   });
 }
 

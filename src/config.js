@@ -57,6 +57,12 @@ function parseScalar(rawValue) {
   if (rawValue.startsWith('"') || rawValue.startsWith("'")) {
     return JSON.parse(rawValue.replaceAll("'", '"'));
   }
+  if (rawValue === "true") {
+    return true;
+  }
+  if (rawValue === "false") {
+    return false;
+  }
   return rawValue;
 }
 
@@ -350,6 +356,16 @@ function appendManagedServices(lines, services) {
         `          port: ${service.exposure.backend.port}`,
         `        protocol: ${yamlScalar(service.exposure.protocol)}`
       );
+      if (service.exposure.certificateAuthority !== undefined) {
+        lines.push(`        certificateAuthority: ${yamlScalar(service.exposure.certificateAuthority)}`);
+      }
+      if (service.exposure.tls !== undefined) {
+        lines.push(
+          "        tls:",
+          `          mode: ${yamlScalar(service.exposure.tls.mode)}`,
+          `          trusted: ${service.exposure.tls.trusted}`
+        );
+      }
     }
   }
 }

@@ -8,6 +8,7 @@ export function publishManagedExposure({
 }) {
   const dnsService = project.config.managedInventory.platform.dns;
   const proxyService = project.config.managedInventory.platform.reverseProxy;
+  const caService = project.config.managedInventory.platform.certificateAuthority;
 
   if (dnsService?.service !== "technitium") {
     throw new Error("Technitium is not selected as the DNS provider for this project.");
@@ -21,6 +22,12 @@ export function publishManagedExposure({
   }
   if (project.state.providerReferences[proxyService.id] === undefined) {
     throw new Error(`${proxyLabel} must be provisioned before publishing an exposure.`);
+  }
+  if (caService !== null && caService !== undefined) {
+    const caLabel = caService.service === "caddy-internal-ca" ? "Caddy Internal CA" : caService.service;
+    if (project.state.providerReferences[caService.id] === undefined) {
+      throw new Error(`${caLabel} must be provisioned before publishing an exposure.`);
+    }
   }
 
   const technitiumAdapter = providerAdapters.technitium;
@@ -38,12 +45,26 @@ export function publishManagedExposure({
     hostname,
     ip: backendIp
   };
+
+  const caStrategy = caService?.service ?? "none";
+  let tlsOptions;
+  if (caStrategy === "caddy-internal-ca") {
+    tlsOptions = { mode: "caddy-internal-ca", issuer: "caddy-internal-ca", trusted: true };
+  } else if (caStrategy === "step-ca") {
+    const caIp = project.state.providerReferences[caService?.id]?.ip;
+    tlsOptions = { mode: "step-ca", issuer: "step-ca", ...(caIp ? { caIp } : {}), trusted: true };
+  } else {
+    tlsOptions = { mode: "untrusted", trusted: false };
+  }
+
   const routeRequest = {
     managedItemId: proxyService.id,
     hostname,
     backendIp,
     backendPort,
-    protocol: "https"
+    protocol: "https",
+    caStrategy,
+    tls: tlsOptions
   };
 
   technitiumAdapter.publishRecord(publishRequest);
@@ -58,11 +79,27 @@ export function publishManagedExposure({
     providerReferences: collectManagedProxyReferences(project, hostname)
   });
 
+  let caInspection;
+  let caExposureHealth;
+  if (caService !== null && caService !== undefined) {
+    const caAdapter = providerAdapters[caService.service] ?? providerAdapters[proxyService.service];
+    if (caAdapter !== undefined) {
+      const caPlugin = getPlatformProvider(caService.service);
+      caInspection = caPlugin.inspect(caAdapter, caService, {
+        providerReferences: collectManagedCaReferences(project, hostname)
+      });
+      caExposureHealth = caAdapter.healthCheckExposure?.({ hostname, backendIp, backendPort })
+        ?? { tls: "valid", issuer: caService.service, status: "healthy" };
+    }
+  }
+
   const dnsExposureHealth = technitiumAdapter.healthCheckExposure?.({ hostname, backendIp, backendPort })
     ?? { dns: "reachable", status: "healthy" };
   const proxyExposureHealth = proxyAdapter.healthCheckExposure?.({ hostname, backendIp, backendPort })
     ?? { https: "reachable", status: "healthy" };
-  const healthy = dnsExposureHealth.status === "healthy" && proxyExposureHealth.status === "healthy";
+  const healthy = dnsExposureHealth.status === "healthy"
+    && proxyExposureHealth.status === "healthy"
+    && (caExposureHealth === undefined || caExposureHealth.status === "healthy");
 
   const existingService = project.config.managedInventory.services.find(
     (service) => service.exposure?.hostname === hostname
@@ -74,7 +111,12 @@ export function publishManagedExposure({
     exposure: {
       hostname,
       backend: { ip: backendIp, port: backendPort },
-      protocol: "https"
+      protocol: "https",
+      certificateAuthority: caStrategy,
+      tls: {
+        mode: tlsOptions.mode,
+        trusted: tlsOptions.trusted
+      }
     }
   };
 
@@ -83,14 +125,17 @@ export function publishManagedExposure({
     isUpdate: existingService !== undefined,
     dnsInspection,
     proxyInspection,
+    ...(caInspection !== undefined ? { caInspection } : {}),
     health: {
       status: healthy ? "healthy" : "unhealthy",
       dns: dnsExposureHealth,
-      reverseProxy: proxyExposureHealth
+      reverseProxy: proxyExposureHealth,
+      ...(caExposureHealth !== undefined ? { certificateAuthority: caExposureHealth } : {})
     },
     integrationReferences: {
       dns: hostname,
-      reverseProxy: hostname
+      reverseProxy: hostname,
+      ...(caService ? { certificateAuthority: hostname } : {})
     }
   };
 }
@@ -109,6 +154,16 @@ function collectManagedDnsReferences(project, hostname) {
 }
 
 function collectManagedProxyReferences(project, hostname) {
+  const references = project.config.managedInventory.services
+    .map((service) => service.exposure?.hostname)
+    .filter((value) => value !== undefined);
+  if (!references.includes(hostname)) {
+    references.push(hostname);
+  }
+  return references;
+}
+
+function collectManagedCaReferences(project, hostname) {
   const references = project.config.managedInventory.services
     .map((service) => service.exposure?.hostname)
     .filter((value) => value !== undefined);

@@ -18,10 +18,17 @@ export const TRAEFIK_DEPLOYMENT = Object.freeze({
   resourceRecommendations: Object.freeze({ cpus: 2, memoryMb: 512, diskGb: 4 })
 });
 
+export const STEP_CA_DEPLOYMENT = Object.freeze({
+  defaultHostname: "step-ca",
+  template: "debian-12-standard",
+  resourceRecommendations: Object.freeze({ cpus: 2, memoryMb: 512, diskGb: 4 })
+});
+
 const PLATFORM_DEPLOYMENTS = Object.freeze({
   technitium: TECHNITIUM_DEPLOYMENT,
   caddy: CADDY_DEPLOYMENT,
-  traefik: TRAEFIK_DEPLOYMENT
+  traefik: TRAEFIK_DEPLOYMENT,
+  "step-ca": STEP_CA_DEPLOYMENT
 });
 
 export function runIpPreflight(proxmox, ip) {

@@ -14,6 +14,7 @@ import {
   promptExposureOptions,
   promptInitOptions,
   promptServiceName,
+  promptStepCaOptions,
   promptTechnitiumOptions,
   promptTraefikOptions
 } from "./tui.js";
@@ -61,6 +62,12 @@ async function handleServiceCommand(argumentsList, adapters) {
   }
   if (resolvedServiceName === "traefik") {
     return addTraefikService(options, adapters);
+  }
+  if (resolvedServiceName === "step-ca") {
+    return addStepCaService(options, adapters);
+  }
+  if (resolvedServiceName === "caddy-internal-ca") {
+    return addCaddyInternalCaService(options, adapters);
   }
   throw new Error(`Unsupported service: ${resolvedServiceName}.`);
 }
@@ -235,6 +242,152 @@ async function addTraefikService(options, adapters) {
   return addReverseProxyService("traefik", "Traefik", promptTraefikOptions, options, adapters);
 }
 
+async function addStepCaService(options, adapters) {
+  const { filesystem, runtime, proxmox, providerAdapters = {} } = adapters;
+  assertProxmoxShell(runtime);
+
+  const project = loadProject(filesystem, options.projectDir);
+  const resolvedOptions = await promptStepCaOptions(project, options, adapters.prompts);
+  const dnsService = project.config.managedInventory.platform.dns;
+  const proxyService = project.config.managedInventory.platform.reverseProxy;
+  const caService = project.config.managedInventory.platform.certificateAuthority;
+
+  if (caService?.service !== "step-ca") {
+    throw new Error("step-ca is not selected as the certificate authority for this project.");
+  }
+  if (project.state.providerReferences[dnsService?.id] === undefined) {
+    throw new Error("Technitium must be provisioned before step-ca.");
+  }
+  if (project.state.providerReferences[proxyService?.id] === undefined) {
+    const proxyLabel = proxyService?.service === "traefik" ? "Traefik" : "Caddy";
+    throw new Error(`${proxyLabel} must be provisioned before step-ca.`);
+  }
+  if (project.state.providerReferences[caService.id] !== undefined) {
+    throw new Error("step-ca is already provisioned for this project.");
+  }
+  if (resolvedOptions.ip === undefined) {
+    throw new Error("Static IP is required.");
+  }
+  if (!isIpAddress(resolvedOptions.ip)) {
+    throw new Error(`Invalid static IP: ${resolvedOptions.ip}.`);
+  }
+
+  const providerAdapter = providerAdapters["step-ca"];
+  if (providerAdapter === undefined) {
+    throw new Error("step-ca provider adapter is unavailable.");
+  }
+  if (proxmox === undefined) {
+    throw new Error("Proxmox adapter is unavailable.");
+  }
+
+  const result = await provisionPlatformService({
+    project,
+    platformKey: "certificateAuthority",
+    serviceName: "step-ca",
+    managedItem: caService,
+    options: resolvedOptions,
+    proxmox,
+    providerAdapter
+  });
+
+  const deployment = {
+    ip: resolvedOptions.ip,
+    hostname: result.lxcSpec.hostname,
+    bridge: result.lxcSpec.bridge,
+    storage: result.lxcSpec.storage,
+    resources: result.lxcSpec.resources
+  };
+  const updatedConfig = updatePlatformDeployment(project.config, "certificateAuthority", deployment);
+  const updatedState = {
+    ...project.state,
+    providerReferences: {
+      ...project.state.providerReferences,
+      [caService.id]: result.providerReference
+    }
+  };
+
+  writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
+  writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
+  filesystem.chmod(project.statePath, 0o600);
+
+  return {
+    ...formatPlatformProvisionResult({
+      serviceLabel: "step-ca",
+      ip: resolvedOptions.ip,
+      hostname: result.lxcSpec.hostname,
+      providerReference: result.providerReference,
+      warnings: result.warnings,
+      health: result.health,
+      inspectedCount: result.inspection.unmanaged.length,
+      inspectedLabel: "unmanaged CA resource(s) preserved"
+    }),
+    inspection: result.inspection,
+    lxcSpec: result.lxcSpec,
+    providerReference: result.providerReference
+  };
+}
+
+async function addCaddyInternalCaService(options, adapters) {
+  const { filesystem, runtime, proxmox, providerAdapters = {} } = adapters;
+  assertProxmoxShell(runtime);
+
+  const project = loadProject(filesystem, options.projectDir);
+  const dnsService = project.config.managedInventory.platform.dns;
+  const proxyService = project.config.managedInventory.platform.reverseProxy;
+  const caService = project.config.managedInventory.platform.certificateAuthority;
+
+  if (caService?.service !== "caddy-internal-ca") {
+    throw new Error("Caddy Internal CA is not selected as the certificate authority for this project.");
+  }
+  if (project.state.providerReferences[dnsService?.id] === undefined) {
+    throw new Error("Technitium must be provisioned before Caddy Internal CA.");
+  }
+  if (project.state.providerReferences[proxyService?.id] === undefined) {
+    throw new Error("Caddy must be provisioned before Caddy Internal CA.");
+  }
+  if (project.state.providerReferences[caService.id] !== undefined) {
+    throw new Error("Caddy Internal CA is already configured for this project.");
+  }
+
+  const caddyRef = project.state.providerReferences[proxyService.id];
+  const providerAdapter = providerAdapters["caddy-internal-ca"] ?? providerAdapters.caddy;
+  if (providerAdapter === undefined) {
+    throw new Error("Caddy Internal CA provider adapter is unavailable.");
+  }
+
+  const plugin = getPlatformProvider("caddy-internal-ca");
+  const setupPlan = plugin.setup(providerAdapter, caService);
+  const commands = setupPlan.lxcCommands ?? setupPlan.operations ?? [];
+  if (proxmox?.pctExec) {
+    for (const command of commands) {
+      proxmox.pctExec(caddyRef.vmid, command);
+    }
+  }
+
+  const inspection = plugin.inspect(providerAdapter, caService, { providerReferences: [] });
+  const health = plugin.healthCheck(providerAdapter, caService);
+  const providerReference = { vmid: caddyRef.vmid, service: "caddy-internal-ca" };
+
+  const updatedState = {
+    ...project.state,
+    providerReferences: {
+      ...project.state.providerReferences,
+      [caService.id]: providerReference
+    }
+  };
+
+  writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
+  filesystem.chmod(project.statePath, 0o600);
+
+  const healthLabel = health.status === "healthy" ? "healthy" : "unhealthy";
+  return {
+    stdout: `Caddy Internal CA configured in Caddy (vmid ${caddyRef.vmid}). Inspected ${inspection.managed.length} managed CA resource(s). Health: ${healthLabel}.\n`,
+    health,
+    inspection,
+    providerReference
+  };
+}
+
 async function publishExposure(options, adapters) {
   const { filesystem, providerAdapters = {} } = adapters;
   assertProxmoxShell(adapters.runtime);
@@ -270,6 +423,7 @@ async function publishExposure(options, adapters) {
     health: result.health,
     dnsInspection: result.dnsInspection,
     proxyInspection: result.proxyInspection,
+    ...(result.caInspection !== undefined ? { caInspection: result.caInspection } : {}),
     managedService: result.managedService
   };
 }
