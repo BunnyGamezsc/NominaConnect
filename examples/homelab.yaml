@@ -1,0 +1,28 @@
+# Illustrative source-of-truth configuration; not yet consumed by software.
+apiVersion: nomina.connect/v0alpha1
+kind: Homelab
+metadata:
+  name: bunnyhome
+spec:
+  environment:
+    type: linux-manual
+    host: gateway.bunnyhome.com
+
+  platform:
+    dns:
+      service: technitium
+    reverseProxy:
+      service: caddy
+    certificates:
+      service: caddy-internal-ca
+    vpn:
+      service: tailscale
+      enabled: false
+
+  applications:
+    - name: photos
+      service: example-http
+      domain: photos.bunnyhome.com
+      upstream:
+        host: 127.0.0.1
+        port: 3000
