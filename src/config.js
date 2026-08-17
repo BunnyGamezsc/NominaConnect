@@ -141,23 +141,149 @@ export function parseProjectConfiguration(content) {
       }
       continue;
     }
+    if (line === "services:") {
+      const servicesIndent = lines[index].match(/^(\s*)/)?.[1].length ?? 0;
+      index += 1;
+      config.managedInventory.services = readServiceList(lines, index, servicesIndent);
+      index = skipServiceList(lines, index, servicesIndent);
+      continue;
+    }
     index += 1;
   }
 
   return config;
 }
 
-export function loadProject(filesystem, projectDirectory) {
-  const configPath = joinPath(projectDirectory, "nomina.yaml");
-  if (!filesystem.exists(configPath)) {
-    throw new Error(`No NominaConnect project found at ${configPath}.`);
+function readServiceList(lines, startIndex, parentIndent) {
+  const services = [];
+  let index = startIndex;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (line === undefined || line.trim() === "" || line.trim().startsWith("#")) {
+      index += 1;
+      continue;
+    }
+    const indent = line.match(/^(\s*)/)?.[1].length ?? 0;
+    if (indent <= parentIndent && line.trim() !== "") {
+      break;
+    }
+    if (line.trim() === "[]") {
+      return [];
+    }
+    if (!line.trim().startsWith("-")) {
+      break;
+    }
+    const itemIndent = indent;
+    index += 1;
+    const item = {};
+    while (index < lines.length) {
+      const itemLine = lines[index];
+      if (itemLine === undefined || itemLine.trim() === "" || itemLine.trim().startsWith("#")) {
+        index += 1;
+        continue;
+      }
+      const itemLineIndent = itemLine.match(/^(\s*)/)?.[1].length ?? 0;
+      if (itemLineIndent <= itemIndent) {
+        break;
+      }
+      const trimmed = itemLine.trim();
+      const match = trimmed.match(/^(\w+):\s*(.*)$/);
+      if (match === null) {
+        index += 1;
+        continue;
+      }
+      const [, key, rawValue] = match;
+      if (rawValue === "") {
+        const nested = readNestedBlock(lines, index + 1, itemLineIndent);
+        item[key] = nested.value;
+        index = nested.nextIndex;
+        continue;
+      }
+      item[key] = rawValue === "null" ? null : parseScalar(rawValue);
+      index += 1;
+    }
+    services.push(item);
   }
-  const statePath = joinPath(projectDirectory, ".nomina/state.json");
+  return services;
+}
+
+function skipServiceList(lines, startIndex, parentIndent) {
+  let index = startIndex;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (line === undefined || line.trim() === "" || line.trim().startsWith("#")) {
+      index += 1;
+      continue;
+    }
+    const indent = line.match(/^(\s*)/)?.[1].length ?? 0;
+    if (indent <= parentIndent && line.trim() !== "") {
+      break;
+    }
+    if (line.trim() === "[]") {
+      return index + 1;
+    }
+    if (!line.trim().startsWith("-")) {
+      break;
+    }
+    index += 1;
+    while (index < lines.length) {
+      const nestedLine = lines[index];
+      if (nestedLine === undefined || nestedLine.trim() === "" || nestedLine.trim().startsWith("#")) {
+        index += 1;
+        continue;
+      }
+      const nestedIndent = nestedLine.match(/^(\s*)/)?.[1].length ?? 0;
+      if (nestedIndent <= indent) {
+        break;
+      }
+      index += 1;
+    }
+  }
+  return index;
+}
+
+export function upsertManagedExposure(config, managedService) {
+  const services = config.managedInventory.services.filter(
+    (service) => service.exposure?.hostname !== managedService.exposure.hostname
+  );
+  return {
+    ...config,
+    managedInventory: {
+      ...config.managedInventory,
+      services: [...services, managedService]
+    }
+  };
+}
+
+export function findProjectDirectory(filesystem, startDirectory = ".") {
+  let current = normalizeDirectory(startDirectory);
+  while (true) {
+    if (filesystem.exists(joinPath(current, "nomina.yaml"))) {
+      return current;
+    }
+    const parent = parentDirectory(current);
+    if (parent === current) {
+      return undefined;
+    }
+    current = parent;
+  }
+}
+
+export function loadProject(filesystem, projectDirectory) {
+  const resolvedDirectory = projectDirectory ?? findProjectDirectory(filesystem);
+  if (resolvedDirectory === undefined) {
+    throw new Error("No NominaConnect project found. Run nomina init from the folder where you want your homelab config.");
+  }
+  const configPath = joinPath(resolvedDirectory, "nomina.yaml");
+  if (!filesystem.exists(configPath)) {
+    throw new Error("No NominaConnect project found. Run nomina init from the folder where you want your homelab config.");
+  }
+  const statePath = joinPath(resolvedDirectory, ".nomina/state.json");
   if (!filesystem.exists(statePath)) {
-    throw new Error(`NominaConnect operational state is missing at ${statePath}.`);
+    throw new Error("No NominaConnect project found. Run nomina init from the folder where you want your homelab config.");
   }
   return {
-    projectDirectory,
+    projectDirectory: resolvedDirectory,
     configPath,
     statePath,
     config: parseProjectConfiguration(filesystem.read(configPath)),
@@ -198,12 +324,34 @@ export function serializeProjectConfiguration(config) {
   appendPlatformService(lines, "    reverseProxy", config.managedInventory.platform.reverseProxy);
   appendPlatformService(lines, "    certificateAuthority", config.managedInventory.platform.certificateAuthority);
   appendPlatformService(lines, "    vpn", config.managedInventory.platform.vpn);
-  lines.push("  services: []", "connectionSecretReferences:");
+  appendManagedServices(lines, config.managedInventory.services);
+  lines.push("connectionSecretReferences:");
   for (const [id, reference] of Object.entries(config.connectionSecretReferences)) {
     lines.push(`  ${id}: ${reference}`);
   }
   lines.push("");
   return lines.join("\n");
+}
+
+function appendManagedServices(lines, services) {
+  if (services.length === 0) {
+    lines.push("  services: []");
+    return;
+  }
+  lines.push("  services:");
+  for (const service of services) {
+    lines.push(`    - id: ${service.id}`, `      name: ${yamlScalar(service.name)}`);
+    if (service.exposure !== undefined) {
+      lines.push(
+        "      exposure:",
+        `        hostname: ${yamlScalar(service.exposure.hostname)}`,
+        "        backend:",
+        `          ip: ${yamlScalar(service.exposure.backend.ip)}`,
+        `          port: ${service.exposure.backend.port}`,
+        `        protocol: ${yamlScalar(service.exposure.protocol)}`
+      );
+    }
+  }
 }
 
 function appendPlatformService(lines, field, service) {
@@ -237,4 +385,23 @@ function yamlScalar(value) {
 
 function joinPath(...parts) {
   return parts.join("/").replaceAll(/\/{2,}/g, "/");
+}
+
+function normalizeDirectory(directory) {
+  if (directory === ".") {
+    return ".";
+  }
+  return directory.replace(/\/+$/, "") || "/";
+}
+
+function parentDirectory(directory) {
+  const normalized = normalizeDirectory(directory);
+  if (normalized === ".") {
+    return ".";
+  }
+  const index = normalized.lastIndexOf("/");
+  if (index <= 0) {
+    return "/";
+  }
+  return normalized.slice(0, index);
 }

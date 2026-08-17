@@ -6,6 +6,17 @@ export const TECHNITIUM_DEPLOYMENT = Object.freeze({
   resourceRecommendations: Object.freeze({ cpus: 2, memoryMb: 1024, diskGb: 8 })
 });
 
+export const CADDY_DEPLOYMENT = Object.freeze({
+  defaultHostname: "caddy",
+  template: "debian-12-standard",
+  resourceRecommendations: Object.freeze({ cpus: 2, memoryMb: 512, diskGb: 4 })
+});
+
+const PLATFORM_DEPLOYMENTS = Object.freeze({
+  technitium: TECHNITIUM_DEPLOYMENT,
+  caddy: CADDY_DEPLOYMENT
+});
+
 export function runIpPreflight(proxmox, ip) {
   const result = proxmox.checkIpAvailability(ip);
   if (result.status === "known-collision") {
@@ -22,7 +33,7 @@ export function runIpPreflight(proxmox, ip) {
 }
 
 export function resolveServiceDeployment(project, serviceName, options) {
-  const deploymentDefaults = serviceName === "technitium" ? TECHNITIUM_DEPLOYMENT : undefined;
+  const deploymentDefaults = PLATFORM_DEPLOYMENTS[serviceName];
   if (deploymentDefaults === undefined) {
     throw new Error(`Unsupported service deployment: ${serviceName}.`);
   }
@@ -67,7 +78,7 @@ export async function provisionPlatformService({
 
   const providerReferences = serviceName === "technitium"
     ? [project.config.baseLocalDomain]
-    : (setupPlan.managedResources ?? []).map((resource) => resource.id);
+    : [];
   const inspection = plugin.inspect(providerAdapter, managedItem, { providerReferences });
   const health = plugin.healthCheck(providerAdapter, managedItem);
 

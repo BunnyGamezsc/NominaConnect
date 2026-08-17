@@ -3,42 +3,78 @@ import { INITIAL_PLATFORM_CATALOG, certificateAuthorityIsCompatible, hasCatalogO
 import {
   loadProject,
   serializeProjectConfiguration,
-  updatePlatformDeployment
+  updatePlatformDeployment,
+  upsertManagedExposure
 } from "./config.js";
+import { publishManagedExposure } from "./exposure.js";
 import { getPlatformProvider } from "./providers.js";
 import { provisionPlatformService } from "./provisioning.js";
-
-const DEFAULTS = Object.freeze({ dns: "technitium", certificateAuthority: "none", vpn: "none" });
+import {
+  promptCaddyOptions,
+  promptExposureOptions,
+  promptInitOptions,
+  promptServiceName,
+  promptTechnitiumOptions
+} from "./tui.js";
 
 export async function runCli(argumentsList, adapters) {
+  if (argumentsList.length === 0) {
+    if (adapters.interactive?.run === undefined) {
+      throw new Error("Run nomina from an interactive terminal, or pass a command such as init or service add.");
+    }
+    return adapters.interactive.run(adapters);
+  }
+
   const [command, ...rest] = argumentsList;
   switch (command) {
     case "init":
       return initializeProject(parseInitOptions(rest), adapters);
     case "service":
       return handleServiceCommand(rest, adapters);
+    case "exposure":
+      return handleExposureCommand(rest, adapters);
     default:
-      throw new Error("Usage: nomina init | nomina service add <name>");
+      throw new Error("Unknown command. Run nomina for the interactive menu.");
   }
 }
 
 async function handleServiceCommand(argumentsList, adapters) {
-  const [subcommand, serviceName, ...rawOptions] = argumentsList;
+  const [subcommand, ...rest] = argumentsList;
   if (subcommand !== "add") {
-    throw new Error("Usage: nomina service add <name>");
+    throw new Error("Run nomina for the interactive menu, or use: nomina service add <name>");
   }
-  if (serviceName === "technitium") {
-    return addTechnitiumService(parseServiceAddOptions(rawOptions), adapters);
+
+  const [serviceName, ...rawOptions] = rest[0]?.startsWith("--") ? [undefined, ...rest] : rest;
+  const options = parseServiceAddOptions(rawOptions);
+  let resolvedServiceName = serviceName;
+  if (resolvedServiceName === undefined) {
+    const project = loadProject(adapters.filesystem, options.projectDir);
+    resolvedServiceName = await promptServiceName(project, adapters.prompts);
   }
-  throw new Error(`Unsupported service: ${serviceName}.`);
+
+  if (resolvedServiceName === "technitium") {
+    return addTechnitiumService(options, adapters);
+  }
+  if (resolvedServiceName === "caddy") {
+    return addCaddyService(options, adapters);
+  }
+  throw new Error(`Unsupported service: ${resolvedServiceName}.`);
+}
+
+async function handleExposureCommand(argumentsList, adapters) {
+  const [subcommand, ...rest] = argumentsList;
+  if (subcommand !== "publish") {
+    throw new Error("Run nomina for the interactive menu, or use: nomina exposure publish");
+  }
+  return publishExposure(parseExposurePublishOptions(rest), adapters);
 }
 
 async function addTechnitiumService(options, adapters) {
   const { filesystem, runtime, proxmox, providerAdapters = {} } = adapters;
   assertProxmoxShell(runtime);
 
-  const projectDirectory = options.projectDir ?? ".";
-  const project = loadProject(filesystem, projectDirectory);
+  const project = loadProject(filesystem, options.projectDir);
+  const resolvedOptions = await promptTechnitiumOptions(project, options, adapters.prompts);
   const dnsService = project.config.managedInventory.platform.dns;
   if (dnsService?.service !== "technitium") {
     throw new Error("Technitium is not selected as the DNS provider for this project.");
@@ -46,11 +82,11 @@ async function addTechnitiumService(options, adapters) {
   if (project.state.providerReferences[dnsService.id] !== undefined) {
     throw new Error("Technitium is already provisioned for this project.");
   }
-  if (options.ip === undefined) {
-    throw new Error("Requested service IP is required (--ip).");
+  if (resolvedOptions.ip === undefined) {
+    throw new Error("Static IP is required.");
   }
-  if (!isIpAddress(options.ip)) {
-    throw new Error(`Invalid requested service IP: ${options.ip}.`);
+  if (!isIpAddress(resolvedOptions.ip)) {
+    throw new Error(`Invalid static IP: ${resolvedOptions.ip}.`);
   }
 
   const providerAdapter = providerAdapters.technitium;
@@ -66,13 +102,13 @@ async function addTechnitiumService(options, adapters) {
     platformKey: "dns",
     serviceName: "technitium",
     managedItem: dnsService,
-    options,
+    options: resolvedOptions,
     proxmox,
     providerAdapter
   });
 
   const deployment = {
-    ip: options.ip,
+    ip: resolvedOptions.ip,
     hostname: result.lxcSpec.hostname,
     bridge: result.lxcSpec.bridge,
     storage: result.lxcSpec.storage,
@@ -91,19 +127,138 @@ async function addTechnitiumService(options, adapters) {
   writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
   filesystem.chmod(project.statePath, 0o600);
 
-  const warningText = result.warnings.length > 0
-    ? `\nWarning: ${result.warnings.join("\nWarning: ")}\n`
-    : "";
-  const healthLabel = result.health.status === "healthy" ? "healthy" : "unhealthy";
-  const inspectedCount = result.inspection.managed.length;
-
   return {
-    stdout: `${warningText}Technitium provisioned at ${options.ip} on ${result.lxcSpec.hostname} (vmid ${result.providerReference.vmid}). Inspected ${inspectedCount} managed DNS resource(s). Health: ${healthLabel}.\n`,
-    warnings: result.warnings,
-    health: result.health,
+    ...formatPlatformProvisionResult({
+      serviceLabel: "Technitium",
+      ip: resolvedOptions.ip,
+      hostname: result.lxcSpec.hostname,
+      providerReference: result.providerReference,
+      warnings: result.warnings,
+      health: result.health,
+      inspectedCount: result.inspection.managed.length,
+      inspectedLabel: "managed DNS resource(s)"
+    }),
     inspection: result.inspection,
     lxcSpec: result.lxcSpec,
     providerReference: result.providerReference
+  };
+}
+
+async function addCaddyService(options, adapters) {
+  const { filesystem, runtime, proxmox, providerAdapters = {} } = adapters;
+  assertProxmoxShell(runtime);
+
+  const project = loadProject(filesystem, options.projectDir);
+  const resolvedOptions = await promptCaddyOptions(project, options, adapters.prompts);
+  const dnsService = project.config.managedInventory.platform.dns;
+  const proxyService = project.config.managedInventory.platform.reverseProxy;
+  if (proxyService?.service !== "caddy") {
+    throw new Error("Caddy is not selected as the reverse proxy for this project.");
+  }
+  if (project.state.providerReferences[dnsService.id] === undefined) {
+    throw new Error("Technitium must be provisioned before Caddy.");
+  }
+  if (project.state.providerReferences[proxyService.id] !== undefined) {
+    throw new Error("Caddy is already provisioned for this project.");
+  }
+  if (resolvedOptions.ip === undefined) {
+    throw new Error("Static IP is required.");
+  }
+  if (!isIpAddress(resolvedOptions.ip)) {
+    throw new Error(`Invalid static IP: ${resolvedOptions.ip}.`);
+  }
+
+  const providerAdapter = providerAdapters.caddy;
+  if (providerAdapter === undefined) {
+    throw new Error("Caddy provider adapter is unavailable.");
+  }
+  if (proxmox === undefined) {
+    throw new Error("Proxmox adapter is unavailable.");
+  }
+
+  const result = await provisionPlatformService({
+    project,
+    platformKey: "reverseProxy",
+    serviceName: "caddy",
+    managedItem: proxyService,
+    options: resolvedOptions,
+    proxmox,
+    providerAdapter
+  });
+
+  const deployment = {
+    ip: resolvedOptions.ip,
+    hostname: result.lxcSpec.hostname,
+    bridge: result.lxcSpec.bridge,
+    storage: result.lxcSpec.storage,
+    resources: result.lxcSpec.resources
+  };
+  const updatedConfig = updatePlatformDeployment(project.config, "reverseProxy", deployment);
+  const updatedState = {
+    ...project.state,
+    providerReferences: {
+      ...project.state.providerReferences,
+      [proxyService.id]: result.providerReference
+    }
+  };
+
+  writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
+  writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
+  filesystem.chmod(project.statePath, 0o600);
+
+  return {
+    ...formatPlatformProvisionResult({
+      serviceLabel: "Caddy",
+      ip: resolvedOptions.ip,
+      hostname: result.lxcSpec.hostname,
+      providerReference: result.providerReference,
+      warnings: result.warnings,
+      health: result.health,
+      inspectedCount: result.inspection.unmanaged.length,
+      inspectedLabel: "unmanaged proxy route(s) preserved"
+    }),
+    inspection: result.inspection,
+    lxcSpec: result.lxcSpec,
+    providerReference: result.providerReference
+  };
+}
+
+async function publishExposure(options, adapters) {
+  const { filesystem, providerAdapters = {} } = adapters;
+  assertProxmoxShell(adapters.runtime);
+
+  const project = loadProject(filesystem, options.projectDir);
+  const resolvedOptions = await promptExposureOptions(project, options, adapters.prompts);
+  validateExposureOptions(resolvedOptions);
+
+  const result = publishManagedExposure({
+    project,
+    options: resolvedOptions,
+    providerAdapters
+  });
+
+  const updatedConfig = upsertManagedExposure(project.config, result.managedService);
+  const updatedState = {
+    ...project.state,
+    providerReferences: {
+      ...project.state.providerReferences,
+      [result.managedService.id]: result.integrationReferences
+    }
+  };
+
+  writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
+  writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
+  filesystem.chmod(project.statePath, 0o600);
+
+  const actionLabel = result.isUpdate ? "updated" : "published";
+  const healthLabel = result.health.status === "healthy" ? "healthy" : "unhealthy";
+
+  return {
+    stdout: `Exposure ${actionLabel} for ${resolvedOptions.hostname} via HTTPS at ${resolvedOptions.backendIp}:${resolvedOptions.backendPort}. Health: ${healthLabel}.\n`,
+    health: result.health,
+    dnsInspection: result.dnsInspection,
+    proxyInspection: result.proxyInspection,
+    managedService: result.managedService
   };
 }
 
@@ -111,13 +266,13 @@ async function initializeProject(options, adapters) {
   const { filesystem, runtime } = adapters;
   assertProxmoxShell(runtime);
 
-  const projectDirectory = options.projectDir ?? ".";
+  const projectDirectory = options.projectDir ?? adapters.cwd ?? ".";
   const configPath = joinPath(projectDirectory, "nomina.yaml");
   if (filesystem.exists(configPath)) {
     throw new Error(`A NominaConnect project already exists at ${configPath}.`);
   }
 
-  const answers = await resolveAnswers(options, adapters.prompts);
+  const answers = await promptInitOptions(options, adapters.prompts);
   validateAnswers(answers);
 
   const stateDirectory = joinPath(projectDirectory, ".nomina");
@@ -189,6 +344,57 @@ function parseServiceAddOptions(rawOptions) {
   return options;
 }
 
+function parseExposurePublishOptions(rawOptions) {
+  const options = {};
+  const optionNames = new Map([
+    ["--project-dir", "projectDir"],
+    ["--name", "name"],
+    ["--hostname", "hostname"],
+    ["--backend-ip", "backendIp"],
+    ["--backend-port", "backendPort"]
+  ]);
+  parseFlagOptions(rawOptions, optionNames, options);
+  if (options.backendPort !== undefined) {
+    options.backendPort = Number(options.backendPort);
+  }
+  return options;
+}
+
+function validateExposureOptions(options) {
+  for (const field of ["name", "hostname", "backendIp", "backendPort"]) {
+    if (options[field] === undefined || options[field] === "") {
+      throw new Error(`${field} is required.`);
+    }
+  }
+  if (!isIpAddress(options.backendIp)) {
+    throw new Error(`Invalid backend IP: ${options.backendIp}.`);
+  }
+  if (!Number.isInteger(options.backendPort) || options.backendPort <= 0) {
+    throw new Error(`Invalid backend port: ${options.backendPort}.`);
+  }
+}
+
+function formatPlatformProvisionResult({
+  serviceLabel,
+  ip,
+  hostname,
+  providerReference,
+  warnings,
+  health,
+  inspectedCount,
+  inspectedLabel
+}) {
+  const warningText = warnings.length > 0
+    ? `\nWarning: ${warnings.join("\nWarning: ")}\n`
+    : "";
+  const healthLabel = health.status === "healthy" ? "healthy" : "unhealthy";
+  return {
+    stdout: `${warningText}${serviceLabel} provisioned at ${ip} on ${hostname} (vmid ${providerReference.vmid}). Inspected ${inspectedCount} ${inspectedLabel}. Health: ${healthLabel}.\n`,
+    warnings,
+    health
+  };
+}
+
 function parseFlagOptions(rawOptions, optionNames, options) {
   for (let index = 0; index < rawOptions.length; index += 2) {
     const key = optionNames.get(rawOptions[index]);
@@ -198,39 +404,6 @@ function parseFlagOptions(rawOptions, optionNames, options) {
     }
     options[key] = value;
   }
-}
-
-async function resolveAnswers(options, prompts) {
-  const ask = async (field, question, fallback) => {
-    if (options[field] !== undefined) return options[field];
-    if (prompts?.ask) return prompts.ask(question, fallback);
-    return fallback;
-  };
-
-  const node = await ask("node", "Proxmox node", undefined);
-  const bridge = await ask("bridge", "Default network bridge", undefined);
-  const storage = await ask("storage", "Default storage target", undefined);
-  const domain = await ask("domain", "Base local domain", undefined);
-  const dns = await ask("dns", choicePrompt("DNS provider", "dns"), DEFAULTS.dns);
-  const reverseProxy = await ask("reverseProxy", choicePrompt("Reverse proxy", "reverseProxy"), undefined);
-  const certificateAuthority = await ask(
-    "certificateAuthority",
-    choicePrompt("Certificate authority", "certificateAuthority", reverseProxy),
-    DEFAULTS.certificateAuthority
-  );
-  const vpn = await ask("vpn", choicePrompt("VPN provider", "vpn"), DEFAULTS.vpn);
-
-  return { node, bridge, storage, domain, dns, reverseProxy, certificateAuthority, vpn };
-}
-
-function choicePrompt(label, category, reverseProxy = undefined) {
-  const options = INITIAL_PLATFORM_CATALOG[category]
-    .filter((option) => option.compatibleWith === undefined || option.compatibleWith.includes(reverseProxy))
-    .map((option) => `${option.name} — ${option.description}`);
-  if (category === "certificateAuthority" || category === "vpn") {
-    options.unshift("none — skip this optional platform layer");
-  }
-  return `${label} (${options.join("; ")})`;
 }
 
 function validateAnswers(answers) {
