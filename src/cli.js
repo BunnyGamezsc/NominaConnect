@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { INITIAL_PLATFORM_CATALOG, certificateAuthorityIsCompatible, getPlatformProvider, hasCatalogOption } from "./catalog.js";
+import { INITIAL_PLATFORM_CATALOG, certificateAuthorityIsCompatible, hasCatalogOption } from "./catalog.js";
+import { getPlatformProvider } from "./providers.js";
 
 const DEFAULTS = Object.freeze({ dns: "technitium", certificateAuthority: "none", vpn: "none" });
 
@@ -37,15 +38,15 @@ async function initializeProject(options, adapters) {
 
   const managedInventory = createManagedInventory(answers);
   const setupPlan = createSetupPlan(managedInventory, adapters.providerAdapters);
+  const secretReferences = createSecretReferences(managedInventory);
   const state = {
     version: 1,
-    secretReferences: {},
     providerReferences: {},
     tracking: { notices: [] }
   };
-  writeAtomically(filesystem, configPath, serializeConfiguration(answers, managedInventory));
   writeAtomically(filesystem, joinPath(stateDirectory, "state.json"), `${JSON.stringify(state, null, 2)}\n`);
   filesystem.chmod(joinPath(stateDirectory, "state.json"), 0o600);
+  writeAtomically(filesystem, configPath, serializeConfiguration(answers, managedInventory, secretReferences));
 
   return {
     stdout: `NominaConnect project initialized at ${configPath}.\n`,
@@ -134,18 +135,29 @@ function createManagedInventory(answers) {
   };
 }
 
+function createSecretReferences(inventory) {
+  return Object.values(inventory.platform)
+    .filter((item) => item !== null)
+    .reduce((references, item) => ({
+      ...references,
+      [item.id]: `nominaconnect/provider/${item.id}`
+    }), {});
+}
+
+const PLAN_ONLY_ADAPTER = Object.freeze({
+  setup: (plan) => plan
+});
+
 function createSetupPlan(inventory, providerAdapters = {}) {
   const selectedProviders = Object.values(inventory.platform).filter((item) => item !== null);
   return selectedProviders.map((managedItem) => {
     const plugin = getPlatformProvider(managedItem.service);
-    const adapter = providerAdapters[managedItem.service] ?? {
-      setup: ({ provider, managedItem: item }) => ({ action: "setup", provider, managedItemId: item.id })
-    };
+    const adapter = providerAdapters[managedItem.service] ?? PLAN_ONLY_ADAPTER;
     return plugin.setup(adapter, managedItem);
   });
 }
 
-function serializeConfiguration(answers, inventory) {
+function serializeConfiguration(answers, inventory, secretReferences) {
   const lines = [
     "apiVersion: nomina.connect/v0alpha1",
     "kind: NominaConnect",
@@ -161,7 +173,11 @@ function serializeConfiguration(answers, inventory) {
   appendService(lines, "    reverseProxy", inventory.platform.reverseProxy);
   appendService(lines, "    certificateAuthority", inventory.platform.certificateAuthority);
   appendService(lines, "    vpn", inventory.platform.vpn);
-  lines.push("  services: []", "");
+  lines.push("  services: []", "connectionSecretReferences:");
+  for (const [id, reference] of Object.entries(secretReferences)) {
+    lines.push(`  ${id}: ${reference}`);
+  }
+  lines.push("");
   return lines.join("\n");
 }
 

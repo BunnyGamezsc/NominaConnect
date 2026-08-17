@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { getPlatformProvider, runCli } from "../src/cli.js";
+import { runCli } from "../src/cli.js";
 
 const proxmoxRootRuntime = () => ({ isRoot: () => true, isProxmoxHost: () => true });
 
@@ -79,14 +79,44 @@ test("nomina init writes a portable managed inventory and private operational st
   assert.match(config, /service: caddy-internal-ca/);
   assert.match(config, /service: tailscale/);
   assert.match(config, /id: nc_/);
-  assert.doesNotMatch(config, /secret/i);
-  assert.deepEqual(state.secretReferences, {});
+  assert.match(config, /connectionSecretReferences:/);
+  assert.match(config, /nominaconnect\/provider\/nc_/);
+  assert.deepEqual(state.providerReferences, {});
+  assert.doesNotMatch(filesystem.read("/projects/bunnyhome/.nomina/state.json"), /nominaconnect\/provider/);
   assert.equal(filesystem.modes.get("/projects/bunnyhome/.nomina"), 0o700);
   assert.equal(filesystem.modes.get("/projects/bunnyhome/.nomina/state.json"), 0o600);
   assert.deepEqual(setupCalls.map((call) => call.provider), ["caddy"]);
   assert.deepEqual(result.setupPlan.find((step) => step.provider === "caddy"), {
     command: "configure-caddy", provider: "caddy"
   });
+  assert.deepEqual(result.setupPlan.find((step) => step.provider === "technitium").operations, [
+    "install-technitium",
+    "configure-managed-zones"
+  ]);
+});
+
+test("nomina init can be retried after configuration persistence is interrupted", async () => {
+  class InterruptingFilesystem extends FakeFilesystem {
+    shouldInterrupt = true;
+
+    rename(from, to) {
+      if (this.shouldInterrupt && to.endsWith("nomina.yaml")) {
+        this.shouldInterrupt = false;
+        throw new Error("simulated interrupted configuration write");
+      }
+      super.rename(from, to);
+    }
+  }
+
+  const filesystem = new InterruptingFilesystem();
+  const command = [
+    "init", "--project-dir", "/projects/retry", "--node", "pve-1", "--bridge", "vmbr0",
+    "--storage", "local", "--domain", "home.test", "--reverse-proxy", "caddy"
+  ];
+
+  await assert.rejects(runCli(command, { filesystem, runtime: proxmoxRootRuntime() }), /interrupted configuration write/);
+  await assert.doesNotReject(runCli(command, { filesystem, runtime: proxmoxRootRuntime() }));
+  assert.match(filesystem.read("/projects/retry/nomina.yaml"), /node: pve-1/);
 });
 
 test("nomina init rejects a non-root Proxmox-shell invocation", async () => {
@@ -140,25 +170,6 @@ test("nomina init guides the platform bootstrap in dependency order with catalog
   assert.match(config, /service: traefik/);
   assert.match(config, /service: step-ca/);
   assert.match(config, /service: netbird/);
-});
-
-test("every selectable platform provider exposes setup, inspection, adoption, and health-check contracts", () => {
-  const adapter = {
-    setup: (request) => ({ action: "setup", ...request }),
-    inspect: (request) => ({ action: "inspect", ...request }),
-    adopt: (request) => ({ action: "adopt", ...request }),
-    healthCheck: (request) => ({ action: "healthCheck", ...request })
-  };
-  const managedItem = { id: "nc_example", service: "caddy" };
-  const caddy = getPlatformProvider("caddy");
-
-  assert.deepEqual(caddy.setup(adapter, managedItem), { action: "setup", provider: "caddy", managedItem });
-  assert.deepEqual(caddy.inspect(adapter, managedItem), { action: "inspect", provider: "caddy", managedItem });
-  assert.deepEqual(
-    caddy.adopt(adapter, managedItem, { routes: ["photos.home.test"] }),
-    { action: "adopt", provider: "caddy", managedItem, observedConfiguration: { routes: ["photos.home.test"] } }
-  );
-  assert.deepEqual(caddy.healthCheck(adapter, managedItem), { action: "healthCheck", provider: "caddy", managedItem });
 });
 
 test("nomina init rejects incompatible certificate authority choices", async () => {

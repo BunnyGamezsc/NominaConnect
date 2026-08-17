@@ -29,17 +29,3 @@ export function certificateAuthorityIsCompatible(authority, reverseProxy) {
     .find((option) => option.name === authority)
     ?.compatibleWith.includes(reverseProxy) === true;
 }
-
-export function getPlatformProvider(name) {
-  if (!allProviders.some((providerDefinition) => providerDefinition.name === name)) {
-    throw new Error(`Unsupported platform provider: ${name}.`);
-  }
-
-  return Object.freeze({
-    name,
-    setup: (adapter, managedItem) => adapter.setup({ provider: name, managedItem }),
-    inspect: (adapter, managedItem) => adapter.inspect({ provider: name, managedItem }),
-    adopt: (adapter, managedItem, observedConfiguration) => adapter.adopt({ provider: name, managedItem, observedConfiguration }),
-    healthCheck: (adapter, managedItem) => adapter.healthCheck({ provider: name, managedItem })
-  });
-}
