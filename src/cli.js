@@ -1,26 +1,115 @@
 import { randomUUID } from "node:crypto";
 import { INITIAL_PLATFORM_CATALOG, certificateAuthorityIsCompatible, hasCatalogOption } from "./catalog.js";
+import {
+  loadProject,
+  serializeProjectConfiguration,
+  updatePlatformDeployment
+} from "./config.js";
 import { getPlatformProvider } from "./providers.js";
+import { provisionPlatformService } from "./provisioning.js";
 
 const DEFAULTS = Object.freeze({ dns: "technitium", certificateAuthority: "none", vpn: "none" });
 
 export async function runCli(argumentsList, adapters) {
-  const [command, ...rawOptions] = argumentsList;
-  if (command !== "init") {
-    throw new Error("Usage: nomina init");
+  const [command, ...rest] = argumentsList;
+  switch (command) {
+    case "init":
+      return initializeProject(parseInitOptions(rest), adapters);
+    case "service":
+      return handleServiceCommand(rest, adapters);
+    default:
+      throw new Error("Usage: nomina init | nomina service add <name>");
+  }
+}
+
+async function handleServiceCommand(argumentsList, adapters) {
+  const [subcommand, serviceName, ...rawOptions] = argumentsList;
+  if (subcommand !== "add") {
+    throw new Error("Usage: nomina service add <name>");
+  }
+  if (serviceName === "technitium") {
+    return addTechnitiumService(parseServiceAddOptions(rawOptions), adapters);
+  }
+  throw new Error(`Unsupported service: ${serviceName}.`);
+}
+
+async function addTechnitiumService(options, adapters) {
+  const { filesystem, runtime, proxmox, providerAdapters = {} } = adapters;
+  assertProxmoxShell(runtime);
+
+  const projectDirectory = options.projectDir ?? ".";
+  const project = loadProject(filesystem, projectDirectory);
+  const dnsService = project.config.managedInventory.platform.dns;
+  if (dnsService?.service !== "technitium") {
+    throw new Error("Technitium is not selected as the DNS provider for this project.");
+  }
+  if (project.state.providerReferences[dnsService.id] !== undefined) {
+    throw new Error("Technitium is already provisioned for this project.");
+  }
+  if (options.ip === undefined) {
+    throw new Error("Requested service IP is required (--ip).");
+  }
+  if (!isIpAddress(options.ip)) {
+    throw new Error(`Invalid requested service IP: ${options.ip}.`);
   }
 
-  return initializeProject(parseOptions(rawOptions), adapters);
+  const providerAdapter = providerAdapters.technitium;
+  if (providerAdapter === undefined) {
+    throw new Error("Technitium provider adapter is unavailable.");
+  }
+  if (proxmox === undefined) {
+    throw new Error("Proxmox adapter is unavailable.");
+  }
+
+  const result = await provisionPlatformService({
+    project,
+    platformKey: "dns",
+    serviceName: "technitium",
+    managedItem: dnsService,
+    options,
+    proxmox,
+    providerAdapter
+  });
+
+  const deployment = {
+    ip: options.ip,
+    hostname: result.lxcSpec.hostname,
+    bridge: result.lxcSpec.bridge,
+    storage: result.lxcSpec.storage,
+    resources: result.lxcSpec.resources
+  };
+  const updatedConfig = updatePlatformDeployment(project.config, "dns", deployment);
+  const updatedState = {
+    ...project.state,
+    providerReferences: {
+      ...project.state.providerReferences,
+      [dnsService.id]: result.providerReference
+    }
+  };
+
+  writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
+  writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
+  filesystem.chmod(project.statePath, 0o600);
+
+  const warningText = result.warnings.length > 0
+    ? `\nWarning: ${result.warnings.join("\nWarning: ")}\n`
+    : "";
+  const healthLabel = result.health.status === "healthy" ? "healthy" : "unhealthy";
+  const inspectedCount = result.inspection.managed.length;
+
+  return {
+    stdout: `${warningText}Technitium provisioned at ${options.ip} on ${result.lxcSpec.hostname} (vmid ${result.providerReference.vmid}). Inspected ${inspectedCount} managed DNS resource(s). Health: ${healthLabel}.\n`,
+    warnings: result.warnings,
+    health: result.health,
+    inspection: result.inspection,
+    lxcSpec: result.lxcSpec,
+    providerReference: result.providerReference
+  };
 }
 
 async function initializeProject(options, adapters) {
   const { filesystem, runtime } = adapters;
-  if (!runtime.isRoot()) {
-    throw new Error("nomina init must run as root from the Proxmox shell.");
-  }
-  if (!runtime.isProxmoxHost()) {
-    throw new Error("nomina init must run on a Proxmox host with local pct control.");
-  }
+  assertProxmoxShell(runtime);
 
   const projectDirectory = options.projectDir ?? ".";
   const configPath = joinPath(projectDirectory, "nomina.yaml");
@@ -46,7 +135,20 @@ async function initializeProject(options, adapters) {
   };
   writeAtomically(filesystem, joinPath(stateDirectory, "state.json"), `${JSON.stringify(state, null, 2)}\n`);
   filesystem.chmod(joinPath(stateDirectory, "state.json"), 0o600);
-  writeAtomically(filesystem, configPath, serializeConfiguration(answers, managedInventory, secretReferences));
+  writeAtomically(
+    filesystem,
+    configPath,
+    serializeProjectConfiguration({
+      proxmox: {
+        node: answers.node,
+        defaultBridge: answers.bridge,
+        defaultStorage: answers.storage
+      },
+      baseLocalDomain: answers.domain,
+      managedInventory,
+      connectionSecretReferences: secretReferences
+    })
+  );
 
   return {
     stdout: `NominaConnect project initialized at ${configPath}.\n`,
@@ -57,14 +159,37 @@ async function initializeProject(options, adapters) {
   };
 }
 
-function parseOptions(rawOptions) {
+function parseInitOptions(rawOptions) {
   const options = {};
   const optionNames = new Map([
     ["--project-dir", "projectDir"], ["--node", "node"], ["--bridge", "bridge"],
     ["--storage", "storage"], ["--domain", "domain"], ["--dns", "dns"],
     ["--reverse-proxy", "reverseProxy"], ["--ca", "certificateAuthority"], ["--vpn", "vpn"]
   ]);
+  parseFlagOptions(rawOptions, optionNames, options);
+  return options;
+}
 
+function parseServiceAddOptions(rawOptions) {
+  const options = {};
+  const optionNames = new Map([
+    ["--project-dir", "projectDir"],
+    ["--ip", "ip"],
+    ["--bridge", "bridge"],
+    ["--storage", "storage"],
+    ["--hostname", "hostname"],
+    ["--cpus", "cpus"],
+    ["--memory", "memoryMb"],
+    ["--disk", "diskGb"]
+  ]);
+  parseFlagOptions(rawOptions, optionNames, options);
+  if (options.cpus !== undefined) options.cpus = Number(options.cpus);
+  if (options.memoryMb !== undefined) options.memoryMb = Number(options.memoryMb);
+  if (options.diskGb !== undefined) options.diskGb = Number(options.diskGb);
+  return options;
+}
+
+function parseFlagOptions(rawOptions, optionNames, options) {
   for (let index = 0; index < rawOptions.length; index += 2) {
     const key = optionNames.get(rawOptions[index]);
     const value = rawOptions[index + 1];
@@ -73,7 +198,6 @@ function parseOptions(rawOptions) {
     }
     options[key] = value;
   }
-  return options;
 }
 
 async function resolveAnswers(options, prompts) {
@@ -157,44 +281,21 @@ function createSetupPlan(inventory, providerAdapters = {}) {
   });
 }
 
-function serializeConfiguration(answers, inventory, secretReferences) {
-  const lines = [
-    "apiVersion: nomina.connect/v0alpha1",
-    "kind: NominaConnect",
-    "proxmox:",
-    `  node: ${yamlScalar(answers.node)}`,
-    `  defaultBridge: ${yamlScalar(answers.bridge)}`,
-    `  defaultStorage: ${yamlScalar(answers.storage)}`,
-    `baseLocalDomain: ${yamlScalar(answers.domain)}`,
-    "managedInventory:",
-    "  platform:"
-  ];
-  appendService(lines, "    dns", inventory.platform.dns);
-  appendService(lines, "    reverseProxy", inventory.platform.reverseProxy);
-  appendService(lines, "    certificateAuthority", inventory.platform.certificateAuthority);
-  appendService(lines, "    vpn", inventory.platform.vpn);
-  lines.push("  services: []", "connectionSecretReferences:");
-  for (const [id, reference] of Object.entries(secretReferences)) {
-    lines.push(`  ${id}: ${reference}`);
+function assertProxmoxShell(runtime) {
+  if (!runtime.isRoot()) {
+    throw new Error("nomina must run as root from the Proxmox shell.");
   }
-  lines.push("");
-  return lines.join("\n");
-}
-
-function appendService(lines, field, service) {
-  if (service === null) {
-    lines.push(`${field}: null`);
-    return;
+  if (!runtime.isProxmoxHost()) {
+    throw new Error("nomina must run on a Proxmox host with local pct control.");
   }
-  lines.push(`${field}:`, `      id: ${service.id}`, `      service: ${service.service}`);
-}
-
-function yamlScalar(value) {
-  return /^[A-Za-z0-9._-]+$/.test(value) ? value : JSON.stringify(value);
 }
 
 function isDomain(value) {
   return /^(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$/.test(value);
+}
+
+function isIpAddress(value) {
+  return /^(?:\d{1,3}\.){3}\d{1,3}$/.test(value);
 }
 
 function writeAtomically(filesystem, destination, content) {
