@@ -1,7 +1,7 @@
 import * as clack from "@clack/prompts";
 import { INITIAL_PLATFORM_CATALOG } from "./catalog.js";
 import { findProjectDirectory, loadProject } from "./config.js";
-import { TECHNITIUM_DEPLOYMENT, CADDY_DEPLOYMENT, TRAEFIK_DEPLOYMENT, STEP_CA_DEPLOYMENT } from "./provisioning.js";
+import { TECHNITIUM_DEPLOYMENT, CADDY_DEPLOYMENT, TRAEFIK_DEPLOYMENT, STEP_CA_DEPLOYMENT, TAILSCALE_DEPLOYMENT, NETBIRD_DEPLOYMENT } from "./provisioning.js";
 
 export function getProjectContext(filesystem, cwd = ".") {
   const projectDirectory = findProjectDirectory(filesystem, cwd);
@@ -67,6 +67,22 @@ export function canProvisionCaddyInternalCa(project) {
   return canProvisionCertificateAuthority(project, "caddy-internal-ca");
 }
 
+export function canProvisionVpn(project, serviceName) {
+  const vpnService = project?.config.managedInventory.platform.vpn;
+  if (vpnService?.service !== serviceName) {
+    return false;
+  }
+  return project.state.providerReferences[vpnService.id] === undefined;
+}
+
+export function canProvisionTailscale(project) {
+  return canProvisionVpn(project, "tailscale");
+}
+
+export function canProvisionNetbird(project) {
+  return canProvisionVpn(project, "netbird");
+}
+
 export function canPublishExposure(project) {
   const dnsService = project?.config.managedInventory.platform.dns;
   const proxyService = project?.config.managedInventory.platform.reverseProxy;
@@ -116,6 +132,20 @@ export function buildMenuOptions(project) {
       value: "provision-caddy-internal-ca",
       label: "Configure Caddy Internal CA",
       hint: "configure internal certificates in Caddy"
+    });
+  }
+  if (project !== undefined && canProvisionTailscale(project)) {
+    options.push({
+      value: "provision-tailscale",
+      label: "Provision Tailscale VPN",
+      hint: "create the Tailscale LXC"
+    });
+  }
+  if (project !== undefined && canProvisionNetbird(project)) {
+    options.push({
+      value: "provision-netbird",
+      label: "Provision NetBird VPN",
+      hint: "create the NetBird LXC"
     });
   }
   if (project !== undefined && canPublishExposure(project)) {
@@ -188,6 +218,16 @@ export async function runInteractiveApp(adapters) {
     clack.outro("Caddy Internal CA configuration complete.");
     return result;
   }
+  if (action === "provision-tailscale") {
+    const result = await adapters.runCommand(["service", "add", "tailscale"], adapters);
+    clack.outro("Tailscale provisioning complete.");
+    return result;
+  }
+  if (action === "provision-netbird") {
+    const result = await adapters.runCommand(["service", "add", "netbird"], adapters);
+    clack.outro("NetBird provisioning complete.");
+    return result;
+  }
   if (action === "publish-exposure") {
     const result = await adapters.runCommand(["exposure", "publish"], adapters);
     clack.outro("Exposure published.");
@@ -222,6 +262,16 @@ export async function promptServiceName(project, prompts) {
     const description = INITIAL_PLATFORM_CATALOG.certificateAuthority.find((option) => option.name === "caddy-internal-ca")?.description
       ?? "internal certificate authority";
     choices.push({ value: "caddy-internal-ca", label: "Caddy Internal CA", hint: description });
+  }
+  if (canProvisionTailscale(project)) {
+    const description = INITIAL_PLATFORM_CATALOG.vpn.find((option) => option.name === "tailscale")?.description
+      ?? "VPN service";
+    choices.push({ value: "tailscale", label: "Tailscale VPN", hint: description });
+  }
+  if (canProvisionNetbird(project)) {
+    const description = INITIAL_PLATFORM_CATALOG.vpn.find((option) => option.name === "netbird")?.description
+      ?? "VPN service";
+    choices.push({ value: "netbird", label: "NetBird VPN", hint: description });
   }
   if (choices.length === 0) {
     throw new Error("No platform services are waiting to be provisioned.");
@@ -371,6 +421,20 @@ export async function promptStepCaOptions(project, existingOptions, prompts) {
   return promptReverseProxyOptions(project, existingOptions, prompts, {
     deployment: STEP_CA_DEPLOYMENT,
     label: "step-ca"
+  });
+}
+
+export async function promptTailscaleOptions(project, existingOptions, prompts) {
+  return promptReverseProxyOptions(project, existingOptions, prompts, {
+    deployment: TAILSCALE_DEPLOYMENT,
+    label: "Tailscale"
+  });
+}
+
+export async function promptNetBirdOptions(project, existingOptions, prompts) {
+  return promptReverseProxyOptions(project, existingOptions, prompts, {
+    deployment: NETBIRD_DEPLOYMENT,
+    label: "NetBird"
   });
 }
 

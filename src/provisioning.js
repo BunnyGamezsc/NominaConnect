@@ -24,11 +24,25 @@ export const STEP_CA_DEPLOYMENT = Object.freeze({
   resourceRecommendations: Object.freeze({ cpus: 2, memoryMb: 512, diskGb: 4 })
 });
 
+export const TAILSCALE_DEPLOYMENT = Object.freeze({
+  defaultHostname: "tailscale",
+  template: "debian-12-standard",
+  resourceRecommendations: Object.freeze({ cpus: 1, memoryMb: 256, diskGb: 2 })
+});
+
+export const NETBIRD_DEPLOYMENT = Object.freeze({
+  defaultHostname: "netbird",
+  template: "debian-12-standard",
+  resourceRecommendations: Object.freeze({ cpus: 1, memoryMb: 256, diskGb: 2 })
+});
+
 const PLATFORM_DEPLOYMENTS = Object.freeze({
   technitium: TECHNITIUM_DEPLOYMENT,
   caddy: CADDY_DEPLOYMENT,
   traefik: TRAEFIK_DEPLOYMENT,
-  "step-ca": STEP_CA_DEPLOYMENT
+  "step-ca": STEP_CA_DEPLOYMENT,
+  tailscale: TAILSCALE_DEPLOYMENT,
+  netbird: NETBIRD_DEPLOYMENT
 });
 
 export function runIpPreflight(proxmox, ip) {

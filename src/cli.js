@@ -16,7 +16,9 @@ import {
   promptServiceName,
   promptStepCaOptions,
   promptTechnitiumOptions,
-  promptTraefikOptions
+  promptTraefikOptions,
+  promptTailscaleOptions,
+  promptNetBirdOptions
 } from "./tui.js";
 
 export async function runCli(argumentsList, adapters) {
@@ -68,6 +70,12 @@ async function handleServiceCommand(argumentsList, adapters) {
   }
   if (resolvedServiceName === "caddy-internal-ca") {
     return addCaddyInternalCaService(options, adapters);
+  }
+  if (resolvedServiceName === "tailscale") {
+    return addTailscaleService(options, adapters);
+  }
+  if (resolvedServiceName === "netbird") {
+    return addNetBirdService(options, adapters);
   }
   throw new Error(`Unsupported service: ${resolvedServiceName}.`);
 }
@@ -386,6 +394,89 @@ async function addCaddyInternalCaService(options, adapters) {
     inspection,
     providerReference
   };
+}
+
+async function addVpnService(serviceName, serviceLabel, promptOptions, options, adapters) {
+  const { filesystem, runtime, proxmox, providerAdapters = {} } = adapters;
+  assertProxmoxShell(runtime);
+
+  const project = loadProject(filesystem, options.projectDir);
+  const resolvedOptions = await promptOptions(project, options, adapters.prompts);
+  const vpnService = project.config.managedInventory.platform.vpn;
+  if (vpnService?.service !== serviceName) {
+    throw new Error(`${serviceLabel} is not selected as the VPN provider for this project.`);
+  }
+  if (project.state.providerReferences[vpnService.id] !== undefined) {
+    throw new Error(`${serviceLabel} is already provisioned for this project.`);
+  }
+  if (resolvedOptions.ip === undefined) {
+    throw new Error("Static IP is required.");
+  }
+  if (!isIpAddress(resolvedOptions.ip)) {
+    throw new Error(`Invalid static IP: ${resolvedOptions.ip}.`);
+  }
+
+  const providerAdapter = providerAdapters[serviceName];
+  if (providerAdapter === undefined) {
+    throw new Error(`${serviceLabel} provider adapter is unavailable.`);
+  }
+  if (proxmox === undefined) {
+    throw new Error("Proxmox adapter is unavailable.");
+  }
+
+  const result = await provisionPlatformService({
+    project,
+    platformKey: "vpn",
+    serviceName,
+    managedItem: vpnService,
+    options: resolvedOptions,
+    proxmox,
+    providerAdapter
+  });
+
+  const deployment = {
+    ip: resolvedOptions.ip,
+    hostname: result.lxcSpec.hostname,
+    bridge: result.lxcSpec.bridge,
+    storage: result.lxcSpec.storage,
+    resources: result.lxcSpec.resources
+  };
+  const updatedConfig = updatePlatformDeployment(project.config, "vpn", deployment);
+  const updatedState = {
+    ...project.state,
+    providerReferences: {
+      ...project.state.providerReferences,
+      [vpnService.id]: result.providerReference
+    }
+  };
+
+  writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
+  writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
+  filesystem.chmod(project.statePath, 0o600);
+
+  return {
+    ...formatPlatformProvisionResult({
+      serviceLabel,
+      ip: resolvedOptions.ip,
+      hostname: result.lxcSpec.hostname,
+      providerReference: result.providerReference,
+      warnings: result.warnings,
+      health: result.health,
+      inspectedCount: result.inspection.unmanaged.length,
+      inspectedLabel: "unmanaged VPN resource(s) preserved"
+    }),
+    inspection: result.inspection,
+    lxcSpec: result.lxcSpec,
+    providerReference: result.providerReference
+  };
+}
+
+async function addTailscaleService(options, adapters) {
+  return addVpnService("tailscale", "Tailscale", promptTailscaleOptions, options, adapters);
+}
+
+async function addNetBirdService(options, adapters) {
+  return addVpnService("netbird", "NetBird", promptNetBirdOptions, options, adapters);
 }
 
 async function publishExposure(options, adapters) {
