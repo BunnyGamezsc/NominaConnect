@@ -10,6 +10,12 @@ import { publishManagedExposure } from "./exposure.js";
 import { getPlatformProvider } from "./providers.js";
 import { provisionPlatformService } from "./provisioning.js";
 import {
+  runTrackingJob,
+  formatPendingNotices,
+  formatChangesDetail,
+  clearPendingNotices
+} from "./tracking.js";
+import {
   promptCaddyOptions,
   promptExposureOptions,
   promptInitOptions,
@@ -30,6 +36,12 @@ export async function runCli(argumentsList, adapters) {
   }
 
   const [command, ...rest] = argumentsList;
+  const commandResult = await runCommand(command, rest, adapters);
+  startTrackingJobInBackground(adapters);
+  return commandResult;
+}
+
+async function runCommand(command, rest, adapters) {
   switch (command) {
     case "init":
       return initializeProject(parseInitOptions(rest), adapters);
@@ -37,6 +49,8 @@ export async function runCli(argumentsList, adapters) {
       return handleServiceCommand(rest, adapters);
     case "exposure":
       return handleExposureCommand(rest, adapters);
+    case "changes":
+      return showChanges(rest, adapters);
     default:
       throw new Error("Unknown command. Run nomina for the interactive menu.");
   }
@@ -86,6 +100,40 @@ async function handleExposureCommand(argumentsList, adapters) {
     throw new Error("Run nomina for the interactive menu, or use: nomina exposure publish");
   }
   return publishExposure(parseExposurePublishOptions(rest), adapters);
+}
+
+async function showChanges(rawOptions, adapters) {
+  const { filesystem } = adapters;
+  const options = {};
+  const optionNames = new Map([["--project-dir", "projectDir"]]);
+  parseFlagOptions(rawOptions, optionNames, options);
+
+  const project = loadProject(filesystem, options.projectDir);
+  const notices = project.state.tracking?.notices ?? [];
+
+  if (notices.length === 0) {
+    return { stdout: "No changes recorded.\n" };
+  }
+
+  const detail = formatChangesDetail(notices);
+  const updatedState = clearPendingNotices(project.state);
+  writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
+  filesystem.chmod(project.statePath, 0o600);
+
+  return { stdout: detail };
+}
+
+function startTrackingJobInBackground(adapters) {
+  const { filesystem, providerAdapters = {} } = adapters;
+  let projectDir;
+  try {
+    const project = loadProject(filesystem);
+    projectDir = project.projectDirectory;
+  } catch {
+    return;
+  }
+
+  runTrackingJob({ filesystem, projectDir, providerAdapters }).catch(() => {});
 }
 
 async function addTechnitiumService(options, adapters) {

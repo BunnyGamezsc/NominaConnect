@@ -2,6 +2,7 @@ import * as clack from "@clack/prompts";
 import { INITIAL_PLATFORM_CATALOG } from "./catalog.js";
 import { findProjectDirectory, loadProject } from "./config.js";
 import { TECHNITIUM_DEPLOYMENT, CADDY_DEPLOYMENT, TRAEFIK_DEPLOYMENT, STEP_CA_DEPLOYMENT, TAILSCALE_DEPLOYMENT, NETBIRD_DEPLOYMENT } from "./provisioning.js";
+import { formatPendingNotices } from "./tracking.js";
 
 export function getProjectContext(filesystem, cwd = ".") {
   const projectDirectory = findProjectDirectory(filesystem, cwd);
@@ -155,6 +156,16 @@ export function buildMenuOptions(project) {
       hint: "connect DNS and HTTPS routing"
     });
   }
+  if (project !== undefined) {
+    const notices = project.state?.tracking?.notices ?? [];
+    if (notices.length > 0) {
+      options.push({
+        value: "view-changes",
+        label: "View changes",
+        hint: `${notices.length} pending change(s)`
+      });
+    }
+  }
   options.push({ value: "init", label: "Initialize a new project", hint: "first-time setup" });
   options.push({ value: "exit", label: "Exit", hint: "leave NominaConnect" });
   return options;
@@ -173,6 +184,13 @@ export async function runInteractiveApp(adapters) {
 
   if (projectDirectory !== undefined && project !== undefined) {
     clack.log.info(`Using project at ${projectDirectory}`);
+    const pendingNotices = project.state?.tracking?.notices ?? [];
+    if (pendingNotices.length > 0) {
+      const noticeSummary = formatPendingNotices(pendingNotices);
+      if (noticeSummary) {
+        clack.log.info(`Pending changes from background tracking:\n${noticeSummary}`);
+      }
+    }
   }
 
   const action = adapters.interactive?.chooseAction
@@ -188,49 +206,87 @@ export async function runInteractiveApp(adapters) {
     clack.outro("Goodbye.");
     return { stdout: "", cancelled: true };
   }
+  if (action === "view-changes") {
+    const result = await adapters.runCommand(["changes"], adapters);
+    if (result.stdout) {
+      clack.log.info(result.stdout.trim());
+    }
+    clack.outro("Changes displayed.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
+    return result;
+  }
   if (action === "init") {
     const result = await adapters.runCommand(["init"], adapters);
     clack.outro("Project initialized.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
     return result;
   }
   if (action === "provision-technitium") {
     const result = await adapters.runCommand(["service", "add", "technitium"], adapters);
     clack.outro("Technitium provisioning complete.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
     return result;
   }
   if (action === "provision-caddy") {
     const result = await adapters.runCommand(["service", "add", "caddy"], adapters);
     clack.outro("Caddy provisioning complete.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
     return result;
   }
   if (action === "provision-traefik") {
     const result = await adapters.runCommand(["service", "add", "traefik"], adapters);
     clack.outro("Traefik provisioning complete.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
     return result;
   }
   if (action === "provision-step-ca") {
     const result = await adapters.runCommand(["service", "add", "step-ca"], adapters);
     clack.outro("step-ca provisioning complete.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
     return result;
   }
   if (action === "provision-caddy-internal-ca") {
     const result = await adapters.runCommand(["service", "add", "caddy-internal-ca"], adapters);
     clack.outro("Caddy Internal CA configuration complete.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
     return result;
   }
   if (action === "provision-tailscale") {
     const result = await adapters.runCommand(["service", "add", "tailscale"], adapters);
     clack.outro("Tailscale provisioning complete.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
     return result;
   }
   if (action === "provision-netbird") {
     const result = await adapters.runCommand(["service", "add", "netbird"], adapters);
     clack.outro("NetBird provisioning complete.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
     return result;
   }
   if (action === "publish-exposure") {
     const result = await adapters.runCommand(["exposure", "publish"], adapters);
     clack.outro("Exposure published.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
     return result;
   }
 
