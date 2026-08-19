@@ -986,3 +986,287 @@ test("nomina service add without a service name auto-selects caddy-internal-ca w
 
   assert.match(result.stdout, /Caddy Internal CA/);
 });
+
+function createTraefikAdapter(overrides = {}) {
+  const state = {
+    resources: overrides.resources ?? [
+      { id: "existing.bunnyhome.test", route: "https://existing.bunnyhome.test" }
+    ],
+    publishCalls: []
+  };
+  return {
+    publishCalls: state.publishCalls,
+    setup(plan) {
+      return {
+        ...plan,
+        lxcCommands: ["install-traefik", "configure-https-routes"]
+      };
+    },
+    inspect() {
+      return { resources: state.resources.map((resource) => ({ ...resource })) };
+    },
+    publishRoute(request) {
+      state.publishCalls.push(request);
+      state.resources = state.resources.filter((resource) => resource.id !== request.hostname);
+      state.resources.push({
+        id: request.hostname,
+        route: `https://${request.hostname} -> ${request.backendIp}:${request.backendPort}`
+      });
+      return {
+        id: request.hostname,
+        route: `https://${request.hostname} -> ${request.backendIp}:${request.backendPort}`
+      };
+    },
+    healthCheckExposure(request) {
+      return overrides.exposureHealth?.(request) ?? { https: "reachable", status: "healthy" };
+    },
+    healthCheck() {
+      return overrides.health ?? { process: "running", endpoint: "reachable" };
+    }
+  };
+}
+
+test("nomina exposure publish with Traefik and step-ca creates Technitium record, trusted Traefik route, and visible CA results", async () => {
+  const filesystem = new FakeFilesystem();
+  filesystem.mkdir("/projects/bunnyhome");
+  filesystem.mkdir("/projects/bunnyhome/.nomina");
+  filesystem.writeFile("/projects/bunnyhome/nomina.yaml", createProjectYaml({ proxyService: "traefik", caService: "step-ca", withCaDeployment: true }));
+  filesystem.writeFile(
+    "/projects/bunnyhome/.nomina/state.json",
+    JSON.stringify({
+      version: 1,
+      providerReferences: {
+        nc_dns_test: { vmid: 120, ip: "10.0.0.53" },
+        nc_proxy_test: { vmid: 121, ip: "10.0.0.54" },
+        nc_ca_test: { vmid: 122, ip: "10.0.0.55" }
+      },
+      tracking: { notices: [] }
+    })
+  );
+
+  const technitium = createTechnitiumAdapter();
+  const traefik = createTraefikAdapter();
+  const stepCa = createStepCaAdapter();
+
+  const result = await runCli(
+    [
+      "exposure", "publish",
+      "--project-dir", "/projects/bunnyhome",
+      "--name", "photos",
+      "--hostname", "photos.bunnyhome.test",
+      "--backend-ip", "10.0.0.100",
+      "--backend-port", "8080"
+    ],
+    {
+      filesystem,
+      runtime: proxmoxRootRuntime(),
+      providerAdapters: { technitium, traefik, "step-ca": stepCa }
+    }
+  );
+
+  assert.match(result.stdout, /photos\.bunnyhome\.test/i);
+  assert.match(result.stdout, /published/i);
+  assert.match(result.stdout, /healthy/i);
+
+  assert.equal(traefik.publishCalls[0].protocol, "https");
+  assert.equal(traefik.publishCalls[0].caStrategy, "step-ca");
+  assert.equal(traefik.publishCalls[0].tls.trusted, true);
+
+  assert.equal(result.health.certificateAuthority?.status, "healthy");
+  assert.equal(result.managedService.exposure.certificateAuthority, "step-ca");
+  assert.equal(result.managedService.exposure.tls.trusted, true);
+
+  const config = filesystem.read("/projects/bunnyhome/nomina.yaml");
+  assert.match(config, /certificateAuthority: step-ca/);
+  assert.match(config, /trusted: true/);
+});
+
+test("nomina exposure publish with Traefik and no CA retains HTTPS with untrusted TLS and never falls back to HTTP", async () => {
+  const filesystem = new FakeFilesystem();
+  filesystem.mkdir("/projects/bunnyhome");
+  filesystem.mkdir("/projects/bunnyhome/.nomina");
+  filesystem.writeFile("/projects/bunnyhome/nomina.yaml", createProjectYaml({ proxyService: "traefik", caService: null }));
+  filesystem.writeFile(
+    "/projects/bunnyhome/.nomina/state.json",
+    JSON.stringify({
+      version: 1,
+      providerReferences: {
+        nc_dns_test: { vmid: 120, ip: "10.0.0.53" },
+        nc_proxy_test: { vmid: 121, ip: "10.0.0.54" }
+      },
+      tracking: { notices: [] }
+    })
+  );
+
+  const technitium = createTechnitiumAdapter();
+  const traefik = createTraefikAdapter();
+
+  const result = await runCli(
+    [
+      "exposure", "publish",
+      "--project-dir", "/projects/bunnyhome",
+      "--name", "photos",
+      "--hostname", "photos.bunnyhome.test",
+      "--backend-ip", "10.0.0.100",
+      "--backend-port", "8080"
+    ],
+    {
+      filesystem,
+      runtime: proxmoxRootRuntime(),
+      providerAdapters: { technitium, traefik }
+    }
+  );
+
+  assert.equal(traefik.publishCalls[0].protocol, "https");
+  assert.notEqual(traefik.publishCalls[0].protocol, "http");
+  assert.equal(traefik.publishCalls[0].tls.trusted, false);
+  assert.equal(traefik.publishCalls[0].caStrategy, "none");
+
+  assert.equal(result.managedService.exposure.protocol, "https");
+  assert.equal(result.managedService.exposure.certificateAuthority, "none");
+  assert.equal(result.managedService.exposure.tls.trusted, false);
+  assert.equal(result.managedService.exposure.tls.mode, "untrusted");
+
+  const config = filesystem.read("/projects/bunnyhome/nomina.yaml");
+  assert.match(config, /protocol: https/);
+  assert.doesNotMatch(config, /protocol:\s+http\b/);
+  assert.match(config, /trusted: false/);
+});
+
+test("nomina exposure publish with Traefik requires configured CA to be provisioned first", async () => {
+  const filesystem = new FakeFilesystem();
+  filesystem.mkdir("/projects/bunnyhome");
+  filesystem.mkdir("/projects/bunnyhome/.nomina");
+  filesystem.writeFile("/projects/bunnyhome/nomina.yaml", createProjectYaml({ proxyService: "traefik", caService: "step-ca" }));
+  filesystem.writeFile(
+    "/projects/bunnyhome/.nomina/state.json",
+    JSON.stringify({
+      version: 1,
+      providerReferences: {
+        nc_dns_test: { vmid: 120, ip: "10.0.0.53" },
+        nc_proxy_test: { vmid: 121, ip: "10.0.0.54" }
+      },
+      tracking: { notices: [] }
+    })
+  );
+
+  await assert.rejects(
+    runCli(
+      [
+        "exposure", "publish",
+        "--project-dir", "/projects/bunnyhome",
+        "--name", "photos",
+        "--hostname", "photos.bunnyhome.test",
+        "--backend-ip", "10.0.0.100",
+        "--backend-port", "8080"
+      ],
+      {
+        filesystem,
+        runtime: proxmoxRootRuntime(),
+        providerAdapters: { technitium: createTechnitiumAdapter(), traefik: createTraefikAdapter() }
+      }
+    ),
+    /step-ca must be provisioned before publishing an exposure/i
+  );
+});
+
+test("nomina exposure publish reports unhealthy when CA health check fails with Traefik", async () => {
+  const filesystem = new FakeFilesystem();
+  filesystem.mkdir("/projects/bunnyhome");
+  filesystem.mkdir("/projects/bunnyhome/.nomina");
+  filesystem.writeFile("/projects/bunnyhome/nomina.yaml", createProjectYaml({ proxyService: "traefik", caService: "step-ca", withCaDeployment: true }));
+  filesystem.writeFile(
+    "/projects/bunnyhome/.nomina/state.json",
+    JSON.stringify({
+      version: 1,
+      providerReferences: {
+        nc_dns_test: { vmid: 120, ip: "10.0.0.53" },
+        nc_proxy_test: { vmid: 121, ip: "10.0.0.54" },
+        nc_ca_test: { vmid: 122, ip: "10.0.0.55" }
+      },
+      tracking: { notices: [] }
+    })
+  );
+
+  const result = await runCli(
+    [
+      "exposure", "publish",
+      "--project-dir", "/projects/bunnyhome",
+      "--name", "photos",
+      "--hostname", "photos.bunnyhome.test",
+      "--backend-ip", "10.0.0.100",
+      "--backend-port", "8080"
+    ],
+    {
+      filesystem,
+      runtime: proxmoxRootRuntime(),
+      providerAdapters: {
+        technitium: createTechnitiumAdapter(),
+        traefik: createTraefikAdapter(),
+        "step-ca": createStepCaAdapter({
+          exposureHealth: () => ({ tls: "invalid", status: "unhealthy" })
+        })
+      }
+    }
+  );
+
+  assert.equal(result.health.status, "unhealthy");
+  assert.equal(result.health.certificateAuthority.status, "unhealthy");
+});
+
+test("nomina service add step-ca requires Traefik to be provisioned first when Traefik is the reverse proxy", async () => {
+  const filesystem = new FakeFilesystem();
+  filesystem.mkdir("/projects/bunnyhome");
+  filesystem.mkdir("/projects/bunnyhome/.nomina");
+  filesystem.writeFile("/projects/bunnyhome/nomina.yaml", createProjectYaml({ proxyService: "traefik", caService: "step-ca" }));
+  filesystem.writeFile(
+    "/projects/bunnyhome/.nomina/state.json",
+    JSON.stringify({
+      version: 1,
+      providerReferences: {
+        nc_dns_test: { vmid: 120, ip: "10.0.0.53" }
+      },
+      tracking: { notices: [] }
+    })
+  );
+
+  await assert.rejects(
+    runCli(
+      ["service", "add", "step-ca", "--project-dir", "/projects/bunnyhome", "--ip", "10.0.0.55"],
+      {
+        filesystem,
+        runtime: proxmoxRootRuntime(),
+        proxmox: createProxmoxAdapter(),
+        providerAdapters: { "step-ca": createStepCaAdapter() }
+      }
+    ),
+    /Traefik must be provisioned before step-ca/i
+  );
+});
+
+test("interactive menu offers step-ca when Traefik is the reverse proxy and CA needs provisioning", () => {
+  const projectStepCaTraefik = {
+    config: {
+      managedInventory: {
+        platform: {
+          dns: { id: "nc_dns_test", service: "technitium" },
+          reverseProxy: { id: "nc_proxy_test", service: "traefik" },
+          certificateAuthority: { id: "nc_ca_test", service: "step-ca" }
+        }
+      }
+    },
+    state: {
+      providerReferences: {
+        nc_dns_test: { vmid: 120, ip: "10.0.0.53" },
+        nc_proxy_test: { vmid: 121, ip: "10.0.0.54" }
+      }
+    }
+  };
+
+  assert.equal(canProvisionStepCa(projectStepCaTraefik), true);
+  assert.equal(canPublishExposure(projectStepCaTraefik), false);
+  assert.deepEqual(
+    buildMenuOptions(projectStepCaTraefik).map((option) => option.value),
+    ["provision-step-ca", "init", "exit"]
+  );
+});
