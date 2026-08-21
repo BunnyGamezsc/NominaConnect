@@ -13,6 +13,7 @@ Choose your installation method:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install-native.sh | sudo bash
 ```
+*Automatically downloads the latest release from GitHub.*
 
 **Node.js version:**
 ```bash

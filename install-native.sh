@@ -58,24 +58,43 @@ echo "✔  Will download: $BINARY"
 # Check for curl or wget
 if command -v curl &>/dev/null; then
   DOWNLOAD_CMD="curl -fsSL"
+  API_CMD="curl -fsSL"
 elif command -v wget &>/dev/null; then
   DOWNLOAD_CMD="wget -qO-"
+  API_CMD="wget -qO-"
 else
   echo "❌ Neither curl nor wget found. Please install one of them."
   exit 1
 fi
 
+# --- Get latest release version ---
+echo "🔍 Checking for latest release..."
+LATEST_RELEASE=$($API_CMD "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+
+if [ -z "$LATEST_RELEASE" ]; then
+  echo "⚠  Could not determine latest release. Using 'latest' tag."
+  LATEST_RELEASE="latest"
+else
+  echo "✔  Found latest release: $LATEST_RELEASE"
+fi
+
 # --- Download binary ---
 echo "📥 Downloading NominaConnect binary..."
-BINARY_URL="https://github.com/$REPO/releases/download/latest/$BINARY" || \
-BINARY_URL="https://raw.githubusercontent.com/$REPO/$BRANCH/dist/$BINARY"
+BINARY_URL="https://github.com/$REPO/releases/download/$LATEST_RELEASE/$BINARY"
 
 # Create install directory
 rm -rf "$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 
 # Download binary
-$DOWNLOAD_CMD "$BINARY_URL" > "$INSTALL_DIR/nomina"
+if ! $DOWNLOAD_CMD "$BINARY_URL" > "$INSTALL_DIR/nomina" 2>/dev/null; then
+  echo "⚠  Release download failed. Trying fallback to dist folder..."
+  BINARY_URL="https://raw.githubusercontent.com/$REPO/$BRANCH/dist/$BINARY"
+  if ! $DOWNLOAD_CMD "$BINARY_URL" > "$INSTALL_DIR/nomina" 2>/dev/null; then
+    echo "❌ Failed to download binary from both release and dist folder."
+    exit 1
+  fi
+fi
 chmod +x "$INSTALL_DIR/nomina"
 
 # Create symlink
