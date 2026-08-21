@@ -6,6 +6,7 @@ import * as clack from "@clack/prompts";
 import { runCli } from "../src/cli.js";
 import { createClackPrompts } from "../src/prompts.js";
 import { runInteractiveApp } from "../src/tui.js";
+import { createProductionAdapters } from "../src/adapter-runtime.js";
 
 const filesystem = {
   exists: fs.existsSync,
@@ -16,6 +17,8 @@ const filesystem = {
   chmod: fs.chmodSync
 };
 
+const productionAdapters = createProductionAdapters();
+
 const adapters = {
   filesystem,
   cwd: process.cwd(),
@@ -23,6 +26,7 @@ const adapters = {
     isRoot: () => process.getuid?.() === 0,
     isProxmoxHost: () => fs.existsSync("/usr/sbin/pct") || fs.existsSync("/usr/bin/pct")
   },
+  ...productionAdapters,
   prompts: createClackPrompts(clack),
   interactive: {
     run: (context) => runInteractiveApp({

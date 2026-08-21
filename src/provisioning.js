@@ -45,8 +45,8 @@ const PLATFORM_DEPLOYMENTS = Object.freeze({
   netbird: NETBIRD_DEPLOYMENT
 });
 
-export function runIpPreflight(proxmox, ip) {
-  const result = proxmox.checkIpAvailability(ip);
+export async function runIpPreflight(proxmox, ip) {
+  const result = await proxmox.checkIpAvailability(ip);
   if (result.status === "known-collision") {
     const detail = result.conflictWith ? ` (${result.conflictWith})` : "";
     throw new Error(`Requested IP ${ip} is already in use${detail}.`);
@@ -93,22 +93,23 @@ export async function provisionPlatformService({
   proxmox,
   providerAdapter
 }) {
-  const warnings = runIpPreflight(proxmox, options.ip);
+  const warnings = await runIpPreflight(proxmox, options.ip);
   const lxcSpec = resolveServiceDeployment(project, serviceName, options);
-  const created = proxmox.createLxc(lxcSpec);
+  const created = await proxmox.createLxc(lxcSpec);
 
   const plugin = getPlatformProvider(serviceName);
-  const setupPlan = plugin.setup(providerAdapter, managedItem);
+  const connectionSecretReference = project.config.connectionSecretReferences[managedItem.id];
+  const setupPlan = await plugin.setup(providerAdapter, managedItem, { connectionSecretReference });
   const commands = setupPlan.lxcCommands ?? setupPlan.operations ?? [];
   for (const command of commands) {
-    proxmox.pctExec(created.vmid, command);
+    await proxmox.pctExec(created.vmid, command);
   }
 
   const providerReferences = serviceName === "technitium"
     ? [project.config.baseLocalDomain]
     : [];
-  const inspection = plugin.inspect(providerAdapter, managedItem, { providerReferences });
-  const health = plugin.healthCheck(providerAdapter, managedItem);
+  const inspection = await plugin.inspect(providerAdapter, managedItem, { providerReferences, connectionSecretReference });
+  const health = await plugin.healthCheck(providerAdapter, managedItem, { connectionSecretReference });
 
   return {
     created,

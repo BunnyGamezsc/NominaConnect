@@ -72,7 +72,7 @@ function createFakeProviderAdapter({ resources = [], process = "running", endpoi
   };
 }
 
-test("every selectable platform provider can set up, inspect, adopt, and health-check without touching unmanaged configuration", () => {
+test("every selectable platform provider can set up, inspect, adopt, and health-check without touching unmanaged configuration", async () => {
   const catalogNames = Object.values(INITIAL_PLATFORM_CATALOG).flat().map((option) => option.name);
   assert.deepEqual(catalogNames, PROVIDER_CONTRACTS.map((contract) => contract.name));
 
@@ -83,27 +83,27 @@ test("every selectable platform provider can set up, inspect, adopt, and health-
       resources: [contract.unmanaged, contract.managed]
     });
 
-    const setupPlan = plugin.setup(adapter, managedItem);
+    const setupPlan = await plugin.setup(adapter, managedItem);
     assert.equal(setupPlan.provider, contract.name);
     assert.equal(setupPlan.managedItemId, "nc_managed");
     assert.deepEqual(setupPlan.operations, contract.operations);
     assert.equal(setupPlan.exposureProtocol, contract.exposureProtocol);
 
-    const observed = plugin.inspect(adapter, managedItem, {
+    const observed = await plugin.inspect(adapter, managedItem, {
       providerReferences: [contract.managed.id]
     });
     assert.deepEqual(observed.managed, [contract.managed]);
     assert.deepEqual(observed.unmanaged, [contract.unmanaged]);
     assert.equal(JSON.stringify(adapter.resources).includes("nc_"), false);
 
-    const adopted = plugin.adopt(adapter, managedItem, observed);
+    const adopted = await plugin.adopt(adapter, managedItem, observed);
     assert.deepEqual(adopted.managedInventoryUpdate, [contract.managed]);
     assert.deepEqual(
-      plugin.inspect(adapter, managedItem, { providerReferences: [contract.managed.id] }).unmanaged,
+      (await plugin.inspect(adapter, managedItem, { providerReferences: [contract.managed.id] })).unmanaged,
       [contract.unmanaged]
     );
 
-    assert.deepEqual(plugin.healthCheck(adapter, managedItem), {
+    assert.deepEqual(await plugin.healthCheck(adapter, managedItem), {
       provider: contract.name,
       managedItemId: "nc_managed",
       process: "running",
@@ -113,9 +113,9 @@ test("every selectable platform provider can set up, inspect, adopt, and health-
   }
 });
 
-test("provider health checks report unhealthy when the service process is down", () => {
+test("provider health checks report unhealthy when the service process is down", async () => {
   const adapter = createFakeProviderAdapter({ process: "stopped", endpoint: "unreachable" });
-  const result = getPlatformProvider("technitium").healthCheck(adapter, {
+  const result = await getPlatformProvider("technitium").healthCheck(adapter, {
     id: "nc_dns",
     service: "technitium"
   });
@@ -123,4 +123,26 @@ test("provider health checks report unhealthy when the service process is down",
   assert.equal(result.status, "unhealthy");
   assert.equal(result.process, "stopped");
   assert.equal(result.endpoint, "unreachable");
+});
+
+test("provider plugins await asynchronous adapters while retaining the fake-adapter contract", async () => {
+  const adapter = {
+    async setup(plan) { return { ...plan, lxcCommands: [] }; },
+    async inspect() { return { resources: [{ id: "dns.home.test" }] }; },
+    async adopt(request) { return { managedInventoryUpdate: request.managed }; },
+    async healthCheck() { return { process: "running", endpoint: "reachable" }; }
+  };
+  const plugin = getPlatformProvider("technitium");
+  const managedItem = { id: "nc_dns", service: "technitium" };
+
+  assert.equal((await plugin.setup(adapter, managedItem)).provider, "technitium");
+  assert.deepEqual(
+    (await plugin.inspect(adapter, managedItem, { providerReferences: ["dns.home.test"] })).managed,
+    [{ id: "dns.home.test" }]
+  );
+  assert.deepEqual(
+    await plugin.adopt(adapter, managedItem, { managed: [{ id: "dns.home.test" }] }),
+    { managedInventoryUpdate: [{ id: "dns.home.test" }] }
+  );
+  assert.equal((await plugin.healthCheck(adapter, managedItem)).status, "healthy");
 });

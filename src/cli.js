@@ -431,16 +431,19 @@ async function addCaddyInternalCaService(options, adapters) {
   }
 
   const plugin = getPlatformProvider("caddy-internal-ca");
-  const setupPlan = plugin.setup(providerAdapter, caService);
+  const setupPlan = await plugin.setup(providerAdapter, caService, {
+    connectionSecretReference: project.config.connectionSecretReferences[caService.id]
+  });
   const commands = setupPlan.lxcCommands ?? setupPlan.operations ?? [];
   if (proxmox?.pctExec) {
     for (const command of commands) {
-      proxmox.pctExec(caddyRef.vmid, command);
+      await proxmox.pctExec(caddyRef.vmid, command);
     }
   }
 
-  const inspection = plugin.inspect(providerAdapter, caService, { providerReferences: [] });
-  const health = plugin.healthCheck(providerAdapter, caService);
+  const connectionSecretReference = project.config.connectionSecretReferences[caService.id];
+  const inspection = await plugin.inspect(providerAdapter, caService, { providerReferences: [], connectionSecretReference });
+  const health = await plugin.healthCheck(providerAdapter, caService, { connectionSecretReference });
   const providerReference = { vmid: caddyRef.vmid, service: "caddy-internal-ca" };
 
   const updatedState = {
@@ -576,7 +579,7 @@ async function upgradeService(serviceName, rawOptions, adapters) {
   const vmid = providerRef.vmid;
   const storage = managedItem.deployment?.storage ?? project.config.proxmox.defaultStorage;
   const snapshotSupported = proxmox?.supportsSnapshots
-    ? (typeof proxmox.supportsSnapshots === "function" ? proxmox.supportsSnapshots(storage) : proxmox.supportsSnapshots)
+    ? (typeof proxmox.supportsSnapshots === "function" ? await proxmox.supportsSnapshots(storage) : proxmox.supportsSnapshots)
     : true;
 
   let shouldTakeSnapshot = false;
@@ -595,7 +598,7 @@ async function upgradeService(serviceName, rawOptions, adapters) {
   let snapshotResult;
   if (shouldTakeSnapshot && proxmox?.createSnapshot && vmid !== undefined) {
     const snapshotName = options.snapshotName ?? `pre-upgrade-${resolvedServiceName}-${Date.now()}`;
-    snapshotResult = proxmox.createSnapshot(vmid, snapshotName);
+    snapshotResult = await proxmox.createSnapshot(vmid, snapshotName);
   }
 
   const plugin = getPlatformProvider(managedItem.service);
@@ -604,19 +607,20 @@ async function upgradeService(serviceName, rawOptions, adapters) {
     throw new Error(`${resolvedServiceName} provider adapter is unavailable.`);
   }
 
-  const upgradePlan = plugin.upgrade(adapter, managedItem);
+  const connectionSecretReference = project.config.connectionSecretReferences[managedItem.id];
+  const upgradePlan = await plugin.upgrade(adapter, managedItem, { connectionSecretReference });
   const commands = upgradePlan.lxcCommands ?? upgradePlan.operations ?? [];
   if (proxmox?.pctExec && vmid !== undefined) {
     for (const command of commands) {
-      proxmox.pctExec(vmid, command);
+      await proxmox.pctExec(vmid, command);
     }
   }
 
   const providerReferences = platformKey === "dns"
     ? [project.config.baseLocalDomain]
     : [];
-  const inspection = plugin.inspect(adapter, managedItem, { providerReferences });
-  const health = plugin.healthCheck(adapter, managedItem);
+  const inspection = await plugin.inspect(adapter, managedItem, { providerReferences, connectionSecretReference });
+  const health = await plugin.healthCheck(adapter, managedItem, { connectionSecretReference });
 
   const snapshotText = snapshotResult ? `Snapshot ${snapshotResult.snapshotName ?? snapshotResult.name} created. ` : "";
   const healthLabel = health.status === "healthy" ? "healthy" : "unhealthy";
@@ -657,7 +661,7 @@ async function removeService(serviceName, rawOptions, adapters) {
     }
 
     if (proxmox?.stopLxc && providerRef.vmid !== undefined) {
-      proxmox.stopLxc(providerRef.vmid);
+      await proxmox.stopLxc(providerRef.vmid);
     }
 
     const updatedConfig = {
@@ -709,11 +713,11 @@ async function removeService(serviceName, rawOptions, adapters) {
     const hostname = matchedService.exposure?.hostname;
     if (hostname) {
       if (providerAdapters.technitium?.unpublishRecord) {
-        providerAdapters.technitium.unpublishRecord({ hostname });
+        await providerAdapters.technitium.unpublishRecord({ hostname });
       }
       const proxyService = project.config.managedInventory.platform.reverseProxy;
       if (proxyService && providerAdapters[proxyService.service]?.unpublishRoute) {
-        providerAdapters[proxyService.service].unpublishRoute({ hostname });
+        await providerAdapters[proxyService.service].unpublishRoute({ hostname });
       }
     }
 
@@ -806,10 +810,10 @@ async function destroyService(serviceName, rawOptions, adapters) {
   }
 
   if (proxmox?.stopLxc) {
-    proxmox.stopLxc(vmid);
+    await proxmox.stopLxc(vmid);
   }
   if (proxmox?.destroyLxc) {
-    proxmox.destroyLxc(vmid);
+    await proxmox.destroyLxc(vmid);
   }
 
   let updatedConfig = project.config;
@@ -860,7 +864,7 @@ async function publishExposure(options, adapters) {
   const resolvedOptions = await promptExposureOptions(project, options, adapters.prompts);
   validateExposureOptions(resolvedOptions);
 
-  const result = publishManagedExposure({
+  const result = await publishManagedExposure({
     project,
     options: resolvedOptions,
     providerAdapters
@@ -911,7 +915,7 @@ async function initializeProject(options, adapters) {
   filesystem.chmod(stateDirectory, 0o700);
 
   const managedInventory = createManagedInventory(answers);
-  const setupPlan = createSetupPlan(managedInventory, adapters.providerAdapters);
+  const setupPlan = await createSetupPlan(managedInventory, adapters.providerAdapters);
   const secretReferences = createSecretReferences(managedInventory);
   const state = {
     version: 1,
@@ -1134,13 +1138,13 @@ const PLAN_ONLY_ADAPTER = Object.freeze({
   setup: (plan) => plan
 });
 
-function createSetupPlan(inventory, providerAdapters = {}) {
+async function createSetupPlan(inventory, providerAdapters = {}) {
   const selectedProviders = Object.values(inventory.platform).filter((item) => item !== null);
-  return selectedProviders.map((managedItem) => {
+  return await Promise.all(selectedProviders.map(async (managedItem) => {
     const plugin = getPlatformProvider(managedItem.service);
     const adapter = providerAdapters[managedItem.service] ?? PLAN_ONLY_ADAPTER;
-    return plugin.setup(adapter, managedItem);
-  });
+    return await plugin.setup(adapter, managedItem);
+  }));
 }
 
 function assertProxmoxShell(runtime) {

@@ -14,20 +14,20 @@ export function collectExposedServices(managedInventory) {
   return managedInventory.services.filter((service) => service.exposure !== undefined);
 }
 
-export function inspectPlatformService(adapter, managedItem, providerReferences) {
+export async function inspectPlatformService(adapter, managedItem, providerReferences) {
   if (adapter?.inspect === undefined) {
     return undefined;
   }
   const plugin = getPlatformProvider(managedItem.service);
-  return plugin.inspect(adapter, managedItem, { providerReferences });
+  return await plugin.inspect(adapter, managedItem, { providerReferences });
 }
 
-export function inspectExposedService(adapter, managedItem, providerReferences) {
+export async function inspectExposedService(adapter, managedItem, providerReferences) {
   if (adapter?.inspect === undefined) {
     return undefined;
   }
   const plugin = getPlatformProvider(managedItem.service);
-  return plugin.inspect(adapter, managedItem, { providerReferences });
+  return await plugin.inspect(adapter, managedItem, { providerReferences });
 }
 
 export function detectPlatformChanges(observed, currentDeployment) {

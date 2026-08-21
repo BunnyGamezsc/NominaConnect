@@ -1,20 +1,22 @@
 function createProviderPlugin({ name, operations, upgradeOperations = [`upgrade-${name}`], exposureProtocol = undefined }) {
   return Object.freeze({
     name,
-    setup(adapter, managedItem) {
-      return adapter.setup({
+    async setup(adapter, managedItem, context = {}) {
+      return await adapter.setup({
         provider: name,
         managedItemId: managedItem.id,
         operations,
+        ...(context.connectionSecretReference === undefined ? {} : { connectionSecretReference: context.connectionSecretReference }),
         ...(exposureProtocol === undefined ? {} : { exposureProtocol })
       });
     },
-    upgrade(adapter, managedItem) {
+    async upgrade(adapter, managedItem, context = {}) {
       if (adapter?.upgrade) {
-        return adapter.upgrade({
+        return await adapter.upgrade({
           provider: name,
           managedItemId: managedItem.id,
-          operations: upgradeOperations
+          operations: upgradeOperations,
+          ...(context.connectionSecretReference === undefined ? {} : { connectionSecretReference: context.connectionSecretReference })
         });
       }
       return {
@@ -24,8 +26,12 @@ function createProviderPlugin({ name, operations, upgradeOperations = [`upgrade-
         lxcCommands: upgradeOperations
       };
     },
-    inspect(adapter, managedItem, { providerReferences = [] } = {}) {
-      const observed = adapter.inspect({ provider: name, managedItemId: managedItem.id });
+    async inspect(adapter, managedItem, { providerReferences = [], connectionSecretReference } = {}) {
+      const observed = await adapter.inspect({
+        provider: name,
+        managedItemId: managedItem.id,
+        ...(connectionSecretReference === undefined ? {} : { connectionSecretReference })
+      });
       const managedIds = new Set(providerReferences);
       const resources = observed.resources ?? [];
       return {
@@ -38,17 +44,19 @@ function createProviderPlugin({ name, operations, upgradeOperations = [`upgrade-
         ...(observed.availableUpgrade !== undefined ? { availableUpgrade: observed.availableUpgrade } : {})
       };
     },
-    adopt(adapter, managedItem, observedConfiguration) {
-      return adapter.adopt({
+    async adopt(adapter, managedItem, observedConfiguration, context = {}) {
+      return await adapter.adopt({
         provider: name,
         managedItemId: managedItem.id,
-        managed: observedConfiguration.managed
+        managed: observedConfiguration.managed,
+        ...(context.connectionSecretReference === undefined ? {} : { connectionSecretReference: context.connectionSecretReference })
       });
     },
-    healthCheck(adapter, managedItem) {
-      const observed = adapter.healthCheck({
+    async healthCheck(adapter, managedItem, context = {}) {
+      const observed = await adapter.healthCheck({
         provider: name,
-        managedItemId: managedItem.id
+        managedItemId: managedItem.id,
+        ...(context.connectionSecretReference === undefined ? {} : { connectionSecretReference: context.connectionSecretReference })
       });
       const healthy = observed.process === "running" && observed.endpoint === "reachable";
       return {

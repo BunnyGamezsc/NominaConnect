@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { getPlatformProvider } from "./providers.js";
 
-export function publishManagedExposure({
+export async function publishManagedExposure({
   project,
   options,
   providerAdapters
@@ -67,15 +67,15 @@ export function publishManagedExposure({
     tls: tlsOptions
   };
 
-  technitiumAdapter.publishRecord(publishRequest);
-  proxyAdapter.publishRoute(routeRequest);
+  await technitiumAdapter.publishRecord(publishRequest);
+  await proxyAdapter.publishRoute(routeRequest);
 
   const dnsPlugin = getPlatformProvider("technitium");
   const proxyPlugin = getPlatformProvider(proxyService.service);
-  const dnsInspection = dnsPlugin.inspect(technitiumAdapter, dnsService, {
+  const dnsInspection = await dnsPlugin.inspect(technitiumAdapter, dnsService, {
     providerReferences: collectManagedDnsReferences(project, hostname)
   });
-  const proxyInspection = proxyPlugin.inspect(proxyAdapter, proxyService, {
+  const proxyInspection = await proxyPlugin.inspect(proxyAdapter, proxyService, {
     providerReferences: collectManagedProxyReferences(project, hostname)
   });
 
@@ -85,17 +85,17 @@ export function publishManagedExposure({
     const caAdapter = providerAdapters[caService.service] ?? providerAdapters[proxyService.service];
     if (caAdapter !== undefined) {
       const caPlugin = getPlatformProvider(caService.service);
-      caInspection = caPlugin.inspect(caAdapter, caService, {
+      caInspection = await caPlugin.inspect(caAdapter, caService, {
         providerReferences: collectManagedCaReferences(project, hostname)
       });
-      caExposureHealth = caAdapter.healthCheckExposure?.({ hostname, backendIp, backendPort })
+      caExposureHealth = await caAdapter.healthCheckExposure?.({ hostname, backendIp, backendPort })
         ?? { tls: "valid", issuer: caService.service, status: "healthy" };
     }
   }
 
-  const dnsExposureHealth = technitiumAdapter.healthCheckExposure?.({ hostname, backendIp, backendPort })
+  const dnsExposureHealth = await technitiumAdapter.healthCheckExposure?.({ hostname, backendIp, backendPort })
     ?? { dns: "reachable", status: "healthy" };
-  const proxyExposureHealth = proxyAdapter.healthCheckExposure?.({ hostname, backendIp, backendPort })
+  const proxyExposureHealth = await proxyAdapter.healthCheckExposure?.({ hostname, backendIp, backendPort })
     ?? { https: "reachable", status: "healthy" };
   const healthy = dnsExposureHealth.status === "healthy"
     && proxyExposureHealth.status === "healthy"
