@@ -168,6 +168,25 @@ export function buildMenuOptions(project) {
       hint: "connect DNS and HTTPS routing"
     });
   }
+  if (project !== undefined && hasProvisionedServices(project)) {
+    options.push({
+      value: "upgrade-service",
+      label: "Upgrade a managed service",
+      hint: "explicit service upgrade with snapshot"
+    });
+    options.push({
+      value: "remove-service",
+      label: "Remove a managed service",
+      hint: "disconnect integrations and retain data"
+    });
+  }
+  if (project !== undefined && hasProvisionedOrRetainedServices(project)) {
+    options.push({
+      value: "destroy-service",
+      label: "Destroy a service LXC",
+      hint: "permanently delete LXC container and data"
+    });
+  }
   if (project !== undefined) {
     const notices = project.state?.tracking?.notices ?? [];
     if (notices.length > 0) {

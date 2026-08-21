@@ -148,7 +148,7 @@ test("buildMenuOptions offers Caddy after Technitium is provisioned", () => {
   assert.equal(canPublishExposure(project), false);
   assert.deepEqual(
     buildMenuOptions(project).map((option) => option.value),
-    ["provision-caddy", "init", "exit"]
+    ["provision-caddy", "upgrade-service", "remove-service", "destroy-service", "init", "exit"]
   );
 });
 
@@ -173,7 +173,7 @@ test("buildMenuOptions offers exposure publish when DNS and Caddy are provisione
   assert.equal(canPublishExposure(project), true);
   assert.deepEqual(
     buildMenuOptions(project).map((option) => option.value),
-    ["publish-exposure", "init", "exit"]
+    ["publish-exposure", "upgrade-service", "remove-service", "destroy-service", "init", "exit"]
   );
 });
 
@@ -394,7 +394,7 @@ test("buildMenuOptions hides Technitium when it is already provisioned", () => {
   assert.equal(canProvisionTechnitium(project), false);
   assert.deepEqual(
     buildMenuOptions(project).map((option) => option.value),
-    ["init", "exit"]
+    ["upgrade-service", "remove-service", "destroy-service", "init", "exit"]
   );
 });
 
@@ -520,7 +520,7 @@ test("buildMenuOptions offers Traefik after Technitium is provisioned", () => {
   assert.equal(canPublishExposure(project), false);
   assert.deepEqual(
     buildMenuOptions(project).map((option) => option.value),
-    ["provision-traefik", "init", "exit"]
+    ["provision-traefik", "upgrade-service", "remove-service", "destroy-service", "init", "exit"]
   );
 });
 
@@ -545,7 +545,7 @@ test("buildMenuOptions offers exposure publish when DNS and Traefik are provisio
   assert.equal(canPublishExposure(project), true);
   assert.deepEqual(
     buildMenuOptions(project).map((option) => option.value),
-    ["publish-exposure", "init", "exit"]
+    ["publish-exposure", "upgrade-service", "remove-service", "destroy-service", "init", "exit"]
   );
 });
 
