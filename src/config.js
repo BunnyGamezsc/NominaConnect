@@ -180,8 +180,16 @@ function readServiceList(lines, startIndex, parentIndent) {
       break;
     }
     const itemIndent = indent;
-    index += 1;
     const item = {};
+    const firstLineContent = line.replace(/^\s*-\s*/, "").trim();
+    if (firstLineContent !== "") {
+      const match = firstLineContent.match(/^(\w+):\s*(.*)$/);
+      if (match) {
+        const [, key, rawValue] = match;
+        item[key] = rawValue === "null" ? null : parseScalar(rawValue);
+      }
+    }
+    index += 1;
     while (index < lines.length) {
       const itemLine = lines[index];
       if (itemLine === undefined || itemLine.trim() === "" || itemLine.trim().startsWith("#")) {

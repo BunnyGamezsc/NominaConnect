@@ -1,4 +1,4 @@
-function createProviderPlugin({ name, operations, exposureProtocol = undefined }) {
+function createProviderPlugin({ name, operations, upgradeOperations = [`upgrade-${name}`], exposureProtocol = undefined }) {
   return Object.freeze({
     name,
     setup(adapter, managedItem) {
@@ -8,6 +8,21 @@ function createProviderPlugin({ name, operations, exposureProtocol = undefined }
         operations,
         ...(exposureProtocol === undefined ? {} : { exposureProtocol })
       });
+    },
+    upgrade(adapter, managedItem) {
+      if (adapter?.upgrade) {
+        return adapter.upgrade({
+          provider: name,
+          managedItemId: managedItem.id,
+          operations: upgradeOperations
+        });
+      }
+      return {
+        provider: name,
+        managedItemId: managedItem.id,
+        operations: upgradeOperations,
+        lxcCommands: upgradeOperations
+      };
     },
     inspect(adapter, managedItem, { providerReferences = [] } = {}) {
       const observed = adapter.inspect({ provider: name, managedItemId: managedItem.id });
@@ -19,7 +34,8 @@ function createProviderPlugin({ name, operations, exposureProtocol = undefined }
         managed: resources.filter((resource) => managedIds.has(resource.id)),
         unmanaged: resources.filter((resource) => !managedIds.has(resource.id)),
         ...(observed.deployment !== undefined ? { deployment: observed.deployment } : {}),
-        ...(observed.configuration !== undefined ? { configuration: observed.configuration } : {})
+        ...(observed.configuration !== undefined ? { configuration: observed.configuration } : {}),
+        ...(observed.availableUpgrade !== undefined ? { availableUpgrade: observed.availableUpgrade } : {})
       };
     },
     adopt(adapter, managedItem, observedConfiguration) {

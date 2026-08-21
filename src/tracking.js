@@ -116,6 +116,9 @@ export function formatChangeSummary(change) {
     const fields = Object.keys(change.changes || {});
     return `${change.serviceName} exposure ${fields.join(", ")} changed.`;
   }
+  if (change.kind === "upgrade-available") {
+    return `An upgrade is available for ${change.serviceName} (${change.after}). Run 'nomina service upgrade ${change.serviceName}' to upgrade.`;
+  }
   return `${change.serviceName} change adopted.`;
 }
 

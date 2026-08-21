@@ -24,7 +24,11 @@ import {
   promptTechnitiumOptions,
   promptTraefikOptions,
   promptTailscaleOptions,
-  promptNetBirdOptions
+  promptNetBirdOptions,
+  promptUpgradeServiceName,
+  promptRemoveServiceName,
+  promptDestroyServiceName,
+  confirmPrompt
 } from "./tui.js";
 
 export async function runCli(argumentsList, adapters) {
@@ -58,40 +62,55 @@ async function runCommand(command, rest, adapters) {
 
 async function handleServiceCommand(argumentsList, adapters) {
   const [subcommand, ...rest] = argumentsList;
-  if (subcommand !== "add") {
-    throw new Error("Run nomina for the interactive menu, or use: nomina service add <name>");
+  if (subcommand === "add") {
+    const [serviceName, ...rawOptions] = rest[0]?.startsWith("--") ? [undefined, ...rest] : rest;
+    const options = parseServiceAddOptions(rawOptions);
+    let resolvedServiceName = serviceName;
+    if (resolvedServiceName === undefined) {
+      const project = loadProject(adapters.filesystem, options.projectDir);
+      resolvedServiceName = await promptServiceName(project, adapters.prompts);
+    }
+
+    if (resolvedServiceName === "technitium") {
+      return addTechnitiumService(options, adapters);
+    }
+    if (resolvedServiceName === "caddy") {
+      return addCaddyService(options, adapters);
+    }
+    if (resolvedServiceName === "traefik") {
+      return addTraefikService(options, adapters);
+    }
+    if (resolvedServiceName === "step-ca") {
+      return addStepCaService(options, adapters);
+    }
+    if (resolvedServiceName === "caddy-internal-ca") {
+      return addCaddyInternalCaService(options, adapters);
+    }
+    if (resolvedServiceName === "tailscale") {
+      return addTailscaleService(options, adapters);
+    }
+    if (resolvedServiceName === "netbird") {
+      return addNetBirdService(options, adapters);
+    }
+    throw new Error(`Unsupported service: ${resolvedServiceName}.`);
   }
 
-  const [serviceName, ...rawOptions] = rest[0]?.startsWith("--") ? [undefined, ...rest] : rest;
-  const options = parseServiceAddOptions(rawOptions);
-  let resolvedServiceName = serviceName;
-  if (resolvedServiceName === undefined) {
-    const project = loadProject(adapters.filesystem, options.projectDir);
-    resolvedServiceName = await promptServiceName(project, adapters.prompts);
+  if (subcommand === "upgrade") {
+    const [serviceName, ...rawOptions] = rest[0]?.startsWith("--") ? [undefined, ...rest] : rest;
+    return upgradeService(serviceName, rawOptions, adapters);
   }
 
-  if (resolvedServiceName === "technitium") {
-    return addTechnitiumService(options, adapters);
+  if (subcommand === "remove") {
+    const [serviceName, ...rawOptions] = rest[0]?.startsWith("--") ? [undefined, ...rest] : rest;
+    return removeService(serviceName, rawOptions, adapters);
   }
-  if (resolvedServiceName === "caddy") {
-    return addCaddyService(options, adapters);
+
+  if (subcommand === "destroy") {
+    const [serviceName, ...rawOptions] = rest[0]?.startsWith("--") ? [undefined, ...rest] : rest;
+    return destroyService(serviceName, rawOptions, adapters);
   }
-  if (resolvedServiceName === "traefik") {
-    return addTraefikService(options, adapters);
-  }
-  if (resolvedServiceName === "step-ca") {
-    return addStepCaService(options, adapters);
-  }
-  if (resolvedServiceName === "caddy-internal-ca") {
-    return addCaddyInternalCaService(options, adapters);
-  }
-  if (resolvedServiceName === "tailscale") {
-    return addTailscaleService(options, adapters);
-  }
-  if (resolvedServiceName === "netbird") {
-    return addNetBirdService(options, adapters);
-  }
-  throw new Error(`Unsupported service: ${resolvedServiceName}.`);
+
+  throw new Error("Run nomina for the interactive menu, or use: nomina service add|upgrade|remove|destroy <name>");
 }
 
 async function handleExposureCommand(argumentsList, adapters) {
@@ -527,6 +546,312 @@ async function addNetBirdService(options, adapters) {
   return addVpnService("netbird", "NetBird", promptNetBirdOptions, options, adapters);
 }
 
+async function upgradeService(serviceName, rawOptions, adapters) {
+  const { filesystem, runtime, proxmox, providerAdapters = {}, prompts } = adapters;
+  assertProxmoxShell(runtime);
+
+  const options = parseServiceUpgradeOptions(rawOptions);
+  const project = loadProject(filesystem, options.projectDir);
+
+  let resolvedServiceName = serviceName;
+  if (resolvedServiceName === undefined) {
+    resolvedServiceName = await promptUpgradeServiceName(project, prompts);
+  }
+
+  const platformEntries = Object.entries(project.config.managedInventory.platform);
+  const matchedPlatform = platformEntries.find(
+    ([key, item]) => item?.service === resolvedServiceName || key === resolvedServiceName
+  );
+
+  if (!matchedPlatform || !matchedPlatform[1]) {
+    throw new Error(`Service ${resolvedServiceName} is not configured in this project.`);
+  }
+
+  const [platformKey, managedItem] = matchedPlatform;
+  const providerRef = project.state.providerReferences?.[managedItem.id];
+  if (!providerRef) {
+    throw new Error(`Service ${resolvedServiceName} is not provisioned in this project.`);
+  }
+
+  const vmid = providerRef.vmid;
+  const storage = managedItem.deployment?.storage ?? project.config.proxmox.defaultStorage;
+  const snapshotSupported = proxmox?.supportsSnapshots
+    ? (typeof proxmox.supportsSnapshots === "function" ? proxmox.supportsSnapshots(storage) : proxmox.supportsSnapshots)
+    : true;
+
+  let shouldTakeSnapshot = false;
+  if (snapshotSupported) {
+    if (options.snapshot !== undefined) {
+      shouldTakeSnapshot = options.snapshot;
+    } else if (prompts !== undefined) {
+      shouldTakeSnapshot = await confirmPrompt(
+        prompts,
+        `Take a Proxmox snapshot before upgrading ${resolvedServiceName}?`,
+        true
+      );
+    }
+  }
+
+  let snapshotResult;
+  if (shouldTakeSnapshot && proxmox?.createSnapshot && vmid !== undefined) {
+    const snapshotName = options.snapshotName ?? `pre-upgrade-${resolvedServiceName}-${Date.now()}`;
+    snapshotResult = proxmox.createSnapshot(vmid, snapshotName);
+  }
+
+  const plugin = getPlatformProvider(managedItem.service);
+  const adapter = providerAdapters[managedItem.service] ?? providerAdapters.caddy;
+  if (adapter === undefined) {
+    throw new Error(`${resolvedServiceName} provider adapter is unavailable.`);
+  }
+
+  const upgradePlan = plugin.upgrade(adapter, managedItem);
+  const commands = upgradePlan.lxcCommands ?? upgradePlan.operations ?? [];
+  if (proxmox?.pctExec && vmid !== undefined) {
+    for (const command of commands) {
+      proxmox.pctExec(vmid, command);
+    }
+  }
+
+  const providerReferences = platformKey === "dns"
+    ? [project.config.baseLocalDomain]
+    : [];
+  const inspection = plugin.inspect(adapter, managedItem, { providerReferences });
+  const health = plugin.healthCheck(adapter, managedItem);
+
+  const snapshotText = snapshotResult ? `Snapshot ${snapshotResult.snapshotName ?? snapshotResult.name} created. ` : "";
+  const healthLabel = health.status === "healthy" ? "healthy" : "unhealthy";
+  const hostname = managedItem.deployment?.hostname ?? resolvedServiceName;
+  const serviceLabel = resolvedServiceName.charAt(0).toUpperCase() + resolvedServiceName.slice(1);
+
+  return {
+    stdout: `${snapshotText}${serviceLabel} upgraded on ${hostname} (vmid ${vmid}). Health: ${healthLabel}.\n`,
+    health,
+    inspection,
+    snapshot: snapshotResult,
+    vmid
+  };
+}
+
+async function removeService(serviceName, rawOptions, adapters) {
+  const { filesystem, runtime, proxmox, providerAdapters = {}, prompts } = adapters;
+  assertProxmoxShell(runtime);
+
+  const options = parseServiceRemoveOptions(rawOptions);
+  const project = loadProject(filesystem, options.projectDir);
+
+  let resolvedServiceName = serviceName;
+  if (resolvedServiceName === undefined) {
+    resolvedServiceName = await promptRemoveServiceName(project, prompts);
+  }
+
+  const platformEntries = Object.entries(project.config.managedInventory.platform);
+  const matchedPlatform = platformEntries.find(
+    ([key, item]) => item?.service === resolvedServiceName || key === resolvedServiceName
+  );
+
+  if (matchedPlatform && matchedPlatform[1]) {
+    const [platformKey, managedItem] = matchedPlatform;
+    const providerRef = project.state.providerReferences?.[managedItem.id];
+    if (!providerRef) {
+      throw new Error(`Service ${resolvedServiceName} is not provisioned in this project.`);
+    }
+
+    if (proxmox?.stopLxc && providerRef.vmid !== undefined) {
+      proxmox.stopLxc(providerRef.vmid);
+    }
+
+    const updatedConfig = {
+      ...project.config,
+      managedInventory: {
+        ...project.config.managedInventory,
+        platform: {
+          ...project.config.managedInventory.platform,
+          [platformKey]: {
+            id: managedItem.id,
+            service: managedItem.service
+          }
+        }
+      }
+    };
+
+    const updatedProviderRefs = { ...project.state.providerReferences };
+    delete updatedProviderRefs[managedItem.id];
+
+    const updatedState = {
+      ...project.state,
+      providerReferences: updatedProviderRefs,
+      retainedServices: {
+        ...(project.state.retainedServices ?? {}),
+        [managedItem.id]: {
+          ...providerRef,
+          service: managedItem.service,
+          removedAt: new Date().toISOString()
+        }
+      }
+    };
+
+    writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
+    writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
+    filesystem.chmod(project.statePath, 0o600);
+
+    return {
+      stdout: `Service ${resolvedServiceName} removed. LXC ${providerRef.vmid} stopped and data retained. Platform integrations disconnected.\n`,
+      vmid: providerRef.vmid,
+      service: resolvedServiceName
+    };
+  }
+
+  const matchedService = (project.config.managedInventory.services ?? []).find(
+    (s) => s.name === resolvedServiceName || s.exposure?.hostname === resolvedServiceName
+  );
+
+  if (matchedService) {
+    const hostname = matchedService.exposure?.hostname;
+    if (hostname) {
+      if (providerAdapters.technitium?.unpublishRecord) {
+        providerAdapters.technitium.unpublishRecord({ hostname });
+      }
+      const proxyService = project.config.managedInventory.platform.reverseProxy;
+      if (proxyService && providerAdapters[proxyService.service]?.unpublishRoute) {
+        providerAdapters[proxyService.service].unpublishRoute({ hostname });
+      }
+    }
+
+    const updatedServices = (project.config.managedInventory.services ?? []).filter(
+      (s) => s.id !== matchedService.id
+    );
+    const updatedConfig = {
+      ...project.config,
+      managedInventory: {
+        ...project.config.managedInventory,
+        services: updatedServices
+      }
+    };
+
+    const updatedProviderRefs = { ...project.state.providerReferences };
+    delete updatedProviderRefs[matchedService.id];
+
+    const updatedState = {
+      ...project.state,
+      providerReferences: updatedProviderRefs
+    };
+
+    writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
+    writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
+    filesystem.chmod(project.statePath, 0o600);
+
+    return {
+      stdout: `Exposure ${matchedService.name} (${hostname}) removed. DNS and proxy routes disconnected.\n`,
+      service: matchedService.name
+    };
+  }
+
+  throw new Error(`Service ${resolvedServiceName} not found in managed inventory.`);
+}
+
+async function destroyService(serviceName, rawOptions, adapters) {
+  const { filesystem, runtime, proxmox, prompts } = adapters;
+  assertProxmoxShell(runtime);
+
+  const options = parseServiceDestroyOptions(rawOptions);
+  const project = loadProject(filesystem, options.projectDir);
+
+  let resolvedServiceName = serviceName;
+  if (resolvedServiceName === undefined) {
+    resolvedServiceName = await promptDestroyServiceName(project, prompts);
+  }
+
+  const platformEntries = Object.entries(project.config.managedInventory.platform);
+  const matchedPlatform = platformEntries.find(
+    ([key, item]) => item?.service === resolvedServiceName || key === resolvedServiceName
+  );
+
+  let managedItemId;
+  let vmid;
+  let platformKey;
+
+  if (matchedPlatform && matchedPlatform[1]) {
+    platformKey = matchedPlatform[0];
+    managedItemId = matchedPlatform[1].id;
+    vmid = project.state.providerReferences?.[managedItemId]?.vmid ??
+      project.state.retainedServices?.[managedItemId]?.vmid;
+  } else {
+    const retainedEntry = Object.entries(project.state.retainedServices ?? {}).find(
+      ([, ref]) => ref.service === resolvedServiceName
+    );
+    if (retainedEntry) {
+      managedItemId = retainedEntry[0];
+      vmid = retainedEntry[1].vmid;
+    }
+  }
+
+  if (vmid === undefined) {
+    throw new Error(`Service ${resolvedServiceName} not found or not provisioned/retained.`);
+  }
+
+  let confirmed = options.confirm || options.yes;
+  if (!confirmed) {
+    confirmed = await confirmPrompt(
+      prompts,
+      `Are you sure you want to permanently destroy LXC ${vmid} for ${resolvedServiceName} and delete all data?`,
+      false
+    );
+  }
+
+  if (!confirmed) {
+    return {
+      stdout: "Destruction cancelled. No resources were deleted.\n",
+      cancelled: true
+    };
+  }
+
+  if (proxmox?.stopLxc) {
+    proxmox.stopLxc(vmid);
+  }
+  if (proxmox?.destroyLxc) {
+    proxmox.destroyLxc(vmid);
+  }
+
+  let updatedConfig = project.config;
+  if (platformKey && updatedConfig.managedInventory.platform[platformKey]?.deployment) {
+    updatedConfig = {
+      ...project.config,
+      managedInventory: {
+        ...project.config.managedInventory,
+        platform: {
+          ...project.config.managedInventory.platform,
+          [platformKey]: {
+            id: managedItemId,
+            service: project.config.managedInventory.platform[platformKey].service
+          }
+        }
+      }
+    };
+  }
+
+  const updatedProviderRefs = { ...project.state.providerReferences };
+  delete updatedProviderRefs[managedItemId];
+
+  const updatedRetainedServices = { ...(project.state.retainedServices ?? {}) };
+  delete updatedRetainedServices[managedItemId];
+
+  const updatedState = {
+    ...project.state,
+    providerReferences: updatedProviderRefs,
+    retainedServices: updatedRetainedServices
+  };
+
+  writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
+  writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
+  filesystem.chmod(project.statePath, 0o600);
+
+  return {
+    stdout: `Service ${resolvedServiceName} destroyed. LXC ${vmid} and all persistent data deleted.\n`,
+    vmid,
+    service: resolvedServiceName
+  };
+}
+
 async function publishExposure(options, adapters) {
   const { filesystem, providerAdapters = {} } = adapters;
   assertProxmoxShell(adapters.runtime);
@@ -700,14 +1025,73 @@ function formatPlatformProvisionResult({
   };
 }
 
-function parseFlagOptions(rawOptions, optionNames, options) {
-  for (let index = 0; index < rawOptions.length; index += 2) {
-    const key = optionNames.get(rawOptions[index]);
-    const value = rawOptions[index + 1];
-    if (!key || value === undefined || value.startsWith("--")) {
-      throw new Error(`Unknown or incomplete option: ${rawOptions[index] ?? ""}`);
+function parseServiceUpgradeOptions(rawOptions) {
+  const options = {};
+  const optionNames = new Map([
+    ["--project-dir", "projectDir"],
+    ["--snapshot", "snapshot"],
+    ["--no-snapshot", "noSnapshot"],
+    ["--snapshot-name", "snapshotName"]
+  ]);
+  const booleanFlags = new Set(["--snapshot", "--no-snapshot"]);
+  parseFlagOptions(rawOptions, optionNames, options, booleanFlags);
+  if (options.noSnapshot) {
+    options.snapshot = false;
+  }
+  return options;
+}
+
+function parseServiceRemoveOptions(rawOptions) {
+  const options = {};
+  const optionNames = new Map([
+    ["--project-dir", "projectDir"],
+    ["--force", "force"]
+  ]);
+  const booleanFlags = new Set(["--force"]);
+  parseFlagOptions(rawOptions, optionNames, options, booleanFlags);
+  return options;
+}
+
+function parseServiceDestroyOptions(rawOptions) {
+  const options = {};
+  const optionNames = new Map([
+    ["--project-dir", "projectDir"],
+    ["--confirm", "confirm"],
+    ["--yes", "yes"],
+    ["-y", "yes"]
+  ]);
+  const booleanFlags = new Set(["--confirm", "--yes", "-y"]);
+  parseFlagOptions(rawOptions, optionNames, options, booleanFlags);
+  return options;
+}
+
+function parseFlagOptions(rawOptions, optionNames, options, booleanFlags = new Set()) {
+  for (let index = 0; index < rawOptions.length;) {
+    const rawFlag = rawOptions[index];
+    const key = optionNames.get(rawFlag);
+    if (!key) {
+      throw new Error(`Unknown or incomplete option: ${rawFlag ?? ""}`);
     }
-    options[key] = value;
+    if (booleanFlags.has(rawFlag)) {
+      const nextValue = rawOptions[index + 1];
+      if (nextValue === "true") {
+        options[key] = true;
+        index += 2;
+      } else if (nextValue === "false") {
+        options[key] = false;
+        index += 2;
+      } else {
+        options[key] = true;
+        index += 1;
+      }
+    } else {
+      const value = rawOptions[index + 1];
+      if (value === undefined || value.startsWith("--")) {
+        throw new Error(`Unknown or incomplete option: ${rawFlag ?? ""}`);
+      }
+      options[key] = value;
+      index += 2;
+    }
   }
 }
 

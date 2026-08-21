@@ -98,6 +98,18 @@ export function canPublishExposure(project) {
     && caProvisioned;
 }
 
+export function hasProvisionedServices(project) {
+  if (!project?.state?.providerReferences) return false;
+  return Object.keys(project.state.providerReferences).length > 0;
+}
+
+export function hasProvisionedOrRetainedServices(project) {
+  if (!project?.state) return false;
+  const activeCount = Object.keys(project.state.providerReferences ?? {}).length;
+  const retainedCount = Object.keys(project.state.retainedServices ?? {}).length;
+  return activeCount > 0 || retainedCount > 0;
+}
+
 export function buildMenuOptions(project) {
   const options = [];
   if (project !== undefined && canProvisionTechnitium(project)) {
@@ -284,6 +296,30 @@ export async function runInteractiveApp(adapters) {
   if (action === "publish-exposure") {
     const result = await adapters.runCommand(["exposure", "publish"], adapters);
     clack.outro("Exposure published.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
+    return result;
+  }
+  if (action === "upgrade-service") {
+    const result = await adapters.runCommand(["service", "upgrade"], adapters);
+    clack.outro("Service upgrade complete.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
+    return result;
+  }
+  if (action === "remove-service") {
+    const result = await adapters.runCommand(["service", "remove"], adapters);
+    clack.outro("Service removal complete.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
+    return result;
+  }
+  if (action === "destroy-service") {
+    const result = await adapters.runCommand(["service", "destroy"], adapters);
+    clack.outro("Service destruction complete.");
     if (adapters.tracking) {
       adapters.tracking.run(adapters);
     }
@@ -517,7 +553,7 @@ async function askPrompt(prompts, question, fallback = undefined) {
   return prompts.ask(question, fallback);
 }
 
-async function confirmPrompt(prompts, message, initialValue) {
+export async function confirmPrompt(prompts, message, initialValue) {
   if (prompts?.confirm) {
     return prompts.confirm({ message, initialValue });
   }
@@ -526,6 +562,102 @@ async function confirmPrompt(prompts, message, initialValue) {
     return answer.toLowerCase().startsWith("y");
   }
   return initialValue;
+}
+
+export async function promptUpgradeServiceName(project, prompts) {
+  const choices = [];
+  for (const [key, item] of Object.entries(project.config.managedInventory.platform)) {
+    if (item && project.state.providerReferences[item.id]) {
+      choices.push({ value: item.service, label: `${item.service} (${key})`, hint: `LXC vmid ${project.state.providerReferences[item.id].vmid}` });
+    }
+  }
+  if (choices.length === 0) {
+    throw new Error("No provisioned platform services found to upgrade.");
+  }
+  if (choices.length === 1) {
+    return choices[0].value;
+  }
+  if (prompts?.select) {
+    const selected = await prompts.select({
+      message: "Which service would you like to upgrade?",
+      options: choices
+    });
+    if (selected === undefined) throw new Error("Upgrade cancelled.");
+    return selected;
+  }
+  if (prompts?.ask) {
+    const text = choices.map((c) => `${c.label}`).join("; ");
+    return prompts.ask(`Service to upgrade (${text})`, choices[0].value);
+  }
+  return choices[0].value;
+}
+
+export async function promptRemoveServiceName(project, prompts) {
+  const choices = [];
+  for (const [key, item] of Object.entries(project.config.managedInventory.platform)) {
+    if (item && project.state.providerReferences[item.id]) {
+      choices.push({ value: item.service, label: `${item.service} (${key})`, hint: `LXC vmid ${project.state.providerReferences[item.id].vmid}` });
+    }
+  }
+  for (const s of project.config.managedInventory.services ?? []) {
+    if (s && project.state.providerReferences[s.id]) {
+      choices.push({ value: s.name ?? s.exposure?.hostname, label: `${s.name} (exposure)`, hint: s.exposure?.hostname });
+    }
+  }
+  if (choices.length === 0) {
+    throw new Error("No provisioned services found to remove.");
+  }
+  if (choices.length === 1) {
+    return choices[0].value;
+  }
+  if (prompts?.select) {
+    const selected = await prompts.select({
+      message: "Which service would you like to remove?",
+      options: choices
+    });
+    if (selected === undefined) throw new Error("Removal cancelled.");
+    return selected;
+  }
+  if (prompts?.ask) {
+    const text = choices.map((c) => `${c.label}`).join("; ");
+    return prompts.ask(`Service to remove (${text})`, choices[0].value);
+  }
+  return choices[0].value;
+}
+
+export async function promptDestroyServiceName(project, prompts) {
+  const choices = [];
+  for (const [key, item] of Object.entries(project.config.managedInventory.platform)) {
+    if (item && (project.state.providerReferences?.[item.id] || project.state.retainedServices?.[item.id])) {
+      const ref = project.state.providerReferences?.[item.id] ?? project.state.retainedServices?.[item.id];
+      const status = project.state.retainedServices?.[item.id] ? "retained" : "active";
+      choices.push({ value: item.service, label: `${item.service} (${status})`, hint: `LXC vmid ${ref.vmid}` });
+    }
+  }
+  for (const [id, ref] of Object.entries(project.state.retainedServices ?? {})) {
+    if (!choices.some((c) => c.value === ref.service)) {
+      choices.push({ value: ref.service, label: `${ref.service} (retained)`, hint: `LXC vmid ${ref.vmid}` });
+    }
+  }
+  if (choices.length === 0) {
+    throw new Error("No provisioned or retained services found to destroy.");
+  }
+  if (choices.length === 1) {
+    return choices[0].value;
+  }
+  if (prompts?.select) {
+    const selected = await prompts.select({
+      message: "Which service LXC would you like to permanently destroy?",
+      options: choices
+    });
+    if (selected === undefined) throw new Error("Destruction cancelled.");
+    return selected;
+  }
+  if (prompts?.ask) {
+    const text = choices.map((c) => `${c.label}`).join("; ");
+    return prompts.ask(`Service to destroy (${text})`, choices[0].value);
+  }
+  return choices[0].value;
 }
 
 function logInfo(prompts, message) {

@@ -234,6 +234,18 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
 
         changes.push(adoptedChange);
       }
+
+      if (inspection.availableUpgrade !== undefined) {
+        changes.push({
+          serviceName: managedItem.service,
+          platformKey,
+          kind: "upgrade-available",
+          before: managedItem.deployment?.version,
+          after: inspection.availableUpgrade,
+          verified: true,
+          timestamp: new Date().toISOString()
+        });
+      }
     } catch (error) {
       warnings.push({
         serviceName: managedItem.service,
