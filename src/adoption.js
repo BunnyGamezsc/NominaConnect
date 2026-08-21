@@ -107,7 +107,56 @@ export function createAdoptedChange(serviceName, platformKey, before, after, kin
   };
 }
 
-export async function runAdoptionPass({ project, providerAdapters }) {
+export async function withBoundedRetry(
+  operation,
+  {
+    maxRetries = 2,
+    baseDelayMs = 10,
+    backoffFactor = 2,
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  } = {}
+) {
+  let attempt = 0;
+  let lastError;
+  while (attempt <= maxRetries) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxRetries) {
+        const delay = baseDelayMs * Math.pow(backoffFactor, attempt);
+        if (delay > 0) {
+          await sleep(delay);
+        }
+      }
+      attempt += 1;
+    }
+  }
+  throw lastError;
+}
+
+export function adoptServiceExposure(config, serviceId, observedExposure) {
+  return {
+    ...config,
+    managedInventory: {
+      ...config.managedInventory,
+      services: (config.managedInventory.services ?? []).map((service) => {
+        if (service.id === serviceId) {
+          return {
+            ...service,
+            exposure: {
+              ...service.exposure,
+              ...observedExposure
+            }
+          };
+        }
+        return service;
+      })
+    }
+  };
+}
+
+export async function runAdoptionPass({ project, providerAdapters = {}, retryOptions = {} }) {
   const changes = [];
   const warnings = [];
   const platformServices = collectPlatformServices(project.config.managedInventory);
@@ -117,7 +166,10 @@ export async function runAdoptionPass({ project, providerAdapters }) {
     if (providerRef === undefined) {
       continue;
     }
-    const adapter = providerAdapters[managedItem.service];
+    const adapter = managedItem.service === "caddy-internal-ca"
+      ? (providerAdapters["caddy-internal-ca"] ?? providerAdapters["caddy"])
+      : providerAdapters[managedItem.service];
+
     if (adapter === undefined) {
       warnings.push({
         serviceName: managedItem.service,
@@ -128,24 +180,36 @@ export async function runAdoptionPass({ project, providerAdapters }) {
     }
 
     const providerReferences = platformKey === "dns"
-      ? [project.config.baseLocalDomain]
+      ? [project.config.baseLocalDomain, ...(project.config.managedInventory.services ?? []).map((s) => s.exposure?.hostname).filter(Boolean)]
+      : platformKey === "reverseProxy" || platformKey === "certificateAuthority"
+      ? (project.config.managedInventory.services ?? []).map((s) => s.exposure?.hostname).filter(Boolean)
       : [];
 
     try {
-      const inspection = inspectPlatformService(adapter, managedItem, providerReferences);
+      const inspection = await withBoundedRetry(
+        () => inspectPlatformService(adapter, managedItem, providerReferences),
+        retryOptions
+      );
       if (inspection === undefined) {
         continue;
       }
 
+      const observedDeployment = inspection.deployment ?? (managedItem.deployment ? {
+        ip: providerRef.ip ?? managedItem.deployment?.ip,
+        hostname: managedItem.deployment?.hostname,
+        bridge: managedItem.deployment?.bridge,
+        storage: managedItem.deployment?.storage,
+        resources: managedItem.deployment?.resources
+      } : undefined);
+
       const observed = {
-        deployment: {
-          ip: providerRef.ip,
-          hostname: managedItem.deployment?.hostname,
-          resources: managedItem.deployment?.resources
-        }
+        deployment: observedDeployment
       };
 
-      const health = getPlatformProvider(managedItem.service).healthCheck(adapter, managedItem);
+      const health = await withBoundedRetry(
+        () => getPlatformProvider(managedItem.service).healthCheck(adapter, managedItem),
+        retryOptions
+      );
 
       if (health.status === "unhealthy") {
         warnings.push({
@@ -176,6 +240,76 @@ export async function runAdoptionPass({ project, providerAdapters }) {
         platformKey,
         message: `Failed to inspect ${managedItem.service}: ${error.message}.`
       });
+    }
+  }
+
+  // Inspect exposed services across reverse proxy (Caddy / Traefik)
+  const proxyService = project.config.managedInventory.platform.reverseProxy;
+  const proxyRef = proxyService ? project.state.providerReferences[proxyService.id] : undefined;
+  const proxyAdapter = proxyService ? providerAdapters[proxyService.service] : undefined;
+
+  for (const service of collectExposedServices(project.config.managedInventory)) {
+    const hostname = service.exposure.hostname;
+    if (proxyAdapter !== undefined && proxyRef !== undefined) {
+      try {
+        const proxyPlugin = getPlatformProvider(proxyService.service);
+        const proxyInspection = await withBoundedRetry(
+          () => proxyPlugin.inspect(proxyAdapter, proxyService, { providerReferences: [hostname] }),
+          retryOptions
+        );
+        const matchedRoute = proxyInspection?.managed?.find((r) => r.id === hostname);
+        if (matchedRoute !== undefined) {
+          const observedBackendIp = matchedRoute.backendIp ?? matchedRoute.backend?.ip;
+          const observedBackendPort = matchedRoute.backendPort ?? matchedRoute.backend?.port;
+          const backendChanged = (observedBackendIp !== undefined && observedBackendIp !== service.exposure.backend?.ip) ||
+            (observedBackendPort !== undefined && observedBackendPort !== service.exposure.backend?.port);
+
+          if (backendChanged) {
+            const newBackend = {
+              ip: observedBackendIp ?? service.exposure.backend?.ip,
+              port: observedBackendPort ?? service.exposure.backend?.port
+            };
+            const updatedExposure = {
+              ...service.exposure,
+              backend: newBackend
+            };
+            const health = proxyAdapter.healthCheckExposure
+              ? await withBoundedRetry(
+                  () => proxyAdapter.healthCheckExposure({ hostname, backendIp: newBackend.ip, backendPort: newBackend.port }),
+                  retryOptions
+                )
+              : { status: "healthy" };
+
+            const adoptedChange = {
+              serviceId: service.id,
+              serviceName: service.name ?? hostname,
+              platformKey: "reverseProxy",
+              kind: "exposure-changed",
+              changes: { backend: newBackend },
+              before: { ...service.exposure },
+              after: updatedExposure,
+              verified: health.status === "healthy",
+              timestamp: new Date().toISOString()
+            };
+
+            if (health.status === "unhealthy") {
+              warnings.push({
+                serviceName: service.name ?? hostname,
+                platformKey: "reverseProxy",
+                message: `${service.name ?? hostname} exposure health check failed.`
+              });
+            }
+
+            changes.push(adoptedChange);
+          }
+        }
+      } catch (error) {
+        warnings.push({
+          serviceName: service.name ?? hostname,
+          platformKey: "reverseProxy",
+          message: `Failed to inspect exposure for ${service.name ?? hostname}: ${error.message}.`
+        });
+      }
     }
   }
 

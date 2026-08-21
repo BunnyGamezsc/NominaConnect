@@ -17,7 +17,9 @@ function createProviderPlugin({ name, operations, exposureProtocol = undefined }
         provider: name,
         managedItemId: managedItem.id,
         managed: resources.filter((resource) => managedIds.has(resource.id)),
-        unmanaged: resources.filter((resource) => !managedIds.has(resource.id))
+        unmanaged: resources.filter((resource) => !managedIds.has(resource.id)),
+        ...(observed.deployment !== undefined ? { deployment: observed.deployment } : {}),
+        ...(observed.configuration !== undefined ? { configuration: observed.configuration } : {})
       };
     },
     adopt(adapter, managedItem, observedConfiguration) {

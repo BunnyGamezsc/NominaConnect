@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { runAdoptionPass } from "./adoption.js";
 import { loadProject, serializeProjectConfiguration } from "./config.js";
-import { adoptPlatformDeployment } from "./adoption.js";
+import { adoptPlatformDeployment, adoptServiceExposure } from "./adoption.js";
 
 let writeQueue = Promise.resolve();
 
@@ -10,7 +10,7 @@ export function enqueueWrite(operation) {
   return writeQueue;
 }
 
-export async function runTrackingJob({ filesystem, projectDir, providerAdapters = {} }) {
+export async function runTrackingJob({ filesystem, projectDir, providerAdapters = {}, retryOptions = {} }) {
   let project;
   try {
     project = loadProject(filesystem, projectDir);
@@ -18,7 +18,7 @@ export async function runTrackingJob({ filesystem, projectDir, providerAdapters 
     return { changes: [], warnings: [], notices: [] };
   }
 
-  const adoptionResult = await runAdoptionPass({ project, providerAdapters });
+  const adoptionResult = await runAdoptionPass({ project, providerAdapters, retryOptions });
   const notices = [];
 
   if (adoptionResult.changes.length > 0 || adoptionResult.warnings.length > 0) {
@@ -34,6 +34,8 @@ export async function runTrackingJob({ filesystem, projectDir, providerAdapters 
       for (const change of adoptionResult.changes) {
         if (change.kind === "platform-deployed" || change.kind === "platform-changed") {
           updatedConfig = adoptPlatformDeployment(updatedConfig, change.platformKey, change.after);
+        } else if (change.kind === "exposure-changed" || change.kind === "service-changed") {
+          updatedConfig = adoptServiceExposure(updatedConfig, change.serviceId, change.after?.exposure ?? change.after);
         }
       }
 
@@ -98,17 +100,21 @@ export async function runTrackingJob({ filesystem, projectDir, providerAdapters 
 
 export function formatChangeSummary(change) {
   if (change.kind === "platform-deployed") {
-    return `${change.serviceName} deployment observed at ${change.after.ip ?? "unknown ip"}.`;
+    return `${change.serviceName} deployment observed at ${change.after?.ip ?? "unknown ip"}.`;
   }
   if (change.kind === "platform-changed") {
-    const fields = Object.keys(change.changes).filter((k) => k !== "resources");
-    if (change.changes.resources !== undefined) {
+    const fields = Object.keys(change.changes || {}).filter((k) => k !== "resources");
+    if (change.changes?.resources !== undefined) {
       fields.push(...Object.keys(change.changes.resources).map((k) => `resources.${k}`));
     }
     return `${change.serviceName} ${fields.join(", ")} changed.`;
   }
   if (change.kind === "exposure-discovered") {
     return `Exposure for ${change.serviceName} discovered in provider.`;
+  }
+  if (change.kind === "exposure-changed") {
+    const fields = Object.keys(change.changes || {});
+    return `${change.serviceName} exposure ${fields.join(", ")} changed.`;
   }
   return `${change.serviceName} change adopted.`;
 }
