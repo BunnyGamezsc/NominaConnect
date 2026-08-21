@@ -5,6 +5,20 @@ It helps operators set up and connect DNS, reverse proxy, certificate authority,
 and VPN services without manually transcribing the same hostnames and IPs between
 tools.
 
+## Installation
+
+Choose your installation method:
+
+**Native binary (recommended, no Node.js required):**
+```bash
+curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install-native.sh | sudo bash
+```
+
+**Node.js version:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install.sh | sudo bash
+```
+
 ## Quick start
 
 On your Proxmox host:

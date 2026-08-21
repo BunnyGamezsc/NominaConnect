@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# NominaConnect installer — curl this into your Proxmox server
+# NominaConnect installer (Node.js version) — curl this into your Proxmox server
+# For a native binary version (no Node.js required), use install-native.sh instead
 # Usage: curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install.sh | bash
 set -euo pipefail
 
