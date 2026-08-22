@@ -7,7 +7,7 @@ const CADDY_INSTALL = Object.freeze([
   { binary: "/usr/bin/curl", args: ["-1sLf", "https://dl.cloudsmith.io/public/caddy/stable/gpg.key", "-o", "/usr/share/keyrings/caddy-stable-archive-keyring.gpg"] },
   { binary: "/bin/bash", args: ["-c", "curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt | tee /etc/apt/sources.list.d/caddy-stable.list"] },
   { binary: "/usr/bin/apt-get", args: ["update"] },
-  { binary: "/usr/bin/apt-get", args: ["install", "--yes", "caddy"] }
+  { binary: "/usr/bin/apt-get", args: ["install", "--yes", "caddy"], timeoutMs: 120_000 }
 ]);
 
 export function createCaddyAdapter({ httpClient, secretResolver }) {

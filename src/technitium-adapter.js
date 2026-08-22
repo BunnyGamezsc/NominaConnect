@@ -9,7 +9,7 @@ const TECHNITIUM_INSTALL = Object.freeze([
     binary: "/usr/bin/curl",
     args: ["-fsSL", "-o", "/tmp/technitium-install.sh", "https://download.technitium.com/dns/install.sh"]
   },
-  { binary: "/bin/bash", args: ["/tmp/technitium-install.sh"] }
+  { binary: "/bin/bash", args: ["/tmp/technitium-install.sh"], timeoutMs: 180_000 }
 ]);
 
 export function createTechnitiumAdapter({ httpClient, secretResolver }) {

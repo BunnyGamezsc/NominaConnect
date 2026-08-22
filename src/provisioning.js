@@ -1,3 +1,4 @@
+import { withBoundedRetry } from "./adoption.js";
 import { getPlatformProvider } from "./providers.js";
 
 export const TECHNITIUM_DEPLOYMENT = Object.freeze({
@@ -126,18 +127,27 @@ export async function provisionPlatformService({
   }
 
   if (typeof providerAdapter.configure === "function") {
-    await providerAdapter.configure({
-      provider: serviceName,
-      managedItemId: managedItem.id,
-      ...providerContext
-    });
+    await withBoundedRetry(
+      () => providerAdapter.configure({
+        provider: serviceName,
+        managedItemId: managedItem.id,
+        ...providerContext
+      }),
+      { maxRetries: 6, baseDelayMs: 2000, backoffFactor: 1.5 }
+    );
   }
 
   const providerReferences = serviceName === "technitium"
     ? [project.config.baseLocalDomain]
     : [];
-  const inspection = await plugin.inspect(providerAdapter, managedItem, { ...providerContext, providerReferences });
-  const health = await plugin.healthCheck(providerAdapter, managedItem, providerContext);
+  const inspection = await withBoundedRetry(
+    () => plugin.inspect(providerAdapter, managedItem, { ...providerContext, providerReferences }),
+    { maxRetries: 6, baseDelayMs: 2000, backoffFactor: 1.5 }
+  );
+  const health = await withBoundedRetry(
+    () => plugin.healthCheck(providerAdapter, managedItem, providerContext),
+    { maxRetries: 4, baseDelayMs: 1000, backoffFactor: 2 }
+  );
 
   return {
     created,

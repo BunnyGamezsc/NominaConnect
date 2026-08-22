@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.2.1] - 2026-08-22
+
+### Fixed
+- **Technitium provisioning raced the service start** (`Unable to connect. Is the computer able to access the url?`):
+  `nomina service add technitium` created the LXC and ran the Technitium installer (`curl` → `bash /tmp/technitium-install.sh`), then immediately called the Admin API (`POST /api/user/login`, `GET /api/user/session/get`, `GET /api/zones/...`). On slower templates (debian-13, 1 CPU) the `dotnet` process wasn’t listening on `:5380` yet, so `configure`/`inspect` threw `HttpRequestError` and the CLI aborted before writing `state.json` (leaving a running LXC `100` with no provider reference and a blocked retry on the same IP).
+  - `technitium-adapter` install step `bash /tmp/technitium-install.sh` now runs with `timeoutMs: 180_000` (was 30s default) to avoid premature `SIGTERM`
+  - `caddy-adapter` final `apt-get install caddy` now runs with `timeoutMs: 120_000`
+  - `provisionPlatformService` (`src/provisioning.js:128`) now wraps `configure`, `inspect`, and `healthCheck` in `withBoundedRetry` (`maxRetries 6`, `baseDelay 2s`, `backoff 1.5` → ~25s total) so a transient `ECONNREFUSED`/`HttpRequestError` while `dotnet` boots is retried, then health is preserved
+  - Verifies on `nuc` with `192.168.4.90` (`vmbr0`, `gw 192.168.4.1`, `ping 192.168.4.90`, `curl http://192.168.4.90:5380/api/user/login → 200`, `ss -tlnp *:5380 dotnet`)
+
 ## [1.2.0] - 2026-08-22
 
 ### Added
