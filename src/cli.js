@@ -9,7 +9,7 @@ import {
 import { publishManagedExposure } from "./exposure.js";
 import { getPlatformProvider } from "./providers.js";
 import { provisionPlatformService } from "./provisioning.js";
-import { ensureConnectionSecret } from "./secrets.js";
+import { ensureConnectionSecret, updateConnectionSecret } from "./secrets.js";
 import {
   runTrackingJob,
   formatPendingNotices,
@@ -29,6 +29,7 @@ import {
   promptUpgradeServiceName,
   promptRemoveServiceName,
   promptDestroyServiceName,
+  promptSecretServiceName,
   confirmPrompt
 } from "./tui.js";
 
@@ -56,6 +57,8 @@ async function runCommand(command, rest, adapters) {
       return handleExposureCommand(rest, adapters);
     case "changes":
       return showChanges(rest, adapters);
+    case "secret":
+      return handleSecretCommand(rest, adapters);
     default:
       throw new Error("Unknown command. Run nomina for the interactive menu.");
   }
@@ -120,6 +123,64 @@ async function handleExposureCommand(argumentsList, adapters) {
     throw new Error("Run nomina for the interactive menu, or use: nomina exposure publish");
   }
   return publishExposure(parseExposurePublishOptions(rest), adapters);
+}
+
+async function handleSecretCommand(argumentsList, adapters) {
+  const [subcommand, ...rest] = argumentsList;
+  if (subcommand !== "change") {
+    throw new Error("Run nomina for the interactive menu, or use: nomina secret change");
+  }
+  return changeConnectionSecret(parseSecretChangeOptions(rest), adapters);
+}
+
+async function changeConnectionSecret(options, adapters) {
+  const { filesystem, runtime } = adapters;
+  assertProxmoxShell(runtime);
+  const project = loadProject(filesystem, options.projectDir);
+  let serviceId = options.service;
+  let reference;
+  let label;
+  if (serviceId !== undefined) {
+    const platformEntries = Object.entries(project.config.managedInventory.platform);
+    const matchedPlatform = platformEntries.find(
+      ([key, item]) => item?.service === serviceId || item?.id === serviceId || key === serviceId
+    );
+    if (matchedPlatform) {
+      serviceId = matchedPlatform[1].id;
+      label = matchedPlatform[1].service;
+      reference = project.config.connectionSecretReferences[serviceId];
+    } else {
+      const svc = (project.config.managedInventory.services ?? []).find(
+        (s) => s.name === serviceId || s.id === serviceId || s.exposure?.hostname === serviceId
+      );
+      if (svc) {
+        serviceId = svc.id;
+        label = svc.name;
+        reference = project.config.connectionSecretReferences[serviceId];
+      } else {
+        throw new Error(`Service ${serviceId} not found in managed inventory.`);
+      }
+    }
+  } else {
+    serviceId = await promptSecretServiceName(project, adapters.prompts);
+    for (const [key, item] of Object.entries(project.config.managedInventory.platform)) {
+      if (item?.id === serviceId) {
+        label = item.service;
+        break;
+      }
+    }
+    if (!label) {
+      const svc = (project.config.managedInventory.services ?? []).find((s) => s.id === serviceId);
+      label = svc?.name ?? serviceId;
+    }
+    reference = project.config.connectionSecretReferences[serviceId];
+  }
+  if (!reference) {
+    throw new Error(`No connection secret reference for ${label ?? serviceId}.`);
+  }
+  const displayLabel = label ? label.charAt(0).toUpperCase() + label.slice(1) : serviceId;
+  await updateConnectionSecret(adapters, displayLabel, reference);
+  return { stdout: `Connection secret for ${displayLabel} updated.\n` };
 }
 
 async function showChanges(rawOptions, adapters) {
@@ -1025,6 +1086,16 @@ function parseExposurePublishOptions(rawOptions) {
   if (options.backendPort !== undefined) {
     options.backendPort = Number(options.backendPort);
   }
+  return options;
+}
+
+function parseSecretChangeOptions(rawOptions) {
+  const options = {};
+  const optionNames = new Map([
+    ["--project-dir", "projectDir"],
+    ["--service", "service"]
+  ]);
+  parseFlagOptions(rawOptions, optionNames, options);
   return options;
 }
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.2] - 2026-08-22
+
+### Added
+- **Update connection secret from the TUI** (`nomina secret change`):
+  - New `Update connection secret` menu entry (`src/tui.js:98` `canUpdateConnectionSecret` → `buildMenuOptions`) appears once any secret reference and provisioned service exist (e.g. after `Technitium` on `192.168.4.90`); routes to `nomina secret change` (`src/cli.js:49` `handleSecretCommand`)
+  - `src/cli.js:147` `changeConnectionSecret` + `src/tui.js:766` `promptSecretServiceName` list platform services/exposures with masking (`src/secrets.js:12` `clack.password`), then `src/secrets.js:13` `updateConnectionSecret` overwrites the root-owned `0700`/`0600` file in `/var/lib/nominaconnect/secrets/` via `secretStore.store`
+  - Use after changing the Technitium password in its UI (`admin` → new): run `nomina` → `Update connection secret` → pick `technitium (dns)` → enter new password → `Connection secret for Technitium updated.` — no manual `printf`/`chmod` needed
+  - CLI also supports `nomina secret change --service technitium --project-dir /root` for scripts
+
 ## [1.2.1] - 2026-08-22
 
 ### Fixed

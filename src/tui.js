@@ -84,6 +84,15 @@ export function canProvisionNetbird(project) {
   return canProvisionVpn(project, "netbird");
 }
 
+export function canUpdateConnectionSecret(project) {
+  if (!project?.config?.connectionSecretReferences || !project?.state?.providerReferences) {
+    return false;
+  }
+  const hasSecret = Object.keys(project.config.connectionSecretReferences).length > 0;
+  const hasProvisioned = Object.keys(project.state.providerReferences).length > 0;
+  return hasSecret && hasProvisioned;
+}
+
 export function canPublishExposure(project) {
   const dnsService = project?.config.managedInventory.platform.dns;
   const proxyService = project?.config.managedInventory.platform.reverseProxy;
@@ -185,6 +194,13 @@ export function buildMenuOptions(project) {
       value: "destroy-service",
       label: "Destroy a service LXC",
       hint: "permanently delete LXC container and data"
+    });
+  }
+  if (project !== undefined && canUpdateConnectionSecret(project)) {
+    options.push({
+      value: "update-secret",
+      label: "Update connection secret",
+      hint: "change stored provider password"
     });
   }
   if (project !== undefined) {
@@ -339,6 +355,14 @@ export async function runInteractiveApp(adapters) {
   if (action === "destroy-service") {
     const result = await adapters.runCommand(["service", "destroy"], adapters);
     clack.outro("Service destruction complete.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
+    return result;
+  }
+  if (action === "update-secret") {
+    const result = await adapters.runCommand(["secret", "change"], adapters);
+    clack.outro("Connection secret updated.");
     if (adapters.tracking) {
       adapters.tracking.run(adapters);
     }
@@ -703,6 +727,42 @@ export async function promptDestroyServiceName(project, prompts) {
   if (prompts?.ask) {
     const text = choices.map((c) => `${c.label}`).join("; ");
     return prompts.ask(`Service to destroy (${text})`, choices[0].value);
+  }
+  return choices[0].value;
+}
+
+export async function promptSecretServiceName(project, prompts) {
+  const entries = [];
+  for (const [platformKey, item] of Object.entries(project.config.managedInventory.platform ?? {})) {
+    if (item && project.config.connectionSecretReferences[item.id] !== undefined) {
+      const provisioned = project.state.providerReferences?.[item.id] !== undefined;
+      const hint = provisioned ? `LXC vmid ${project.state.providerReferences[item.id].vmid}` : "not yet provisioned";
+      entries.push({ id: item.id, service: item.service, platformKey, label: `${item.service} (${platformKey})`, hint });
+    }
+  }
+  for (const svc of project.config.managedInventory.services ?? []) {
+    if (svc && project.config.connectionSecretReferences[svc.id] !== undefined) {
+      entries.push({ id: svc.id, service: svc.name ?? svc.id, platformKey: "service", label: `${svc.name} (exposure)`, hint: svc.exposure?.hostname ?? svc.id });
+    }
+  }
+  if (entries.length === 0) {
+    throw new Error("No connection secrets are configured in this project.");
+  }
+  const choices = entries.map((e) => ({ value: e.id, label: e.label, hint: e.hint }));
+  if (choices.length === 1) {
+    return entries[0].id;
+  }
+  if (prompts?.select) {
+    const selected = await prompts.select({
+      message: "Which service secret would you like to update?",
+      options: choices
+    });
+    if (selected === undefined) throw new Error("Secret change cancelled.");
+    return selected;
+  }
+  if (prompts?.ask) {
+    const text = choices.map((c) => `${c.label}`).join("; ");
+    return prompts.ask(`Service secret to update (${text})`, choices[0].value);
   }
   return choices[0].value;
 }
