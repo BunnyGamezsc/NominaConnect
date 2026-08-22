@@ -96,20 +96,35 @@ export async function provisionPlatformService({
   const warnings = await runIpPreflight(proxmox, options.ip);
   const lxcSpec = resolveServiceDeployment(project, serviceName, options);
   const created = await proxmox.createLxc(lxcSpec);
+  if (typeof proxmox.inspectLxc === "function") {
+    await proxmox.inspectLxc(created.vmid);
+  }
 
   const plugin = getPlatformProvider(serviceName);
-  const connectionSecretReference = project.config.connectionSecretReferences[managedItem.id];
-  const setupPlan = await plugin.setup(providerAdapter, managedItem, { connectionSecretReference });
+  const providerContext = {
+    connectionSecretReference: project.config.connectionSecretReferences[managedItem.id],
+    ip: options.ip,
+    zone: project.config.baseLocalDomain
+  };
+  const setupPlan = await plugin.setup(providerAdapter, managedItem, providerContext);
   const commands = setupPlan.lxcCommands ?? setupPlan.operations ?? [];
   for (const command of commands) {
     await proxmox.pctExec(created.vmid, command);
   }
 
+  if (typeof providerAdapter.configure === "function") {
+    await providerAdapter.configure({
+      provider: serviceName,
+      managedItemId: managedItem.id,
+      ...providerContext
+    });
+  }
+
   const providerReferences = serviceName === "technitium"
     ? [project.config.baseLocalDomain]
     : [];
-  const inspection = await plugin.inspect(providerAdapter, managedItem, { providerReferences, connectionSecretReference });
-  const health = await plugin.healthCheck(providerAdapter, managedItem, { connectionSecretReference });
+  const inspection = await plugin.inspect(providerAdapter, managedItem, { ...providerContext, providerReferences });
+  const health = await plugin.healthCheck(providerAdapter, managedItem, providerContext);
 
   return {
     created,

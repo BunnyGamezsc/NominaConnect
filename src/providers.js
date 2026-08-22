@@ -1,23 +1,31 @@
+function providerRequest(name, managedItem, context = {}, extra = {}) {
+  const request = {
+    provider: name,
+    managedItemId: managedItem.id,
+    ...extra
+  };
+  for (const key of ["connectionSecretReference", "ip", "endpoint", "zone"]) {
+    if (context[key] !== undefined) {
+      request[key] = context[key];
+    }
+  }
+  return request;
+}
+
 function createProviderPlugin({ name, operations, upgradeOperations = [`upgrade-${name}`], exposureProtocol = undefined }) {
   return Object.freeze({
     name,
     async setup(adapter, managedItem, context = {}) {
-      return await adapter.setup({
-        provider: name,
-        managedItemId: managedItem.id,
+      return await adapter.setup(providerRequest(name, managedItem, context, {
         operations,
-        ...(context.connectionSecretReference === undefined ? {} : { connectionSecretReference: context.connectionSecretReference }),
         ...(exposureProtocol === undefined ? {} : { exposureProtocol })
-      });
+      }));
     },
     async upgrade(adapter, managedItem, context = {}) {
       if (adapter?.upgrade) {
-        return await adapter.upgrade({
-          provider: name,
-          managedItemId: managedItem.id,
-          operations: upgradeOperations,
-          ...(context.connectionSecretReference === undefined ? {} : { connectionSecretReference: context.connectionSecretReference })
-        });
+        return await adapter.upgrade(providerRequest(name, managedItem, context, {
+          operations: upgradeOperations
+        }));
       }
       return {
         provider: name,
@@ -28,12 +36,7 @@ function createProviderPlugin({ name, operations, upgradeOperations = [`upgrade-
     },
     async inspect(adapter, managedItem, context = {}) {
       const providerReferences = context.providerReferences ?? [];
-      const connectionSecretReference = context.connectionSecretReference;
-      const observed = await adapter.inspect({
-        provider: name,
-        managedItemId: managedItem.id,
-        ...(connectionSecretReference === undefined ? {} : { connectionSecretReference })
-      });
+      const observed = await adapter.inspect(providerRequest(name, managedItem, context));
       const managedIds = new Set(providerReferences);
       const resources = observed.resources ?? [];
       return {
@@ -47,19 +50,12 @@ function createProviderPlugin({ name, operations, upgradeOperations = [`upgrade-
       };
     },
     async adopt(adapter, managedItem, observedConfiguration, context = {}) {
-      return await adapter.adopt({
-        provider: name,
-        managedItemId: managedItem.id,
-        managed: observedConfiguration.managed,
-        ...(context.connectionSecretReference === undefined ? {} : { connectionSecretReference: context.connectionSecretReference })
-      });
+      return await adapter.adopt(providerRequest(name, managedItem, context, {
+        managed: observedConfiguration.managed
+      }));
     },
     async healthCheck(adapter, managedItem, context = {}) {
-      const observed = await adapter.healthCheck({
-        provider: name,
-        managedItemId: managedItem.id,
-        ...(context.connectionSecretReference === undefined ? {} : { connectionSecretReference: context.connectionSecretReference })
-      });
+      const observed = await adapter.healthCheck(providerRequest(name, managedItem, context));
       const healthy = observed.process === "running" && observed.endpoint === "reachable";
       return {
         provider: name,

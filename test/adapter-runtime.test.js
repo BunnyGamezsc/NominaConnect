@@ -75,10 +75,10 @@ test("production composition provides asynchronous Proxmox and provider adapters
   const availability = await proxmox.checkIpAvailability("10.0.0.53");
   assert.deepEqual(availability, { status: "known-collision", conflictWith: "lxc/120" });
 
-  const setup = await providerAdapters.technitium.setup({
-    provider: "technitium",
-    managedItemId: "nc_dns",
-    operations: ["install-technitium"]
+  const setup = await providerAdapters.caddy.setup({
+    provider: "caddy",
+    managedItemId: "nc_proxy",
+    operations: ["install-caddy"]
   });
   assert.deepEqual(setup.lxcCommands[0], {
     binary: "/usr/bin/apt-get",

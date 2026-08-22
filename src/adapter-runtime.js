@@ -2,6 +2,8 @@ import { spawn as spawnProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+import { createTechnitiumAdapter } from "./technitium-adapter.js";
+
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 export class CommandExecutionError extends Error {
@@ -59,13 +61,67 @@ export function createLocalSecretResolver(options = {}) {
   });
 }
 
+export class HttpRequestError extends Error {
+  constructor({ url, result = undefined, timedOut = false }) {
+    const status = timedOut ? "timed out" : `failed with status ${result?.status}`;
+    super(`Request to ${url} ${status}.`.trim());
+    this.name = "HttpRequestError";
+    this.url = url;
+    this.result = result;
+    this.timedOut = timedOut;
+  }
+}
+
+export function createHttpClient(options = {}) {
+  const fetchImpl = options.fetch ?? globalThis.fetch;
+  const defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+  return Object.freeze({
+    async request(request) {
+      const timeoutMs = request.timeoutMs ?? defaultTimeoutMs;
+      const redactions = request.redactions ?? [];
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetchImpl(request.url, {
+          method: request.method ?? "GET",
+          headers: request.headers,
+          body: request.body,
+          signal: controller.signal
+        });
+        const body = await response.text();
+        return {
+          status: response.status,
+          body: redactValue(body, redactions)
+        };
+      } catch (error) {
+        if (error.name === "AbortError") {
+          throw new HttpRequestError({
+            url: redactValue(request.url, redactions),
+            timedOut: true
+          });
+        }
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+  });
+}
+
 export function createProductionAdapters(options = {}) {
   const commandRunner = options.commandRunner ?? createCommandRunner();
   const secretResolver = options.secretResolver ?? createLocalSecretResolver();
+  const httpClient = options.httpClient ?? createHttpClient();
   const proxmox = createProxmoxAdapter(commandRunner);
-  const providerAdapters = Object.freeze(Object.fromEntries([
-    "technitium", "caddy", "traefik", "step-ca", "caddy-internal-ca", "tailscale", "netbird"
-  ].map((provider) => [provider, createProviderAdapter(provider, secretResolver)])));
+  const providerAdapters = Object.freeze({
+    technitium: createTechnitiumAdapter({ httpClient, secretResolver }),
+    caddy: createProviderAdapter("caddy", secretResolver),
+    traefik: createProviderAdapter("traefik", secretResolver),
+    "step-ca": createProviderAdapter("step-ca", secretResolver),
+    "caddy-internal-ca": createProviderAdapter("caddy-internal-ca", secretResolver),
+    tailscale: createProviderAdapter("tailscale", secretResolver),
+    netbird: createProviderAdapter("netbird", secretResolver)
+  });
   return Object.freeze({ proxmox, providerAdapters });
 }
 
@@ -80,7 +136,19 @@ function createProxmoxAdapter(commandRunner) {
       const vmid = matchingLine.trim().split(/\s+/)[0];
       return { status: "known-collision", conflictWith: `lxc/${vmid}` };
     },
+    async validateProvisioningPrerequisites(spec) {
+      await assertStorageAvailable(commandRunner, spec.storage);
+      const templateVolume = await resolveTemplateVolume(commandRunner, spec.template);
+      await assertBridgeAvailable(commandRunner, spec.bridge);
+      await assertUnprivilegedSupported(commandRunner, spec.unprivileged);
+      const availability = await this.checkIpAvailability(spec.ip);
+      if (availability.status === "known-collision") {
+        throw new Error(`Requested IP ${spec.ip} is already in use (${availability.conflictWith}).`);
+      }
+      return { templateVolume };
+    },
     async createLxc(spec) {
+      const { templateVolume } = await this.validateProvisioningPrerequisites(spec);
       const nextId = await commandRunner.run({ binary: "/usr/bin/pvesh", args: ["get", "/cluster/nextid"] });
       const vmid = nextId.stdout.trim();
       if (!/^\d+$/.test(vmid)) {
@@ -89,7 +157,7 @@ function createProxmoxAdapter(commandRunner) {
       await commandRunner.run({
         binary: "/usr/sbin/pct",
         args: [
-          "create", vmid, spec.template,
+          "create", vmid, templateVolume,
           "--hostname", spec.hostname,
           "--cores", String(spec.resources.cpus),
           "--memory", String(spec.resources.memoryMb),
@@ -100,6 +168,10 @@ function createProxmoxAdapter(commandRunner) {
         ]
       });
       return { vmid: Number(vmid), hostname: spec.hostname };
+    },
+    async inspectLxc(vmid) {
+      const result = await commandRunner.run({ binary: "/usr/sbin/pct", args: ["config", String(vmid)] });
+      return parsePctConfig(result.stdout);
     },
     async pctExec(vmid, command) {
       const normalized = normalizeCommand(command, DEFAULT_TIMEOUT_MS);
@@ -218,6 +290,86 @@ function redactValue(value, redactions) {
     (output, secret) => secret === "" ? output : output.split(secret).join("[REDACTED]"),
     String(value ?? "")
   );
+}
+
+async function assertStorageAvailable(commandRunner, storage) {
+  const result = await commandRunner.run({ binary: "/usr/sbin/pvesm", args: ["status"] });
+  const match = result.stdout.split("\n").map((line) => line.trim().split(/\s+/)).find((parts) => parts[0] === storage);
+  if (match === undefined) {
+    throw new Error(`Storage ${storage} was not found. Select a storage shown by pvesm status.`);
+  }
+  if (match[2] !== "active") {
+    throw new Error(`Storage ${storage} is not active. Repair the storage or choose another target.`);
+  }
+}
+
+async function resolveTemplateVolume(commandRunner, template) {
+  const status = await runUnchecked(commandRunner, { binary: "/usr/sbin/pvesm", args: ["status", "--content", "vztmpl"] });
+  const storages = (status.exitCode === 0 ? status.stdout : "")
+    .split("\n")
+    .map((line) => line.trim().split(/\s+/)[0])
+    .filter((name) => name !== "" && name !== "Name");
+  const search = storages.length > 0 ? storages : ["local"];
+  for (const storage of search) {
+    const listed = await runUnchecked(commandRunner, { binary: "/usr/bin/pveam", args: ["list", storage] });
+    if (listed.exitCode !== 0) {
+      continue;
+    }
+    const volume = listed.stdout.split("\n").map((line) => line.trim().split(/\s+/)[0]).find((name) => name.includes(template));
+    if (volume !== undefined) {
+      return volume;
+    }
+  }
+  throw new Error(`Template ${template} was not found on a vztmpl storage. Download it with pveam before provisioning.`);
+}
+
+async function assertBridgeAvailable(commandRunner, bridge) {
+  const result = await runUnchecked(commandRunner, { binary: "/usr/bin/ip", args: ["-o", "link", "show", "dev", bridge] });
+  if (result.exitCode !== 0) {
+    throw new Error(`Bridge ${bridge} was not found. Create the bridge or choose another default network bridge.`);
+  }
+}
+
+async function assertUnprivilegedSupported(commandRunner, unprivileged) {
+  if (unprivileged !== true) {
+    throw new Error("Dedicated service LXCs must remain unprivileged unless a plugin declares an exception.");
+  }
+  for (const file of ["/etc/subuid", "/etc/subgid"]) {
+    const result = await runUnchecked(commandRunner, { binary: "/usr/bin/grep", args: ["^root:", file] });
+    if (result.exitCode !== 0 || !result.stdout.includes("root:")) {
+      throw new Error(`Unprivileged LXC prerequisites are missing: ${file} must map root subordinate IDs.`);
+    }
+  }
+}
+
+async function runUnchecked(commandRunner, command) {
+  try {
+    return await commandRunner.run(command);
+  } catch (error) {
+    if (error instanceof CommandExecutionError) {
+      return { exitCode: error.result?.exitCode ?? 1, stdout: error.result?.stdout ?? "", stderr: error.result?.stderr ?? "" };
+    }
+    throw error;
+  }
+}
+
+function parsePctConfig(stdout) {
+  const values = {};
+  for (const line of stdout.split("\n")) {
+    const index = line.indexOf(":");
+    if (index === -1) {
+      continue;
+    }
+    values[line.slice(0, index).trim()] = line.slice(index + 1).trim();
+  }
+  const net0 = values.net0 ?? "";
+  return {
+    hostname: values.hostname,
+    unprivileged: values.unprivileged === "1",
+    ip: net0.match(/ip=([^/,]+)/)?.[1],
+    bridge: net0.match(/bridge=([^,]+)/)?.[1],
+    storage: values.rootfs?.split(":")[0]
+  };
 }
 
 function resolveSecretPath(secretsDirectory, reference) {
