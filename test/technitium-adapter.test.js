@@ -500,7 +500,8 @@ test("nomina service add technitium uses production adapters against Proxmox com
         return { status: response.status, body: await response.text() };
       }
     },
-    secretResolver: { resolve: () => "top-secret" }
+    secretResolver: { resolve: () => "top-secret" },
+    secretStore: { has: () => true }
   });
 
   const result = await runCli(

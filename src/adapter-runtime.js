@@ -61,6 +61,38 @@ export function createLocalSecretResolver(options = {}) {
   });
 }
 
+export function createLocalSecretStore(options = {}) {
+  const filesystem = options.filesystem ?? fs;
+  const secretsDirectory = options.secretsDirectory ?? "/var/lib/nominaconnect/secrets";
+  const isRoot = options.isRoot ?? (() => process.getuid?.() === 0);
+  const locate = (reference) => resolveSecretPath(secretsDirectory, reference);
+  return Object.freeze({
+    locate,
+    has(reference) {
+      try {
+        filesystem.statSync(locate(reference));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    store(reference, content) {
+      if (!isRoot()) {
+        throw new Error("Connection secrets can only be stored from the Proxmox root shell.");
+      }
+      if (typeof content !== "string" || content.trim().length === 0) {
+        throw new Error("Connection secret values must be non-empty strings.");
+      }
+      const secretPath = locate(reference);
+      const directory = path.dirname(secretPath);
+      filesystem.mkdirSync(directory, { recursive: true });
+      filesystem.writeFileSync(secretPath, content.endsWith("\n") ? content : `${content}\n`);
+      filesystem.chmodSync(directory, 0o700);
+      filesystem.chmodSync(secretPath, 0o600);
+    }
+  });
+}
+
 export class HttpRequestError extends Error {
   constructor({ url, result = undefined, timedOut = false }) {
     const status = timedOut ? "timed out" : `failed with status ${result?.status}`;
@@ -111,6 +143,7 @@ export function createHttpClient(options = {}) {
 export function createProductionAdapters(options = {}) {
   const commandRunner = options.commandRunner ?? createCommandRunner();
   const secretResolver = options.secretResolver ?? createLocalSecretResolver();
+  const secretStore = options.secretStore ?? createLocalSecretStore();
   const httpClient = options.httpClient ?? createHttpClient();
   const proxmox = createProxmoxAdapter(commandRunner);
   const providerAdapters = Object.freeze({
@@ -122,7 +155,7 @@ export function createProductionAdapters(options = {}) {
     tailscale: createProviderAdapter("tailscale", secretResolver),
     netbird: createProviderAdapter("netbird", secretResolver)
   });
-  return Object.freeze({ proxmox, providerAdapters });
+  return Object.freeze({ proxmox, providerAdapters, secretStore });
 }
 
 function createProxmoxAdapter(commandRunner) {

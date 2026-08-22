@@ -19,6 +19,13 @@ export function createClackPrompts(clack) {
       }
       return value;
     },
+    secret: async (question) => {
+      const value = await clack.password({ message: question });
+      if (clack.isCancel(value)) {
+        throw new Error("Setup cancelled.");
+      }
+      return value;
+    },
     confirm: async ({ message, initialValue }) => {
       const value = await clack.confirm({ message, initialValue });
       if (clack.isCancel(value)) {
