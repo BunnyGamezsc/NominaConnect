@@ -2,7 +2,23 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { createProductionAdapters } from "../src/adapter-runtime.js";
+import { createTechnitiumAdapter } from "../src/technitium-adapter.js";
 import { runCli } from "../src/cli.js";
+
+test("technitium install plan installs curl before downloading the installer", async () => {
+  const adapter = createTechnitiumAdapter({ httpClient: {}, secretResolver: {} });
+  const plan = await adapter.setup({});
+
+  assert.deepEqual(plan.lxcCommands.slice(0, 2), [
+    { binary: "/usr/bin/apt-get", args: ["update"] },
+    { binary: "/usr/bin/apt-get", args: ["install", "--yes", "curl", "ca-certificates"] }
+  ]);
+  assert.equal(plan.lxcCommands[2].binary, "/usr/bin/curl");
+  assert.equal(plan.lxcCommands[3].binary, "/bin/bash");
+
+  const upgradePlan = await adapter.upgrade({});
+  assert.deepEqual(upgradePlan.lxcCommands, plan.lxcCommands);
+});
 
 const proxmoxRootRuntime = () => ({ isRoot: () => true, isProxmoxHost: () => true });
 

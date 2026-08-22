@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.2] - 2026-08-22
+
+### Fixed
+- **Technitium provisioning on minimal Debian templates**: the install plan used `/usr/bin/curl`
+  as its first command, which does not exist on freshly created LXCs (exit 127, "No such file or
+  directory - Failed to exec /usr/bin/curl"). The plan now runs `apt-get update` and installs
+  `curl` + `ca-certificates` inside the LXC before downloading the Technitium installer.
+
 ## [1.1.1] - 2026-08-22
 
 ### Fixed

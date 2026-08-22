@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 const TECHNITIUM_PORT = 5380;
 const TECHNITIUM_USER = "admin";
 const TECHNITIUM_INSTALL = Object.freeze([
+  { binary: "/usr/bin/apt-get", args: ["update"] },
+  { binary: "/usr/bin/apt-get", args: ["install", "--yes", "curl", "ca-certificates"] },
   {
     binary: "/usr/bin/curl",
     args: ["-fsSL", "-o", "/tmp/technitium-install.sh", "https://download.technitium.com/dns/install.sh"]
