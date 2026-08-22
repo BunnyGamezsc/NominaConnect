@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.1.3] - 2026-08-22 (Dev/Pre-release)
+
+### Fixed
+- **Fresh LXCs had no outbound network**: containers were created with a static IP but no
+  gateway or nameserver, so apt and the Technitium installer failed inside the container with
+  "Temporary failure resolving 'deb.debian.org'".
+  - `pct create` now configures `gw=` on net0 and passes `--nameserver`
+  - Gateway derives from the service IP (`x.y.z.1`); nameserver defaults to the gateway
+  - Override per service with new `--gateway` / `--nameserver` flags; both persist to `nomina.yaml`
+
 ## [1.1.2] - 2026-08-22
 
 ### Fixed
