@@ -79,7 +79,7 @@ export function resolveServiceDeployment(project, serviceName, options) {
     bridge: options.bridge ?? project.config.proxmox.defaultBridge,
     storage: options.storage ?? project.config.proxmox.defaultStorage,
     unprivileged: true,
-    template: deploymentDefaults.template,
+    template: options.template ?? deploymentDefaults.template,
     resources
   };
 }

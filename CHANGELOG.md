@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.2.0] - 2026-08-22
+
+### Fixed
+- **LXC template selection**: provisioning no longer hardcodes `debian-12-standard`, which failed
+  on hosts without that template ("Template debian-12-standard was not found on a vztmpl storage")
+  - All providers (Technitium, Caddy, Traefik, step-ca, Tailscale, NetBird) now offer a template
+    selector during service setup, populated from templates detected on the host's `vztmpl`
+    storages via `pvesm`/`pveam`
+  - New `--template` flag accepts any template volume ID for scripted provisioning
+  - The chosen template is recorded in the service's deployment config in `nomina.yaml`
+  - Clearer error message when a selected template cannot be found
+
+### Added
+- Proxmox adapter exposes `listTemplates()` for discovering available LXC template volumes
+
 ## [1.1.0] - 2026-08-22 (Beta/Experimental)
 
 ### Added

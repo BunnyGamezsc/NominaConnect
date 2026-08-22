@@ -232,6 +232,71 @@ test("nomina service add technitium accepts resource, bridge, storage, and hostn
   });
 });
 
+test("nomina service add technitium uses the --template override when creating the LXC", async () => {
+  const filesystem = new FakeFilesystem();
+  seedProject(filesystem);
+  const proxmox = createProxmoxAdapter();
+
+  await runCli(
+    [
+      "service", "add", "technitium",
+      "--project-dir", "/projects/bunnyhome",
+      "--ip", "10.0.0.53",
+      "--template", "local:vztmpl/debian-13-standard_13.7-1_amd64.tar.zst"
+    ],
+    { filesystem, runtime: proxmoxRootRuntime(), proxmox, providerAdapters: { technitium: createTechnitiumAdapter() } }
+  );
+
+  assert.equal(proxmox.created[0].template, "local:vztmpl/debian-13-standard_13.7-1_amd64.tar.zst");
+});
+
+test("nomina service add technitium offers detected templates for selection instead of defaulting to debian-12", async () => {
+  const filesystem = new FakeFilesystem();
+  seedProject(filesystem);
+  const proxmox = createProxmoxAdapter();
+  proxmox.listTemplates = async () => [
+    "local:vztmpl/debian-11-standard_11.7-1_amd64.tar.zst",
+    "local:vztmpl/debian-13-standard_13.7-1_amd64.tar.zst"
+  ];
+  const selections = [];
+  const prompts = {
+    select: async ({ message, options, initialValue }) => {
+      selections.push({ message, options: options.map((option) => option.value), initialValue });
+      return "local:vztmpl/debian-13-standard_13.7-1_amd64.tar.zst";
+    },
+    ask: async (question, fallback) => {
+      if (question === "Static IP for Technitium") return "10.0.0.53";
+      if (question === "LXC hostname") return fallback;
+      throw new Error(`Unexpected question: ${question}`);
+    },
+    confirm: async () => true,
+    info: () => {}
+  };
+
+  const result = await runCli(
+    ["service", "add", "technitium", "--project-dir", "/projects/bunnyhome"],
+    {
+      filesystem,
+      runtime: proxmoxRootRuntime(),
+      proxmox,
+      providerAdapters: { technitium: createTechnitiumAdapter() },
+      prompts
+    }
+  );
+
+  assert.deepEqual(selections, [{
+    message: "LXC template",
+    options: [
+      "local:vztmpl/debian-11-standard_11.7-1_amd64.tar.zst",
+      "local:vztmpl/debian-13-standard_13.7-1_amd64.tar.zst"
+    ],
+    initialValue: "local:vztmpl/debian-11-standard_11.7-1_amd64.tar.zst"
+  }]);
+  assert.equal(result.lxcSpec.template, "local:vztmpl/debian-13-standard_13.7-1_amd64.tar.zst");
+  assert.equal(proxmox.created[0].template, "local:vztmpl/debian-13-standard_13.7-1_amd64.tar.zst");
+  assert.match(filesystem.read("/projects/bunnyhome/nomina.yaml"), /debian-13-standard/);
+});
+
 test("nomina service add technitium reports unhealthy health checks", async () => {
   const filesystem = new FakeFilesystem();
   seedProject(filesystem);

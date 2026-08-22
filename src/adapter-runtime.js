@@ -169,6 +169,9 @@ function createProxmoxAdapter(commandRunner) {
       });
       return { vmid: Number(vmid), hostname: spec.hostname };
     },
+    async listTemplates() {
+      return listTemplateVolumes(commandRunner);
+    },
     async inspectLxc(vmid) {
       const result = await commandRunner.run({ binary: "/usr/sbin/pct", args: ["config", String(vmid)] });
       return parsePctConfig(result.stdout);
@@ -303,12 +306,34 @@ async function assertStorageAvailable(commandRunner, storage) {
   }
 }
 
-async function resolveTemplateVolume(commandRunner, template) {
+async function listVztmplStorages(commandRunner) {
   const status = await runUnchecked(commandRunner, { binary: "/usr/sbin/pvesm", args: ["status", "--content", "vztmpl"] });
-  const storages = (status.exitCode === 0 ? status.stdout : "")
+  return (status.exitCode === 0 ? status.stdout : "")
     .split("\n")
     .map((line) => line.trim().split(/\s+/)[0])
     .filter((name) => name !== "" && name !== "Name");
+}
+
+async function listTemplateVolumes(commandRunner) {
+  const storages = await listVztmplStorages(commandRunner);
+  const volumes = [];
+  for (const storage of storages.length > 0 ? storages : ["local"]) {
+    const listed = await runUnchecked(commandRunner, { binary: "/usr/bin/pveam", args: ["list", storage] });
+    if (listed.exitCode !== 0) {
+      continue;
+    }
+    for (const line of listed.stdout.split("\n")) {
+      const volume = line.trim().split(/\s+/)[0];
+      if (volume !== "") {
+        volumes.push(volume);
+      }
+    }
+  }
+  return volumes;
+}
+
+async function resolveTemplateVolume(commandRunner, template) {
+  const storages = await listVztmplStorages(commandRunner);
   const search = storages.length > 0 ? storages : ["local"];
   for (const storage of search) {
     const listed = await runUnchecked(commandRunner, { binary: "/usr/bin/pveam", args: ["list", storage] });
@@ -320,7 +345,7 @@ async function resolveTemplateVolume(commandRunner, template) {
       return volume;
     }
   }
-  throw new Error(`Template ${template} was not found on a vztmpl storage. Download it with pveam before provisioning.`);
+  throw new Error(`Template ${template} was not found on any vztmpl storage. Choose an available template during service setup, or download one with pveam.`);
 }
 
 async function assertBridgeAvailable(commandRunner, bridge) {

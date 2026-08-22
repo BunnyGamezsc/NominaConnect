@@ -431,7 +431,20 @@ export async function promptInitOptions(existingOptions, prompts) {
   return { ...existingOptions, node, bridge, storage, domain, dns, reverseProxy, certificateAuthority, vpn };
 }
 
-export async function promptTechnitiumOptions(project, existingOptions, prompts) {
+export async function selectLxcTemplate(prompts, availableTemplates, fallback) {
+  const choices = [...new Set(availableTemplates ?? [])].map((volume) => ({ value: volume, label: volume }));
+  if (prompts?.select && choices.length > 0) {
+    const initialValue = (choices.find((choice) => choice.value.includes(fallback)) ?? choices[0]).value;
+    const selected = await prompts.select({ message: "LXC template", options: choices, initialValue });
+    if (selected === undefined || selected === "") {
+      throw new Error("Setup cancelled.");
+    }
+    return selected;
+  }
+  return askPrompt(prompts, "LXC template", fallback);
+}
+
+export async function promptTechnitiumOptions(project, existingOptions, prompts, availableTemplates) {
   if (prompts?.ask === undefined && prompts?.confirm === undefined) {
     return existingOptions;
   }
@@ -440,6 +453,8 @@ export async function promptTechnitiumOptions(project, existingOptions, prompts)
   const ip = existingOptions.ip ?? await askRequired(prompts, "Static IP for Technitium", validateIp);
   const hostname = existingOptions.hostname
     ?? await askPrompt(prompts, "LXC hostname", TECHNITIUM_DEPLOYMENT.defaultHostname);
+  const template = existingOptions.template
+    ?? await selectLxcTemplate(prompts, availableTemplates, TECHNITIUM_DEPLOYMENT.template);
   const useRecommended = existingOptions.cpus !== undefined
     ? true
     : await confirmPrompt(
@@ -467,13 +482,14 @@ export async function promptTechnitiumOptions(project, existingOptions, prompts)
     ...existingOptions,
     ip,
     hostname,
+    ...(template === undefined ? {} : { template }),
     ...(cpus === undefined ? {} : { cpus }),
     ...(memoryMb === undefined ? {} : { memoryMb }),
     ...(diskGb === undefined ? {} : { diskGb })
   };
 }
 
-export async function promptReverseProxyOptions(project, existingOptions, prompts, { deployment, label }) {
+export async function promptReverseProxyOptions(project, existingOptions, prompts, { deployment, label, availableTemplates }) {
   if (prompts?.ask === undefined && prompts?.confirm === undefined) {
     return existingOptions;
   }
@@ -482,6 +498,8 @@ export async function promptReverseProxyOptions(project, existingOptions, prompt
   const ip = existingOptions.ip ?? await askRequired(prompts, `Static IP for ${label}`, validateIp);
   const hostname = existingOptions.hostname
     ?? await askPrompt(prompts, "LXC hostname", deployment.defaultHostname);
+  const template = existingOptions.template
+    ?? await selectLxcTemplate(prompts, availableTemplates, deployment.template);
   const useRecommended = existingOptions.cpus !== undefined
     ? true
     : await confirmPrompt(
@@ -508,44 +526,50 @@ export async function promptReverseProxyOptions(project, existingOptions, prompt
     ...existingOptions,
     ip,
     hostname,
+    ...(template === undefined ? {} : { template }),
     ...(cpus === undefined ? {} : { cpus }),
     ...(memoryMb === undefined ? {} : { memoryMb }),
     ...(diskGb === undefined ? {} : { diskGb })
   };
 }
 
-export async function promptCaddyOptions(project, existingOptions, prompts) {
+export async function promptCaddyOptions(project, existingOptions, prompts, availableTemplates) {
   return promptReverseProxyOptions(project, existingOptions, prompts, {
     deployment: CADDY_DEPLOYMENT,
-    label: "Caddy"
+    label: "Caddy",
+    availableTemplates
   });
 }
 
-export async function promptTraefikOptions(project, existingOptions, prompts) {
+export async function promptTraefikOptions(project, existingOptions, prompts, availableTemplates) {
   return promptReverseProxyOptions(project, existingOptions, prompts, {
     deployment: TRAEFIK_DEPLOYMENT,
-    label: "Traefik"
+    label: "Traefik",
+    availableTemplates
   });
 }
 
-export async function promptStepCaOptions(project, existingOptions, prompts) {
+export async function promptStepCaOptions(project, existingOptions, prompts, availableTemplates) {
   return promptReverseProxyOptions(project, existingOptions, prompts, {
     deployment: STEP_CA_DEPLOYMENT,
-    label: "step-ca"
+    label: "step-ca",
+    availableTemplates
   });
 }
 
-export async function promptTailscaleOptions(project, existingOptions, prompts) {
+export async function promptTailscaleOptions(project, existingOptions, prompts, availableTemplates) {
   return promptReverseProxyOptions(project, existingOptions, prompts, {
     deployment: TAILSCALE_DEPLOYMENT,
-    label: "Tailscale"
+    label: "Tailscale",
+    availableTemplates
   });
 }
 
-export async function promptNetBirdOptions(project, existingOptions, prompts) {
+export async function promptNetBirdOptions(project, existingOptions, prompts, availableTemplates) {
   return promptReverseProxyOptions(project, existingOptions, prompts, {
     deployment: NETBIRD_DEPLOYMENT,
-    label: "NetBird"
+    label: "NetBird",
+    availableTemplates
   });
 }
 

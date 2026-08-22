@@ -160,7 +160,8 @@ async function addTechnitiumService(options, adapters) {
   assertProxmoxShell(runtime);
 
   const project = loadProject(filesystem, options.projectDir);
-  const resolvedOptions = await promptTechnitiumOptions(project, options, adapters.prompts);
+  const availableTemplates = await listAvailableTemplates(proxmox);
+  const resolvedOptions = await promptTechnitiumOptions(project, options, adapters.prompts, availableTemplates);
   const dnsService = project.config.managedInventory.platform.dns;
   if (dnsService?.service !== "technitium") {
     throw new Error("Technitium is not selected as the DNS provider for this project.");
@@ -198,6 +199,7 @@ async function addTechnitiumService(options, adapters) {
     hostname: result.lxcSpec.hostname,
     bridge: result.lxcSpec.bridge,
     storage: result.lxcSpec.storage,
+    template: result.lxcSpec.template,
     resources: result.lxcSpec.resources
   };
   const updatedConfig = updatePlatformDeployment(project.config, "dns", deployment);
@@ -235,7 +237,8 @@ async function addReverseProxyService(serviceName, serviceLabel, promptOptions, 
   assertProxmoxShell(runtime);
 
   const project = loadProject(filesystem, options.projectDir);
-  const resolvedOptions = await promptOptions(project, options, adapters.prompts);
+  const availableTemplates = await listAvailableTemplates(proxmox);
+  const resolvedOptions = await promptOptions(project, options, adapters.prompts, availableTemplates);
   const dnsService = project.config.managedInventory.platform.dns;
   const proxyService = project.config.managedInventory.platform.reverseProxy;
   if (proxyService?.service !== serviceName) {
@@ -277,6 +280,7 @@ async function addReverseProxyService(serviceName, serviceLabel, promptOptions, 
     hostname: result.lxcSpec.hostname,
     bridge: result.lxcSpec.bridge,
     storage: result.lxcSpec.storage,
+    template: result.lxcSpec.template,
     resources: result.lxcSpec.resources
   };
   const updatedConfig = updatePlatformDeployment(project.config, "reverseProxy", deployment);
@@ -322,7 +326,8 @@ async function addStepCaService(options, adapters) {
   assertProxmoxShell(runtime);
 
   const project = loadProject(filesystem, options.projectDir);
-  const resolvedOptions = await promptStepCaOptions(project, options, adapters.prompts);
+  const availableTemplates = await listAvailableTemplates(proxmox);
+  const resolvedOptions = await promptStepCaOptions(project, options, adapters.prompts, availableTemplates);
   const dnsService = project.config.managedInventory.platform.dns;
   const proxyService = project.config.managedInventory.platform.reverseProxy;
   const caService = project.config.managedInventory.platform.certificateAuthority;
@@ -370,6 +375,7 @@ async function addStepCaService(options, adapters) {
     hostname: result.lxcSpec.hostname,
     bridge: result.lxcSpec.bridge,
     storage: result.lxcSpec.storage,
+    template: result.lxcSpec.template,
     resources: result.lxcSpec.resources
   };
   const updatedConfig = updatePlatformDeployment(project.config, "certificateAuthority", deployment);
@@ -471,7 +477,8 @@ async function addVpnService(serviceName, serviceLabel, promptOptions, options, 
   assertProxmoxShell(runtime);
 
   const project = loadProject(filesystem, options.projectDir);
-  const resolvedOptions = await promptOptions(project, options, adapters.prompts);
+  const availableTemplates = await listAvailableTemplates(proxmox);
+  const resolvedOptions = await promptOptions(project, options, adapters.prompts, availableTemplates);
   const vpnService = project.config.managedInventory.platform.vpn;
   if (vpnService?.service !== serviceName) {
     throw new Error(`${serviceLabel} is not selected as the VPN provider for this project.`);
@@ -509,6 +516,7 @@ async function addVpnService(serviceName, serviceLabel, promptOptions, options, 
     hostname: result.lxcSpec.hostname,
     bridge: result.lxcSpec.bridge,
     storage: result.lxcSpec.storage,
+    template: result.lxcSpec.template,
     resources: result.lxcSpec.resources
   };
   const updatedConfig = updatePlatformDeployment(project.config, "vpn", deployment);
@@ -967,6 +975,7 @@ function parseServiceAddOptions(rawOptions) {
     ["--bridge", "bridge"],
     ["--storage", "storage"],
     ["--hostname", "hostname"],
+    ["--template", "template"],
     ["--cpus", "cpus"],
     ["--memory", "memoryMb"],
     ["--disk", "diskGb"]
@@ -1153,6 +1162,18 @@ function assertProxmoxShell(runtime) {
   }
   if (!runtime.isProxmoxHost()) {
     throw new Error("nomina must run on a Proxmox host with local pct control.");
+  }
+}
+
+async function listAvailableTemplates(proxmox) {
+  if (typeof proxmox?.listTemplates !== "function") {
+    return undefined;
+  }
+  try {
+    const templates = await proxmox.listTemplates();
+    return Array.isArray(templates) && templates.length > 0 ? templates : undefined;
+  } catch {
+    return undefined;
   }
 }
 

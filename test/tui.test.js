@@ -9,8 +9,57 @@ import {
   canProvisionTechnitium,
   canProvisionTraefik,
   canPublishExposure,
-  runInteractiveApp
+  runInteractiveApp,
+  selectLxcTemplate
 } from "../src/tui.js";
+
+test("selectLxcTemplate falls back to a text prompt with the deployment default when no templates are detected", async () => {
+  const asks = [];
+  const selected = await selectLxcTemplate(
+    { ask: async (question, fallback) => { asks.push({ question, fallback }); return "debian-12-standard"; } },
+    undefined,
+    "debian-12-standard"
+  );
+
+  assert.equal(selected, "debian-12-standard");
+  assert.deepEqual(asks, [{ question: "LXC template", fallback: "debian-12-standard" }]);
+});
+
+test("selectLxcTemplate offers detected template volumes and preselects the default when present", async () => {
+  const volumes = [
+    "local:vztmpl/debian-13-standard_13.7-1_amd64.tar.zst",
+    "local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst"
+  ];
+  const calls = [];
+  const selected = await selectLxcTemplate(
+    {
+      select: async (request) => {
+        calls.push(request);
+        return volumes[1];
+      }
+    },
+    [...volumes, volumes[0]],
+    "debian-12-standard"
+  );
+
+  assert.equal(selected, volumes[1]);
+  assert.deepEqual(calls, [{
+    message: "LXC template",
+    options: volumes.map((volume) => ({ value: volume, label: volume })),
+    initialValue: volumes[1]
+  }]);
+});
+
+test("selectLxcTemplate cancels setup when the selection is dismissed", async () => {
+  await assert.rejects(
+    selectLxcTemplate(
+      { select: async () => undefined },
+      ["local:vztmpl/debian-13-standard_13.7-1_amd64.tar.zst"],
+      "debian-12-standard"
+    ),
+    /Setup cancelled\./
+  );
+});
 
 class FakeFilesystem {
   files = new Map();

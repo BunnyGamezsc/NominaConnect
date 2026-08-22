@@ -392,6 +392,9 @@ function appendPlatformService(lines, field, service) {
     if (service.deployment.storage !== undefined) {
       lines.push(`        storage: ${yamlScalar(service.deployment.storage)}`);
     }
+    if (service.deployment.template !== undefined) {
+      lines.push(`        template: ${yamlScalar(service.deployment.template)}`);
+    }
     if (service.deployment.resources !== undefined) {
       lines.push(
         "        resources:",
