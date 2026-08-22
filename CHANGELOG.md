@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.2.0] - 2026-08-22
+## [1.1.1] - 2026-08-22
 
 ### Fixed
 - **LXC template selection**: provisioning no longer hardcodes `debian-12-standard`, which failed
