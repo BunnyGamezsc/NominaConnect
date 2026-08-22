@@ -32,6 +32,39 @@ That opens the interactive menu. Choose **Initialize a new project** on first
 run, then **Provision Technitium DNS**, **Provision Caddy reverse proxy**, and
 **Publish a web exposure** as you bring the platform online.
 
+## Experimental Real Adapters (v1.1)
+
+**Status: Beta/Experimental**
+
+NominaConnect 1.1 introduces the first real provider adapter for Technitium DNS.
+This replaces the previous test-only adapters with actual Proxmox LXC provisioning
+and live Technitium API integration.
+
+**Currently Supported:**
+- ✅ Technitium DNS (real LXC creation + API operations)
+- ⏳ Caddy reverse proxy (coming soon)
+- ⏳ Traefik reverse proxy (coming soon)
+- ⏳ step-ca certificate authority (coming soon)
+- ⏳ Caddy Internal CA (coming soon)
+- ⏳ Tailscale VPN (coming soon)
+- ⏳ NetBird VPN (coming soon)
+
+**What This Means:**
+- The Technitium adapter now creates real Debian LXCs on your Proxmox host
+- DNS records are managed through the live Technitium API (port 5380)
+- Provider credentials are stored securely in root-owned local files
+- All operations include timeout, secret redaction, and structured error handling
+
+**Known Limitations:**
+- Only Technitium is fully implemented as a real adapter
+- Other providers still use test/generic adapters
+- Production use of the Technitium adapter is experimental
+- Backup and disaster recovery procedures are still being refined
+
+**Roadmap:**
+Future releases will add real adapters for the remaining providers (Caddy, Traefik,
+step-ca, etc.) to complete the production adapter implementation.
+
 You can also run subcommands directly — they use the same guided prompts when
 flags are omitted:
 
@@ -51,9 +84,11 @@ You do not pass a project path.
 - [Architecture](docs/architecture.md) — boundaries, domain terms, desired-state model.
 - [Interactive TUI design](docs/tui.md) — menus, prompts, testing seam, adding new flows.
 - [MVP spec](docs/specs/nominaconnect-proxmox-cli-mvp.md) — full product requirements.
+- [Real Adapters Spec](docs/specs/real-provider-adapters.md) — production adapter implementation plan.
 - [Manual reference path](docs/manual/dns-proxy-tls.md) — validation workflow for DNS + proxy + TLS.
 - [Domain language](CONTEXT.md) — ubiquitous terms used across the project.
 - [ADRs](docs/adr/) — recorded implementation decisions.
+- [Changelog](CHANGELOG.md) — version history and changes.
 
 ## Principles
 
