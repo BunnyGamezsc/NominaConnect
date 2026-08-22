@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.1.4] - 2026-08-22 (Dev/Pre-release)
+
+### Fixed
+- **Provisioning crashed with `ENOENT ... statx '/var/lib/nominaconnect/secrets/...'`**:
+  `nomina init` wrote connection secret references into `nomina.yaml`, but nothing ever
+  collected the credential or created the referenced file in the local secret store, so the
+  first provider call failed while reading the missing secret file.
+  - All service add flows, `service upgrade`, and Caddy Internal CA setup now ensure the
+    connection secret exists before touching the provider
+  - When missing, the CLI prompts once with masked input and stores it in the secure local
+    secret store (root-owned directory 0700, file 0600)
+  - Stored secrets are reused silently; scripted runs without a prompt fail with a clear
+    error instead of a raw ENOENT stack trace
+
 ## [1.1.3] - 2026-08-22 (Dev/Pre-release)
 
 ### Fixed
