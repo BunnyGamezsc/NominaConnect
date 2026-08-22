@@ -29,12 +29,19 @@ if [ "$(id -u)" -ne 0 ] && [ -z "${NOMINA_INSTALL_DIR:-}" ]; then
   exec sudo bash "$0" "$@"
 fi
 
-# Check for Node.js ≥ 22
+# Check for Node.js ≥ 22, installing it via NodeSource if missing
 if ! command -v node &>/dev/null; then
-  echo "❌ Node.js is not installed."
-  echo "   Install it first:  apt install -y nodejs npm"
-  echo "   Or use NodeSource: curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt install -y nodejs"
-  exit 1
+  echo "📦 Node.js is not installed. Installing Node.js 22 via NodeSource..."
+  if command -v curl &>/dev/null; then
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  elif command -v wget &>/dev/null; then
+    wget -qO- https://deb.nodesource.com/setup_22.x | bash -
+  else
+    echo "❌ Need curl or wget to install Node.js: apt install -y curl"
+    exit 1
+  fi
+  apt-get install -y nodejs
+  command -v node &>/dev/null || { echo "❌ Node.js installation failed."; exit 1; }
 fi
 
 NODE_MAJOR=$(node -e "console.log(process.versions.node.split('.')[0])")

@@ -5,7 +5,7 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install-native.sh | bash              # latest release
 #   curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install-native.sh | bash -s v1.1.2    # specific version
-#   curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install-native.sh | bash -s dev       # dev branch (unstable, Node.js fallback)
+#   curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install-native.sh | bash -s dev       # dev channel (latest pre-release binary, no Node.js)
 #   curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install-native.sh | FORCE=1 bash      # force reinstall
 #
 # Re-running the installer upgrades an existing installation in place.
@@ -86,15 +86,33 @@ latest_tag() {
 
 # --- Resolve target version ---
 REQUESTED_VERSION="${1:-${NOMINA_VERSION:-}}"
-if [ "$REQUESTED_VERSION" = "dev" ]; then
-  echo "🔬 Dev channel selected. Native binaries are not published for dev builds."
-  echo "📥 Delegating to the Node.js installer on the '${NOMINA_DEV_BRANCH:-dev}' branch..."
-  DEV_INSTALLER="$(mktemp)"
-  http_get "https://raw.githubusercontent.com/$REPO/${NOMINA_DEV_BRANCH:-dev}/install.sh" > "$DEV_INSTALLER"
-  exec bash "$DEV_INSTALLER" dev
-fi
+
+latest_prerelease_tag() {
+  local body
+  body="$(http_get "https://api.github.com/repos/$REPO/releases?per_page=30" 2>/dev/null || true)"
+  [ -n "$body" ] || return 0
+  printf '%s\n' "$body" \
+    | awk '
+        /"tag_name":/ { tag=$0; sub(/.*"tag_name"[ ]*:[ ]*"/,"",tag); sub(/".*/,"",tag) }
+        /"prerelease":[ ]*true/ { if (tag != "") { print tag; exit } }
+      '
+}
+
 TARGET_VERSION=""
-if [ -n "$REQUESTED_VERSION" ] && [ "$REQUESTED_VERSION" != "latest" ]; then
+if [ "$REQUESTED_VERSION" = "dev" ]; then
+  echo "🔬 Dev channel selected. Resolving latest dev pre-release..."
+  DEV_TAG="$(latest_prerelease_tag)"
+  if [ -n "$DEV_TAG" ]; then
+    TARGET_VERSION="$DEV_TAG"
+    echo "✔  Latest dev build: $TARGET_VERSION"
+  else
+    echo "⚠  No dev pre-release found."
+    echo "📥 Falling back to the Node.js installer on the '${NOMINA_DEV_BRANCH:-dev}' branch..."
+    DEV_INSTALLER="$(mktemp)"
+    http_get "https://raw.githubusercontent.com/$REPO/${NOMINA_DEV_BRANCH:-dev}/install.sh" > "$DEV_INSTALLER"
+    exec bash "$DEV_INSTALLER" dev
+  fi
+elif [ -n "$REQUESTED_VERSION" ] && [ "$REQUESTED_VERSION" != "latest" ]; then
   case "$REQUESTED_VERSION" in
     v*) TARGET_VERSION="$REQUESTED_VERSION" ;;
     *)  TARGET_VERSION="v$REQUESTED_VERSION" ;;
