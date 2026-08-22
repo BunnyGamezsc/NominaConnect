@@ -141,6 +141,8 @@ test("nomina service add technitium provisions an unprivileged Debian LXC with d
     storage: "local-lvm",
     unprivileged: true,
     template: "debian-12-standard",
+    gateway: "10.0.0.1",
+    nameserver: "10.0.0.1",
     resources: { cpus: 2, memoryMb: 1024, diskGb: 8 }
   });
   assert.deepEqual(
@@ -228,6 +230,8 @@ test("nomina service add technitium accepts resource, bridge, storage, and hostn
     storage: "local-zfs",
     unprivileged: true,
     template: "debian-12-standard",
+    gateway: "10.0.0.1",
+    nameserver: "10.0.0.1",
     resources: { cpus: 4, memoryMb: 2048, diskGb: 16 }
   });
 });
@@ -248,6 +252,34 @@ test("nomina service add technitium uses the --template override when creating t
   );
 
   assert.equal(proxmox.created[0].template, "local:vztmpl/debian-13-standard_13.7-1_amd64.tar.zst");
+});
+
+test("nomina service add technitium derives the gateway and nameserver, honoring explicit overrides", async () => {
+  const filesystem = new FakeFilesystem();
+  seedProject(filesystem);
+  const proxmox = createProxmoxAdapter();
+
+  await runCli(
+    ["service", "add", "technitium", "--project-dir", "/projects/bunnyhome", "--ip", "10.0.0.53"],
+    { filesystem, runtime: proxmoxRootRuntime(), proxmox, providerAdapters: { technitium: createTechnitiumAdapter() } }
+  );
+  assert.equal(proxmox.created[0].gateway, "10.0.0.1");
+  assert.equal(proxmox.created[0].nameserver, "10.0.0.1");
+
+  const proxmoxOverride = createProxmoxAdapter();
+  filesystem.writeFile("/projects/bunnyhome/.nomina/state.json", `${JSON.stringify(INITIAL_STATE, null, 2)}\n`);
+  await runCli(
+    [
+      "service", "add", "technitium",
+      "--project-dir", "/projects/bunnyhome",
+      "--ip", "10.0.9.77",
+      "--gateway", "10.0.9.254",
+      "--nameserver", "10.0.9.53"
+    ],
+    { filesystem, runtime: proxmoxRootRuntime(), proxmox: proxmoxOverride, providerAdapters: { technitium: createTechnitiumAdapter() } }
+  );
+  assert.equal(proxmoxOverride.created[0].gateway, "10.0.9.254");
+  assert.equal(proxmoxOverride.created[0].nameserver, "10.0.9.53");
 });
 
 test("nomina service add technitium offers detected templates for selection instead of defaulting to debian-12", async () => {

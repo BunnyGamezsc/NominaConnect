@@ -38,6 +38,49 @@ test("command runner uses argument arrays and redacts secret-derived diagnostics
   );
 });
 
+test("createLxc configures the container gateway and nameserver for outbound DNS", async () => {
+  const commands = [];
+  const { proxmox } = createProductionAdapters({
+    commandRunner: {
+      async run(command) {
+        commands.push(command);
+        const [binary, firstArg] = [command.binary, command.args[0]];
+        if (binary === "/usr/bin/pvesh") return { exitCode: 0, stdout: "150\n", stderr: "" };
+        if (binary === "/usr/sbin/pvesm" && command.args.includes("--content")) {
+          return { exitCode: 0, stdout: "Name\tType...\nlocal\tdir...\n", stderr: "" };
+        }
+        if (binary === "/usr/sbin/pvesm") {
+          return { exitCode: 0, stdout: "Name\tType\tStatus...\nlocal-lvm\tlvmthin\tactive\t...\n", stderr: "" };
+        }
+        if (binary === "/usr/bin/pveam") {
+          return { exitCode: 0, stdout: "local:vztmpl/debian-13-standard_13.7-1_amd64.tar.zst\n", stderr: "" };
+        }
+        if (binary === "/usr/bin/grep") return { exitCode: 0, stdout: "root:100000:65536\n", stderr: "" };
+        return { exitCode: 0, stdout: "ok\n", stderr: "" };
+      }
+    }
+  });
+
+  await proxmox.createLxc({
+    node: "pve-1",
+    hostname: "dns",
+    ip: "10.0.0.53",
+    bridge: "vmbr0",
+    storage: "local-lvm",
+    unprivileged: true,
+    template: "debian-13-standard",
+    gateway: "10.0.0.1",
+    nameserver: "10.0.0.1",
+    resources: { cpus: 2, memoryMb: 1024, diskGb: 8 }
+  });
+
+  const create = commands.find((command) => command.binary === "/usr/sbin/pct" && command.args[0] === "create");
+  assert.ok(create, "expected a pct create command");
+  assert.match(create.args.find((arg) => arg.startsWith("name=eth0")), /gw=10\.0\.0\.1/);
+  const nameserverIndex = create.args.indexOf("--nameserver");
+  assert.equal(create.args[nameserverIndex + 1], "10.0.0.1");
+});
+
 test("root-local secret resolution accepts configured references without exposing them", () => {
   const resolver = createLocalSecretResolver({
     isRoot: () => true,

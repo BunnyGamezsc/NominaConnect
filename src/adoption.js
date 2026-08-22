@@ -269,7 +269,16 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
           () => proxyPlugin.inspect(proxyAdapter, proxyService, { providerReferences: [hostname] }),
           retryOptions
         );
-        const matchedRoute = proxyInspection?.managed?.find((r) => r.id === hostname);
+        const matchedRoutes = proxyInspection?.managed?.filter((r) => r.id === hostname) ?? [];
+        if (matchedRoutes.length > 1) {
+          warnings.push({
+            serviceName: service.name ?? hostname,
+            platformKey: "reverseProxy",
+            message: `Ambiguous Caddy route for ${hostname} (${matchedRoutes.length} matches); managed route was not adopted.`
+          });
+          continue;
+        }
+        const matchedRoute = matchedRoutes[0];
         if (matchedRoute !== undefined) {
           const observedBackendIp = matchedRoute.backendIp ?? matchedRoute.backend?.ip;
           const observedBackendPort = matchedRoute.backendPort ?? matchedRoute.backend?.port;

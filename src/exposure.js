@@ -40,11 +40,19 @@ export async function publishManagedExposure({
   }
 
   const { name, hostname, backendIp, backendPort } = options;
+  const dnsRef = project.state.providerReferences[dnsService.id];
+  const proxyRef = project.state.providerReferences[proxyService.id];
   const publishRequest = {
     managedItemId: dnsService.id,
     hostname,
-    ip: backendIp
+    ip: backendIp,
+    zone: project.config.baseLocalDomain,
+    endpoint: dnsRef?.ip ? `http://${dnsRef.ip}:5380` : undefined,
+    ipForEndpoint: dnsRef?.ip,
+    connectionSecretReference: project.config.connectionSecretReferences[dnsService.id]
   };
+  // Provide both endpoint and ip for Technitium: endpoint is server, ip is record value. Preserve 'ip' as record IP for backwards compat; add endpoint.
+  // Technitium adapter resolves endpoint via explicit endpoint or ip fallback, so we set endpoint explicitly.
 
   const caStrategy = caService?.service ?? "none";
   let tlsOptions;
@@ -64,7 +72,10 @@ export async function publishManagedExposure({
     backendPort,
     protocol: "https",
     caStrategy,
-    tls: tlsOptions
+    tls: tlsOptions,
+    ip: proxyRef?.ip,
+    endpoint: proxyRef?.ip ? `http://${proxyRef.ip}:2019` : undefined,
+    connectionSecretReference: project.config.connectionSecretReferences[proxyService.id]
   };
 
   await technitiumAdapter.publishRecord(publishRequest);
@@ -73,10 +84,17 @@ export async function publishManagedExposure({
   const dnsPlugin = getPlatformProvider("technitium");
   const proxyPlugin = getPlatformProvider(proxyService.service);
   const dnsInspection = await dnsPlugin.inspect(technitiumAdapter, dnsService, {
-    providerReferences: collectManagedDnsReferences(project, hostname)
+    providerReferences: collectManagedDnsReferences(project, hostname),
+    zone: project.config.baseLocalDomain,
+    ip: dnsRef?.ip,
+    endpoint: dnsRef?.ip ? `http://${dnsRef.ip}:5380` : undefined,
+    connectionSecretReference: project.config.connectionSecretReferences[dnsService.id]
   });
   const proxyInspection = await proxyPlugin.inspect(proxyAdapter, proxyService, {
-    providerReferences: collectManagedProxyReferences(project, hostname)
+    providerReferences: collectManagedProxyReferences(project, hostname),
+    ip: proxyRef?.ip,
+    endpoint: proxyRef?.ip ? `http://${proxyRef.ip}:2019` : undefined,
+    connectionSecretReference: project.config.connectionSecretReferences[proxyService.id]
   });
 
   let caInspection;
@@ -85,17 +103,41 @@ export async function publishManagedExposure({
     const caAdapter = providerAdapters[caService.service] ?? providerAdapters[proxyService.service];
     if (caAdapter !== undefined) {
       const caPlugin = getPlatformProvider(caService.service);
+      const caRef = project.state.providerReferences[caService.id];
       caInspection = await caPlugin.inspect(caAdapter, caService, {
-        providerReferences: collectManagedCaReferences(project, hostname)
+        providerReferences: collectManagedCaReferences(project, hostname),
+        ip: caRef?.ip ?? proxyRef?.ip,
+        endpoint: (caRef?.ip ?? proxyRef?.ip) ? `http://${caRef?.ip ?? proxyRef?.ip}:2019` : undefined,
+        connectionSecretReference: project.config.connectionSecretReferences[caService.id]
       });
-      caExposureHealth = await caAdapter.healthCheckExposure?.({ hostname, backendIp, backendPort })
+      caExposureHealth = await caAdapter.healthCheckExposure?.({
+        hostname,
+        backendIp,
+        backendPort,
+        ip: caRef?.ip ?? proxyRef?.ip,
+        endpoint: (caRef?.ip ?? proxyRef?.ip) ? `http://${caRef?.ip ?? proxyRef?.ip}:2019` : undefined
+      })
         ?? { tls: "valid", issuer: caService.service, status: "healthy" };
     }
   }
 
-  const dnsExposureHealth = await technitiumAdapter.healthCheckExposure?.({ hostname, backendIp, backendPort })
+  const dnsExposureHealth = await technitiumAdapter.healthCheckExposure?.({
+    hostname,
+    backendIp,
+    backendPort,
+    zone: project.config.baseLocalDomain,
+    ip: dnsRef?.ip,
+    endpoint: dnsRef?.ip ? `http://${dnsRef.ip}:5380` : undefined,
+    connectionSecretReference: project.config.connectionSecretReferences[dnsService.id]
+  })
     ?? { dns: "reachable", status: "healthy" };
-  const proxyExposureHealth = await proxyAdapter.healthCheckExposure?.({ hostname, backendIp, backendPort })
+  const proxyExposureHealth = await proxyAdapter.healthCheckExposure?.({
+    hostname,
+    backendIp,
+    backendPort,
+    ip: proxyRef?.ip,
+    endpoint: proxyRef?.ip ? `http://${proxyRef.ip}:2019` : undefined
+  })
     ?? { https: "reachable", status: "healthy" };
   const healthy = dnsExposureHealth.status === "healthy"
     && proxyExposureHealth.status === "healthy"

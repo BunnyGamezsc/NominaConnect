@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.2.0] - 2026-08-22
+
+### Added
+- **Publish real Caddy HTTPS exposures via Admin API** (#15):
+  - Production Caddy adapter installs Caddy in a dedicated LXC and configures routes through the local Admin API (`:2019`) with targeted `PUT`/`GET`/`DELETE` — never replaces the whole Caddy configuration
+  - Managed provider reference records the provider-native config path and SHA256 fingerprint
+  - `nomina exposure publish` creates or updates only the resolved managed Technitium `A` record and Caddy route, preserving unrelated DNS records and Caddy routes
+  - Every exposure is HTTPS; without a configured CA it serves an untrusted internal certificate rather than falling back to HTTP
+  - Caddy Internal CA configures trusted exposures in the existing Caddy LXC (no separate CA LXC) via `caddy trust`
+  - Direct edits to a uniquely matched managed route are adopted after verified health check; ambiguous or unrelated routes are preserved with a verification warning
+  - Explicit upgrade via `nomina service upgrade caddy` (`apt-get install --only-upgrade`), health checks (`GET /config/`), and Proxmox prerequisite validation (storage, template, bridge, IP, unprivileged)
+
+### Fixed
+- **Provisioning crashed with `ENOENT ... statx '/var/lib/nominaconnect/secrets/...'`** (1.1.4):
+  `nomina init` wrote connection secret references into `nomina.yaml`, but nothing ever
+  collected the credential or created the referenced file in the local secret store, so the
+  first provider call failed while reading the missing secret file.
+  - All service add flows, `service upgrade`, and Caddy Internal CA setup now ensure the
+    connection secret exists before touching the provider
+  - When missing, the CLI prompts once with masked input and stores it in the secure local
+    secret store (root-owned directory 0700, file 0600)
+  - Stored secrets are reused silently; scripted runs without a prompt fail with a clear
+    error instead of a raw ENOENT stack trace
+
+- **Fresh LXCs had no outbound network** (1.1.3): containers were created with a static IP but no
+  gateway or nameserver, so apt and the Technitium installer failed inside the container with
+  "Temporary failure resolving 'deb.debian.org'".
+  - `pct create` now configures `gw=` on net0 and passes `--nameserver`
+  - Gateway derives from the service IP (`x.y.z.1`); nameserver defaults to the gateway
+  - Override per service with new `--gateway` / `--nameserver` flags; both persist to `nomina.yaml`
+
 ## [1.1.2] - 2026-08-22
 
 ### Fixed

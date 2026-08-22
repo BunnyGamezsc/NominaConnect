@@ -2,6 +2,7 @@ import { spawn as spawnProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+import { createCaddyAdapter } from "./caddy-adapter.js";
 import { createTechnitiumAdapter } from "./technitium-adapter.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -61,6 +62,38 @@ export function createLocalSecretResolver(options = {}) {
   });
 }
 
+export function createLocalSecretStore(options = {}) {
+  const filesystem = options.filesystem ?? fs;
+  const secretsDirectory = options.secretsDirectory ?? "/var/lib/nominaconnect/secrets";
+  const isRoot = options.isRoot ?? (() => process.getuid?.() === 0);
+  const locate = (reference) => resolveSecretPath(secretsDirectory, reference);
+  return Object.freeze({
+    locate,
+    has(reference) {
+      try {
+        filesystem.statSync(locate(reference));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    store(reference, content) {
+      if (!isRoot()) {
+        throw new Error("Connection secrets can only be stored from the Proxmox root shell.");
+      }
+      if (typeof content !== "string" || content.trim().length === 0) {
+        throw new Error("Connection secret values must be non-empty strings.");
+      }
+      const secretPath = locate(reference);
+      const directory = path.dirname(secretPath);
+      filesystem.mkdirSync(directory, { recursive: true });
+      filesystem.writeFileSync(secretPath, content.endsWith("\n") ? content : `${content}\n`);
+      filesystem.chmodSync(directory, 0o700);
+      filesystem.chmodSync(secretPath, 0o600);
+    }
+  });
+}
+
 export class HttpRequestError extends Error {
   constructor({ url, result = undefined, timedOut = false }) {
     const status = timedOut ? "timed out" : `failed with status ${result?.status}`;
@@ -111,18 +144,40 @@ export function createHttpClient(options = {}) {
 export function createProductionAdapters(options = {}) {
   const commandRunner = options.commandRunner ?? createCommandRunner();
   const secretResolver = options.secretResolver ?? createLocalSecretResolver();
+  const secretStore = options.secretStore ?? createLocalSecretStore();
   const httpClient = options.httpClient ?? createHttpClient();
   const proxmox = createProxmoxAdapter(commandRunner);
+  const caddyAdapter = createCaddyAdapter({ httpClient, secretResolver });
+  const caddyInternalCaAdapter = Object.freeze({
+    async setup(plan) {
+      if (plan.connectionSecretReference !== undefined) {
+        try { secretResolver.resolve(plan.connectionSecretReference); } catch {}
+      }
+      if (plan.provider === "caddy-internal-ca") {
+        return { ...plan, lxcCommands: [{ binary: "/usr/bin/caddy", args: ["trust"] }] };
+      }
+      return caddyAdapter.setup(plan);
+    },
+    async upgrade(plan) { return caddyAdapter.upgrade(plan); },
+    async configure(request) { return caddyAdapter.configure(request); },
+    async inspect(request) { return caddyAdapter.inspect(request); },
+    async adopt(request) { return caddyAdapter.adopt(request); },
+    async healthCheck(request) { return caddyAdapter.healthCheck(request); },
+    async publishRoute(request) { return caddyAdapter.publishRoute(request); },
+    async unpublishRoute(request) { return caddyAdapter.unpublishRoute(request); },
+    async deleteRoute(request) { return caddyAdapter.unpublishRoute(request); },
+    async healthCheckExposure(request) { return caddyAdapter.healthCheckExposure(request); }
+  });
   const providerAdapters = Object.freeze({
     technitium: createTechnitiumAdapter({ httpClient, secretResolver }),
-    caddy: createProviderAdapter("caddy", secretResolver),
+    caddy: caddyAdapter,
     traefik: createProviderAdapter("traefik", secretResolver),
     "step-ca": createProviderAdapter("step-ca", secretResolver),
-    "caddy-internal-ca": createProviderAdapter("caddy-internal-ca", secretResolver),
+    "caddy-internal-ca": caddyInternalCaAdapter,
     tailscale: createProviderAdapter("tailscale", secretResolver),
     netbird: createProviderAdapter("netbird", secretResolver)
   });
-  return Object.freeze({ proxmox, providerAdapters });
+  return Object.freeze({ proxmox, providerAdapters, secretStore });
 }
 
 function createProxmoxAdapter(commandRunner) {
@@ -154,6 +209,10 @@ function createProxmoxAdapter(commandRunner) {
       if (!/^\d+$/.test(vmid)) {
         throw new Error("Proxmox did not return a valid next LXC ID.");
       }
+      const net0 = ["name=eth0", `bridge=${spec.bridge}`, `ip=${spec.ip}/24`];
+      if (spec.gateway !== undefined) {
+        net0.push(`gw=${spec.gateway}`);
+      }
       await commandRunner.run({
         binary: "/usr/sbin/pct",
         args: [
@@ -162,7 +221,8 @@ function createProxmoxAdapter(commandRunner) {
           "--cores", String(spec.resources.cpus),
           "--memory", String(spec.resources.memoryMb),
           "--rootfs", `${spec.storage}:${spec.resources.diskGb}`,
-          "--net0", `name=eth0,bridge=${spec.bridge},ip=${spec.ip}/24`,
+          "--net0", net0.join(","),
+          ...(spec.nameserver !== undefined ? ["--nameserver", spec.nameserver] : []),
           "--unprivileged", spec.unprivileged ? "1" : "0",
           "--start", "1"
         ]
