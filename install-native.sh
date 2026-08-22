@@ -38,6 +38,8 @@ case "$OS" in
       *)
         echo "❌ Unsupported architecture: $ARCH"
         echo "   Supported: x86_64, aarch64/arm64"
+        echo "   Note: Cross-platform builds require additional setup"
+        echo "   Use the Node.js installer instead: curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install.sh | bash"
         exit 1
         ;;
     esac
@@ -48,6 +50,7 @@ case "$OS" in
   *)
     echo "❌ Unsupported OS: $OS"
     echo "   Supported: Linux, macOS"
+    echo "   Use the Node.js installer instead: curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install.sh | bash"
     exit 1
     ;;
 esac
@@ -92,6 +95,8 @@ if ! $DOWNLOAD_CMD "$BINARY_URL" > "$INSTALL_DIR/nomina" 2>/dev/null; then
   BINARY_URL="https://raw.githubusercontent.com/$REPO/$BRANCH/dist/$BINARY"
   if ! $DOWNLOAD_CMD "$BINARY_URL" > "$INSTALL_DIR/nomina" 2>/dev/null; then
     echo "❌ Failed to download binary from both release and dist folder."
+    echo "   This platform may not have a pre-built binary available."
+    echo "   Use the Node.js installer instead: curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install.sh | bash"
     exit 1
   fi
 fi

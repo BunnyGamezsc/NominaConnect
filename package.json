@@ -8,7 +8,10 @@
   },
   "scripts": {
     "test": "node --test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:native": "bun build --compile --outfile dist/nomina bin/nomina.js",
+    "build:node": "cp bin/nomina.js dist/nomina.js && chmod +x dist/nomina.js",
+    "build:all": "bun run build:native && bun run build:node"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
