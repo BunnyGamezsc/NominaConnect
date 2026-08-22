@@ -26,7 +26,9 @@ function createProviderPlugin({ name, operations, upgradeOperations = [`upgrade-
         lxcCommands: upgradeOperations
       };
     },
-    async inspect(adapter, managedItem, { providerReferences = [], connectionSecretReference } = {}) {
+    async inspect(adapter, managedItem, context = {}) {
+      const providerReferences = context.providerReferences ?? [];
+      const connectionSecretReference = context.connectionSecretReference;
       const observed = await adapter.inspect({
         provider: name,
         managedItemId: managedItem.id,

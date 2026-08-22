@@ -81,6 +81,10 @@ test("nomina init writes a portable managed inventory and private operational st
   assert.match(config, /id: nc_/);
   assert.match(config, /connectionSecretReferences:/);
   assert.match(config, /nominaconnect\/provider\/nc_/);
+  assert.doesNotMatch(config, /top-secret|authkey|password\s*:/i);
+  for (const line of config.split("\n").filter((entry) => entry.includes("nominaconnect/provider/"))) {
+    assert.match(line.trim(), /^nc_[0-9a-f-]+: nominaconnect\/provider\/nc_[0-9a-f-]+$/);
+  }
   assert.deepEqual(state.providerReferences, {});
   assert.doesNotMatch(filesystem.read("/projects/bunnyhome/.nomina/state.json"), /nominaconnect\/provider/);
   assert.equal(filesystem.modes.get("/projects/bunnyhome/.nomina"), 0o700);

@@ -18,12 +18,20 @@ test("command runner uses argument arrays and redacts secret-derived diagnostics
   });
 
   await assert.rejects(
-    runner.run({ binary: "/usr/bin/pct", args: ["list"], redactions: ["top-secret"] }),
+    runner.run({
+      binary: "/usr/bin/pct",
+      args: ["exec", "120", "--", "/usr/bin/tailscale", "up", "--authkey", "top-secret"],
+      redactions: ["top-secret"]
+    }),
     (error) => {
       assert.ok(error instanceof CommandExecutionError);
       assert.equal(error.command.binary, "/usr/bin/pct");
-      assert.deepEqual(error.command.args, ["list"]);
+      assert.deepEqual(error.command.args, [
+        "exec", "120", "--", "/usr/bin/tailscale", "up", "--authkey", "[REDACTED]"
+      ]);
+      assert.equal("redactions" in error.command, false);
       assert.doesNotMatch(error.message, /top-secret/);
+      assert.doesNotMatch(JSON.stringify(error), /top-secret/);
       assert.match(error.message, /\[REDACTED\]/);
       return true;
     }
@@ -44,6 +52,10 @@ test("root-local secret resolution accepts configured references without exposin
 
   assert.equal(resolver.resolve("nominaconnect/provider/nc_dns"), "top-secret");
   assert.throws(() => resolver.resolve("../outside"), /relative secret reference/i);
+  assert.throws(
+    () => createLocalSecretResolver({ isRoot: () => false }).resolve("nominaconnect/provider/nc_dns"),
+    /Proxmox root shell/
+  );
 });
 
 test("production composition provides asynchronous Proxmox and provider adapters", async () => {
@@ -73,4 +85,27 @@ test("production composition provides asynchronous Proxmox and provider adapters
     args: ["update"]
   });
   assert.deepEqual(commands[0], { binary: "/usr/sbin/pct", args: ["list"] });
+});
+
+test("production adapters keep resolved connection secrets out of command arguments", async () => {
+  const { providerAdapters } = createProductionAdapters({
+    secretResolver: {
+      resolve(reference) {
+        assert.equal(reference, "nominaconnect/provider/nc_vpn");
+        return "top-secret";
+      }
+    }
+  });
+
+  const setup = await providerAdapters.tailscale.setup({
+    provider: "tailscale",
+    managedItemId: "nc_vpn",
+    operations: ["install-tailscale", "join-tailnet"],
+    connectionSecretReference: "nominaconnect/provider/nc_vpn"
+  });
+
+  const commandText = JSON.stringify(setup.lxcCommands);
+  assert.doesNotMatch(commandText, /top-secret/);
+  assert.doesNotMatch(commandText, /nominaconnect\/provider\/nc_vpn/);
+  assert.ok(setup.lxcCommands.every((command) => Array.isArray(command.args)));
 });

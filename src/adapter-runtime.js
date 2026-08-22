@@ -15,11 +15,10 @@ export class CommandExecutionError extends Error {
   }
 }
 
-export function createCommandRunner({
-  execute,
-  spawn = spawnProcess,
-  defaultTimeoutMs = DEFAULT_TIMEOUT_MS
-} = {}) {
+export function createCommandRunner(options = {}) {
+  const execute = options.execute;
+  const spawn = options.spawn ?? spawnProcess;
+  const defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
   return Object.freeze({
     async run(command) {
       const normalized = normalizeCommand(command, defaultTimeoutMs);
@@ -29,7 +28,10 @@ export function createCommandRunner({
           : await executeCommand({ spawn, ...normalized }),
         normalized.redactions
       );
-      const safeCommand = { binary: normalized.binary, args: normalized.args };
+      const safeCommand = {
+        binary: normalized.binary,
+        args: normalized.args.map((argument) => redactValue(argument, normalized.redactions))
+      };
       if (result.timedOut || result.exitCode !== 0) {
         throw new CommandExecutionError({ command: safeCommand, result, timedOut: result.timedOut });
       }
@@ -38,11 +40,10 @@ export function createCommandRunner({
   });
 }
 
-export function createLocalSecretResolver({
-  filesystem = fs,
-  secretsDirectory = "/var/lib/nominaconnect/secrets",
-  isRoot = () => process.getuid?.() === 0
-} = {}) {
+export function createLocalSecretResolver(options = {}) {
+  const filesystem = options.filesystem ?? fs;
+  const secretsDirectory = options.secretsDirectory ?? "/var/lib/nominaconnect/secrets";
+  const isRoot = options.isRoot ?? (() => process.getuid?.() === 0);
   return Object.freeze({
     resolve(reference) {
       if (!isRoot()) {
@@ -58,10 +59,9 @@ export function createLocalSecretResolver({
   });
 }
 
-export function createProductionAdapters({
-  commandRunner = createCommandRunner(),
-  secretResolver = createLocalSecretResolver()
-} = {}) {
+export function createProductionAdapters(options = {}) {
+  const commandRunner = options.commandRunner ?? createCommandRunner();
+  const secretResolver = options.secretResolver ?? createLocalSecretResolver();
   const proxmox = createProxmoxAdapter(commandRunner);
   const providerAdapters = Object.freeze(Object.fromEntries([
     "technitium", "caddy", "traefik", "step-ca", "caddy-internal-ca", "tailscale", "netbird"
@@ -205,16 +205,19 @@ function executeCommand({ spawn, binary, args, timeoutMs }) {
 }
 
 function redactResult(result, redactions) {
-  const redact = (value) => redactions.reduce(
+  return {
+    exitCode: result.exitCode ?? 1,
+    stdout: redactValue(result.stdout, redactions),
+    stderr: redactValue(result.stderr, redactions),
+    ...(result.timedOut ? { timedOut: true } : {})
+  };
+}
+
+function redactValue(value, redactions) {
+  return redactions.reduce(
     (output, secret) => secret === "" ? output : output.split(secret).join("[REDACTED]"),
     String(value ?? "")
   );
-  return {
-    exitCode: result.exitCode ?? 1,
-    stdout: redact(result.stdout),
-    stderr: redact(result.stderr),
-    ...(result.timedOut ? { timedOut: true } : {})
-  };
 }
 
 function resolveSecretPath(secretsDirectory, reference) {
