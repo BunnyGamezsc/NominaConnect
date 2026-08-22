@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.3] - 2026-08-22
+
+### Fixed
+- **Caddy provisioning raced the service start** (same `Unable to connect. Is the computer able to access the url?` as `1.2.1` for Technitium, now for `caddy`):
+  `nomina service add caddy` finished `apt-get install caddy` (`120s` timeout) then immediately `GET http://<ip>:2019/config/` / `GET /config/apps/http/servers/srv0/routes` for `inspect`/`healthCheck`. On `debian-13/1 CPU` Caddy’s `systemd` unit wasn’t yet listening, so `HttpRequestError` aborted provisioning before `state.json` was written (orphaned LXC, blocked IP retry).
+  - `caddy-adapter` final `apt-get install caddy` now `timeoutMs: 180_000`
+  - `provisionPlatformService` now uses `8×3s, backoff 1.5` (`~146s` total) for `configure`/`inspect` and `6×2s` for `healthCheck`, so transient `ECONNREFUSED` while Caddy boots is retried
+  - Verify on `nuc` after `Technitium` on `192.168.4.90`: `pct list`, `pct config <vmid>`, `pct exec <vmid> -- systemctl is-active caddy; ss -tlnp | grep 2019; curl -s http://127.0.0.1:2019/config/`
+
 ## [1.2.2] - 2026-08-22
 
 ### Added

@@ -133,7 +133,7 @@ export async function provisionPlatformService({
         managedItemId: managedItem.id,
         ...providerContext
       }),
-      { maxRetries: 6, baseDelayMs: 2000, backoffFactor: 1.5 }
+      { maxRetries: 8, baseDelayMs: 3000, backoffFactor: 1.5 }
     );
   }
 
@@ -142,11 +142,11 @@ export async function provisionPlatformService({
     : [];
   const inspection = await withBoundedRetry(
     () => plugin.inspect(providerAdapter, managedItem, { ...providerContext, providerReferences }),
-    { maxRetries: 6, baseDelayMs: 2000, backoffFactor: 1.5 }
+    { maxRetries: 8, baseDelayMs: 3000, backoffFactor: 1.5 }
   );
   const health = await withBoundedRetry(
     () => plugin.healthCheck(providerAdapter, managedItem, providerContext),
-    { maxRetries: 4, baseDelayMs: 1000, backoffFactor: 2 }
+    { maxRetries: 6, baseDelayMs: 2000, backoffFactor: 1.5 }
   );
 
   return {
