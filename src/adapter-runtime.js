@@ -154,6 +154,10 @@ function createProxmoxAdapter(commandRunner) {
       if (!/^\d+$/.test(vmid)) {
         throw new Error("Proxmox did not return a valid next LXC ID.");
       }
+      const net0 = ["name=eth0", `bridge=${spec.bridge}`, `ip=${spec.ip}/24`];
+      if (spec.gateway !== undefined) {
+        net0.push(`gw=${spec.gateway}`);
+      }
       await commandRunner.run({
         binary: "/usr/sbin/pct",
         args: [
@@ -162,7 +166,8 @@ function createProxmoxAdapter(commandRunner) {
           "--cores", String(spec.resources.cpus),
           "--memory", String(spec.resources.memoryMb),
           "--rootfs", `${spec.storage}:${spec.resources.diskGb}`,
-          "--net0", `name=eth0,bridge=${spec.bridge},ip=${spec.ip}/24`,
+          "--net0", net0.join(","),
+          ...(spec.nameserver !== undefined ? ["--nameserver", spec.nameserver] : []),
           "--unprivileged", spec.unprivileged ? "1" : "0",
           "--start", "1"
         ]

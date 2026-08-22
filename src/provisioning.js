@@ -60,6 +60,15 @@ export async function runIpPreflight(proxmox, ip) {
   return warnings;
 }
 
+export function defaultGatewayFor(ip) {
+  if (typeof ip !== "string" || !/^(?:\d{1,3}\.){3}\d{1,3}$/.test(ip)) {
+    return undefined;
+  }
+  const octets = ip.split(".");
+  octets[3] = "1";
+  return octets.join(".");
+}
+
 export function resolveServiceDeployment(project, serviceName, options) {
   const deploymentDefaults = PLATFORM_DEPLOYMENTS[serviceName];
   if (deploymentDefaults === undefined) {
@@ -71,6 +80,8 @@ export function resolveServiceDeployment(project, serviceName, options) {
     memoryMb: options.memoryMb ?? deploymentDefaults.resourceRecommendations.memoryMb,
     diskGb: options.diskGb ?? deploymentDefaults.resourceRecommendations.diskGb
   };
+  const gateway = options.gateway ?? defaultGatewayFor(options.ip);
+  const nameserver = options.nameserver ?? options.gateway ?? gateway;
 
   return {
     node: project.config.proxmox.node,
@@ -80,6 +91,8 @@ export function resolveServiceDeployment(project, serviceName, options) {
     storage: options.storage ?? project.config.proxmox.defaultStorage,
     unprivileged: true,
     template: options.template ?? deploymentDefaults.template,
+    ...(gateway === undefined ? {} : { gateway }),
+    ...(nameserver === undefined ? {} : { nameserver }),
     resources
   };
 }

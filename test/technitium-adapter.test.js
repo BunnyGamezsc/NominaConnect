@@ -299,6 +299,8 @@ test("production Proxmox adapter validates template, storage, bridge, IP, and un
       storage: "missing-store",
       unprivileged: true,
       template: "debian-12-standard",
+      gateway: "10.0.0.1",
+      nameserver: "10.0.0.1",
       resources: { cpus: 2, memoryMb: 1024, diskGb: 8 }
     }),
     /storage.*missing-store/i
@@ -321,6 +323,8 @@ test("production Proxmox adapter validates template, storage, bridge, IP, and un
       storage: "local-lvm",
       unprivileged: true,
       template: "debian-12-standard",
+      gateway: "10.0.0.1",
+      nameserver: "10.0.0.1",
       resources: { cpus: 2, memoryMb: 1024, diskGb: 8 }
     }),
     /template.*debian-12-standard/i
@@ -334,6 +338,8 @@ test("production Proxmox adapter validates template, storage, bridge, IP, and un
       storage: "local-lvm",
       unprivileged: true,
       template: "debian-12-standard",
+      gateway: "10.0.0.1",
+      nameserver: "10.0.0.1",
       resources: { cpus: 2, memoryMb: 1024, diskGb: 8 }
     }),
     /bridge.*vmbr0/i
@@ -347,6 +353,8 @@ test("production Proxmox adapter validates template, storage, bridge, IP, and un
       storage: "local-lvm",
       unprivileged: true,
       template: "debian-12-standard",
+      gateway: "10.0.0.1",
+      nameserver: "10.0.0.1",
       resources: { cpus: 2, memoryMb: 1024, diskGb: 8 }
     }),
     /unprivileged/i
@@ -360,6 +368,8 @@ test("production Proxmox adapter validates template, storage, bridge, IP, and un
       storage: "local-lvm",
       unprivileged: true,
       template: "debian-12-standard",
+      gateway: "10.0.0.1",
+      nameserver: "10.0.0.1",
       resources: { cpus: 2, memoryMb: 1024, diskGb: 8 }
     }),
     /already in use|known-collision|lxc\/115/i
@@ -376,6 +386,8 @@ test("production Proxmox adapter creates, inspects, and controls LXCs with local
     storage: "local-lvm",
     unprivileged: true,
     template: "debian-12-standard",
+    gateway: "10.0.0.1",
+    nameserver: "10.0.0.1",
     resources: { cpus: 2, memoryMb: 1024, diskGb: 8 }
   };
 

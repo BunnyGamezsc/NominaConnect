@@ -4,7 +4,8 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install.sh | bash              # latest release
-#   curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install.sh | bash -s v1.1.0    # specific version
+#   curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install.sh | bash -s v1.1.2    # specific version
+#   curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install.sh | bash -s dev       # dev branch (unstable)
 #   curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install.sh | FORCE=1 bash      # force reinstall
 #
 # Re-running the installer upgrades an existing installation in place.
@@ -69,7 +70,11 @@ installed_version() {
 REQUESTED_VERSION="${1:-${NOMINA_VERSION:-}}"
 REF=""
 TARGET_VERSION=""
-if [ -n "$REQUESTED_VERSION" ] && [ "$REQUESTED_VERSION" != "latest" ]; then
+if [ "$REQUESTED_VERSION" = "dev" ]; then
+  BRANCH="${NOMINA_DEV_BRANCH:-dev}"
+  REF="$BRANCH"
+  echo "🔬 Dev channel: tracking the '$BRANCH' branch (unstable)."
+elif [ -n "$REQUESTED_VERSION" ] && [ "$REQUESTED_VERSION" != "latest" ]; then
   case "$REQUESTED_VERSION" in
     v*) TARGET_VERSION="$REQUESTED_VERSION" ;;
     *)  TARGET_VERSION="v$REQUESTED_VERSION" ;;

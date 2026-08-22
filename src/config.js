@@ -395,6 +395,12 @@ function appendPlatformService(lines, field, service) {
     if (service.deployment.template !== undefined) {
       lines.push(`        template: ${yamlScalar(service.deployment.template)}`);
     }
+    if (service.deployment.gateway !== undefined) {
+      lines.push(`        gateway: ${yamlScalar(service.deployment.gateway)}`);
+    }
+    if (service.deployment.nameserver !== undefined) {
+      lines.push(`        nameserver: ${yamlScalar(service.deployment.nameserver)}`);
+    }
     if (service.deployment.resources !== undefined) {
       lines.push(
         "        resources:",

@@ -206,6 +206,8 @@ test("nomina service add tailscale provisions an unprivileged Debian LXC with de
     storage: "local-lvm",
     unprivileged: true,
     template: "debian-12-standard",
+    gateway: "10.0.0.1",
+    nameserver: "10.0.0.1",
     resources: { cpus: 1, memoryMb: 256, diskGb: 2 }
   });
   assert.deepEqual(
@@ -249,6 +251,8 @@ test("nomina service add netbird provisions an unprivileged Debian LXC with defa
     storage: "local-lvm",
     unprivileged: true,
     template: "debian-12-standard",
+    gateway: "10.0.0.1",
+    nameserver: "10.0.0.1",
     resources: { cpus: 1, memoryMb: 256, diskGb: 2 }
   });
   assert.deepEqual(
@@ -334,6 +338,8 @@ test("nomina service add tailscale accepts resource, bridge, storage, and hostna
     storage: "local-zfs",
     unprivileged: true,
     template: "debian-12-standard",
+    gateway: "10.0.0.1",
+    nameserver: "10.0.0.1",
     resources: { cpus: 2, memoryMb: 512, diskGb: 4 }
   });
 });

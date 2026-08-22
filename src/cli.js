@@ -200,6 +200,8 @@ async function addTechnitiumService(options, adapters) {
     bridge: result.lxcSpec.bridge,
     storage: result.lxcSpec.storage,
     template: result.lxcSpec.template,
+    gateway: result.lxcSpec.gateway,
+    nameserver: result.lxcSpec.nameserver,
     resources: result.lxcSpec.resources
   };
   const updatedConfig = updatePlatformDeployment(project.config, "dns", deployment);
@@ -281,6 +283,8 @@ async function addReverseProxyService(serviceName, serviceLabel, promptOptions, 
     bridge: result.lxcSpec.bridge,
     storage: result.lxcSpec.storage,
     template: result.lxcSpec.template,
+    gateway: result.lxcSpec.gateway,
+    nameserver: result.lxcSpec.nameserver,
     resources: result.lxcSpec.resources
   };
   const updatedConfig = updatePlatformDeployment(project.config, "reverseProxy", deployment);
@@ -376,6 +380,8 @@ async function addStepCaService(options, adapters) {
     bridge: result.lxcSpec.bridge,
     storage: result.lxcSpec.storage,
     template: result.lxcSpec.template,
+    gateway: result.lxcSpec.gateway,
+    nameserver: result.lxcSpec.nameserver,
     resources: result.lxcSpec.resources
   };
   const updatedConfig = updatePlatformDeployment(project.config, "certificateAuthority", deployment);
@@ -517,6 +523,8 @@ async function addVpnService(serviceName, serviceLabel, promptOptions, options, 
     bridge: result.lxcSpec.bridge,
     storage: result.lxcSpec.storage,
     template: result.lxcSpec.template,
+    gateway: result.lxcSpec.gateway,
+    nameserver: result.lxcSpec.nameserver,
     resources: result.lxcSpec.resources
   };
   const updatedConfig = updatePlatformDeployment(project.config, "vpn", deployment);
@@ -976,6 +984,8 @@ function parseServiceAddOptions(rawOptions) {
     ["--storage", "storage"],
     ["--hostname", "hostname"],
     ["--template", "template"],
+    ["--gateway", "gateway"],
+    ["--nameserver", "nameserver"],
     ["--cpus", "cpus"],
     ["--memory", "memoryMb"],
     ["--disk", "diskGb"]

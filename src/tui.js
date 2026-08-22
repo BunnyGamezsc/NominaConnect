@@ -1,7 +1,7 @@
 import * as clack from "@clack/prompts";
 import { INITIAL_PLATFORM_CATALOG } from "./catalog.js";
 import { findProjectDirectory, loadProject } from "./config.js";
-import { TECHNITIUM_DEPLOYMENT, CADDY_DEPLOYMENT, TRAEFIK_DEPLOYMENT, STEP_CA_DEPLOYMENT, TAILSCALE_DEPLOYMENT, NETBIRD_DEPLOYMENT } from "./provisioning.js";
+import { TECHNITIUM_DEPLOYMENT, CADDY_DEPLOYMENT, TRAEFIK_DEPLOYMENT, STEP_CA_DEPLOYMENT, TAILSCALE_DEPLOYMENT, NETBIRD_DEPLOYMENT, defaultGatewayFor } from "./provisioning.js";
 import { formatPendingNotices } from "./tracking.js";
 
 export function getProjectContext(filesystem, cwd = ".") {
@@ -475,6 +475,8 @@ export async function promptTechnitiumOptions(project, existingOptions, prompts,
   logInfo(prompts, [
     `Bridge: ${existingOptions.bridge ?? project.config.proxmox.defaultBridge}`,
     `Storage: ${existingOptions.storage ?? project.config.proxmox.defaultStorage}`,
+    `Gateway: ${existingOptions.gateway ?? defaultGatewayFor(ip)}`,
+    `Nameserver: ${existingOptions.nameserver ?? existingOptions.gateway ?? defaultGatewayFor(ip)}`,
     `Domain: ${project.config.baseLocalDomain}`
   ].join("\n"));
 
@@ -519,7 +521,9 @@ export async function promptReverseProxyOptions(project, existingOptions, prompt
 
   logInfo(prompts, [
     `Bridge: ${existingOptions.bridge ?? project.config.proxmox.defaultBridge}`,
-    `Storage: ${existingOptions.storage ?? project.config.proxmox.defaultStorage}`
+    `Storage: ${existingOptions.storage ?? project.config.proxmox.defaultStorage}`,
+    `Gateway: ${existingOptions.gateway ?? defaultGatewayFor(ip)}`,
+    `Nameserver: ${existingOptions.nameserver ?? existingOptions.gateway ?? defaultGatewayFor(ip)}`
   ].join("\n"));
 
   return {

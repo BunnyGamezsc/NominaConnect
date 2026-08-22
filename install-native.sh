@@ -4,7 +4,8 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install-native.sh | bash              # latest release
-#   curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install-native.sh | bash -s v1.1.0    # specific version
+#   curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install-native.sh | bash -s v1.1.2    # specific version
+#   curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install-native.sh | bash -s dev       # dev branch (unstable, Node.js fallback)
 #   curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install-native.sh | FORCE=1 bash      # force reinstall
 #
 # Re-running the installer upgrades an existing installation in place.
@@ -85,6 +86,13 @@ latest_tag() {
 
 # --- Resolve target version ---
 REQUESTED_VERSION="${1:-${NOMINA_VERSION:-}}"
+if [ "$REQUESTED_VERSION" = "dev" ]; then
+  echo "🔬 Dev channel selected. Native binaries are not published for dev builds."
+  echo "📥 Delegating to the Node.js installer on the '${NOMINA_DEV_BRANCH:-dev}' branch..."
+  DEV_INSTALLER="$(mktemp)"
+  http_get "https://raw.githubusercontent.com/$REPO/${NOMINA_DEV_BRANCH:-dev}/install.sh" > "$DEV_INSTALLER"
+  exec bash "$DEV_INSTALLER" dev
+fi
 TARGET_VERSION=""
 if [ -n "$REQUESTED_VERSION" ] && [ "$REQUESTED_VERSION" != "latest" ]; then
   case "$REQUESTED_VERSION" in
