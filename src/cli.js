@@ -63,6 +63,10 @@ async function runCommand(command, rest, adapters) {
       return handleExposureCommand(rest, adapters);
     case "domain":
       return handleDomainCommand(rest, adapters);
+    case "caddy":
+      return handleCaddyCommand(rest, adapters);
+    case "uninstall":
+      return uninstallEverything(parseUninstallOptions(rest), adapters);
     case "changes":
       return showChanges(rest, adapters);
     case "secret":
@@ -1342,6 +1346,163 @@ async function changeBaseDomain(options, adapters) {
     migratedExposures: exposures.length,
     warnings
   };
+}
+
+async function handleCaddyCommand(argumentsList, adapters) {
+  const [subcommand, ...rest] = argumentsList;
+  if (subcommand !== "redirect") {
+    throw new Error("Run nomina for the interactive menu, or use: nomina caddy redirect on|off");
+  }
+  const [stateArg, ...rawOptions] = rest[0]?.startsWith("--") ? [undefined, ...rest] : rest;
+  if (stateArg !== "on" && stateArg !== "off") {
+    throw new Error("Specify the redirect state: nomina caddy redirect on|off");
+  }
+  const enabled = stateArg === "on";
+  const options = {};
+  parseFlagOptions(rawOptions, new Map([["--project-dir", "projectDir"]]), options);
+
+  const { filesystem, providerAdapters = {}, proxmox } = adapters;
+  assertProxmoxShell(adapters.runtime);
+  const project = loadProject(filesystem, options.projectDir);
+  const proxyService = project.config.managedInventory.platform.reverseProxy;
+  if (proxyService?.service !== "caddy") {
+    throw new Error("HTTP→HTTPS auto-redirect is only available when Caddy is the reverse proxy.");
+  }
+  if (project.state.providerReferences[proxyService.id] === undefined) {
+    throw new Error("Caddy must be provisioned before toggling HTTP→HTTPS auto-redirect.");
+  }
+
+  const updatedConfig = {
+    ...project.config,
+    managedInventory: {
+      ...project.config.managedInventory,
+      platform: {
+        ...project.config.managedInventory.platform,
+        reverseProxy: { ...proxyService, httpRedirect: enabled }
+      }
+    }
+  };
+  const workingProject = { ...project, config: updatedConfig };
+
+  writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
+
+  const exposures = (updatedConfig.managedInventory.services ?? []).filter(
+    (service) => service.exposure !== undefined
+  );
+  for (const service of exposures) {
+    await publishManagedExposure({
+      project: workingProject,
+      options: {
+        name: service.name,
+        hostname: service.exposure.hostname,
+        backendIp: service.exposure.backend.ip,
+        backendPort: Number(service.exposure.backend.port)
+      },
+      providerAdapters
+    });
+  }
+
+  persistCaddyLiveConfig(proxmox, project.state.providerReferences[proxyService.id]?.vmid);
+
+  return {
+    stdout: `HTTP→HTTPS auto-redirect ${enabled ? "enabled" : "disabled"} for ${exposures.length} exposure(s) on Caddy.\n`,
+    httpRedirect: enabled
+  };
+}
+
+function parseUninstallOptions(rawOptions) {
+  const options = {};
+  const optionNames = new Map([
+    ["--project-dir", "projectDir"],
+    ["--yes", "yes"]
+  ]);
+  const booleanFlags = new Set(["--yes"]);
+  parseFlagOptions(rawOptions, optionNames, options, booleanFlags);
+  if (typeof options.yes === "string") {
+    options.yes = true;
+  }
+  return options;
+}
+
+async function uninstallEverything(options, adapters) {
+  const { filesystem, proxmox, prompts } = adapters;
+  assertProxmoxShell(adapters.runtime);
+
+  const projectDir = options.projectDir ?? adapters.cwd ?? ".";
+  const configPath = joinPath(projectDir, "nomina.yaml");
+  const statePath = joinPath(projectDir, ".nomina", "state.json");
+  const secretStorePath = "/var/lib/nominaconnect";
+
+  // Only LXC vmids recorded in NominaConnect's own state are ever touched:
+  // provider references (active) and retained services (previously removed).
+  const targets = new Map();
+  if (filesystem.exists(configPath)) {
+    const project = loadProject(filesystem, options.projectDir);
+    for (const [id, reference] of Object.entries(project.state.providerReferences ?? {})) {
+      if (reference?.vmid !== undefined && !targets.has(reference.vmid)) {
+        targets.set(reference.vmid, id);
+      }
+    }
+    for (const [id, reference] of Object.entries(project.state.retainedServices ?? {})) {
+      if (reference?.vmid !== undefined && !targets.has(reference.vmid)) {
+        targets.set(reference.vmid, `${id} (retained)`);
+      }
+    }
+  }
+
+  const targetList = [...targets.keys()];
+  if (options.yes !== true) {
+    if (prompts === undefined) {
+      throw new Error("Refusing to nuclear-uninstall without confirmation. Re-run with --yes to skip the prompt.");
+    }
+    const confirmed = await confirmPrompt(
+      prompts,
+      `Nuclear uninstall: STOP AND DESTROY LXC(s) ${targetList.length > 0 ? targetList.join(", ") : "(none)"} and delete all NominaConnect configuration, state, and secrets. This cannot be undone. Continue?`,
+      false
+    );
+    if (!confirmed) {
+      return { stdout: "Nuclear uninstall cancelled. Nothing was destroyed.\n", cancelled: true };
+    }
+  }
+
+  const destroyed = [];
+  const failed = [];
+  if (proxmox?.stopLxc !== undefined && proxmox?.destroyLxc !== undefined) {
+    for (const vmid of targetList) {
+      try {
+        await proxmox.stopLxc(vmid);
+      } catch (error) {
+        failed.push(`stop ${vmid}: ${error.message}`);
+      }
+      try {
+        await proxmox.destroyLxc(vmid);
+        destroyed.push(vmid);
+      } catch (error) {
+        failed.push(`destroy ${vmid}: ${error.message}`);
+      }
+    }
+  } else if (targetList.length > 0) {
+    throw new Error("Proxmox adapter is unavailable; refusing to leave managed LXC(s) behind. Destroy them manually with pct destroy.");
+  }
+
+  const removedPaths = [];
+  for (const path of [configPath, statePath, secretStorePath]) {
+    if (filesystem.exists(path)) {
+      filesystem.deletePath(path.startsWith(secretStorePath) ? secretStorePath : path === statePath ? joinPath(projectDir, ".nomina") : path);
+      if (!removedPaths.some((existing) => existing === path)) {
+        removedPaths.push(path);
+      }
+    }
+  }
+
+  const lines = [];
+  lines.push(targetList.length > 0 ? `Destroyed ${destroyed.length} LXC(s): ${destroyed.join(", ")}.` : "No managed LXCs were recorded; nothing to destroy.");
+  lines.push(`Removed: ${removedPaths.join(", ") || "nothing"}.`);
+  if (failed.length > 0) {
+    lines.push(`Warning: ${failed.join("\nWarning: ")}`);
+  }
+  lines.push("Remove the nomina binary itself if desired: rm -f $(command -v nomina)");
+  return { stdout: `${lines.join("\n")}\n`, destroyed, removedPaths, failed };
 }
 
 async function publishExposure(options, adapters) {

@@ -82,6 +82,7 @@ export async function publishManagedExposure({
     protocol: "https",
     caStrategy,
     tls: tlsOptions,
+    httpRedirect: proxyService.httpRedirect === true,
     ip: proxyRef?.ip,
     endpoint: proxyRef?.ip ? `http://${proxyRef.ip}:2019` : undefined,
     connectionSecretReference: project.config.connectionSecretReferences[proxyService.id]

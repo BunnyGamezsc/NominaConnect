@@ -132,6 +132,14 @@ export function canRemoveExposure(project) {
   return hasExposures(project);
 }
 
+export function canToggleHttpRedirect(project) {
+  const proxy = project?.config?.managedInventory?.platform?.reverseProxy;
+  if (proxy?.service !== "caddy") {
+    return false;
+  }
+  return project?.state?.providerReferences?.[proxy.id] !== undefined;
+}
+
 export function hasProvisionedServices(project) {
   if (!project?.state?.providerReferences) return false;
   return Object.keys(project.state.providerReferences).length > 0;
@@ -223,6 +231,14 @@ export function buildMenuOptions(project) {
       hint: "migrate exposures to a new TLD"
     });
   }
+  if (project !== undefined && canToggleHttpRedirect(project)) {
+    const enabled = project.config.managedInventory.platform.reverseProxy.httpRedirect === true;
+    options.push({
+      value: "toggle-http-redirect",
+      label: enabled ? "Turn OFF HTTP→HTTPS auto-redirect" : "Turn ON HTTP→HTTPS auto-redirect",
+      hint: "redirect plain :80 hits to HTTPS (308)"
+    });
+  }
   if (project !== undefined && canShowCaTrustGuide(project)) {
     options.push({
       value: "view-ca-guide",
@@ -278,6 +294,13 @@ export function buildMenuOptions(project) {
       });
     }
   }
+  if (project !== undefined) {
+    options.push({
+      value: "nuclear-uninstall",
+      label: "Nuclear uninstall",
+      hint: "destroy ALL managed LXC(s), config, and secrets"
+    });
+  }
   options.push({ value: "init", label: "Initialize a new project", hint: "first-time setup" });
   options.push({ value: "exit", label: "Exit", hint: "leave NominaConnect" });
   return options;
@@ -324,6 +347,14 @@ export async function runInteractiveApp(adapters) {
       clack.log.info(result.stdout.trim());
     }
     clack.outro("Changes displayed.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
+    return result;
+  }
+  if (action === "nuclear-uninstall") {
+    const result = await adapters.runCommand(["uninstall"], adapters);
+    clack.outro(result.cancelled ? "Nuclear uninstall cancelled." : "Nuclear uninstall complete.");
     if (adapters.tracking) {
       adapters.tracking.run(adapters);
     }
@@ -464,6 +495,18 @@ export async function runInteractiveApp(adapters) {
   if (action === "change-domain") {
     const result = await adapters.runCommand(["domain", "change"], adapters);
     clack.outro("Local domain changed. Exposures migrated.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
+    return result;
+  }
+  if (action === "toggle-http-redirect") {
+    const currentlyEnabled = project?.config?.managedInventory?.platform?.reverseProxy?.httpRedirect === true;
+    const result = await adapters.runCommand(
+      ["caddy", "redirect", currentlyEnabled ? "off" : "on"],
+      adapters
+    );
+    clack.outro(currentlyEnabled ? "HTTP→HTTPS auto-redirect disabled." : "HTTP→HTTPS auto-redirect enabled.");
     if (adapters.tracking) {
       adapters.tracking.run(adapters);
     }

@@ -207,7 +207,7 @@ test("publishRoute bootstraps an empty Caddy config with a valid route and step-
   const published = routes.find((route) => route["@id"] === "dns.bunny.home");
   assert.notEqual(published, undefined);
   assert.equal("tls" in published, false, "route must not carry a tls field (unknown field for Caddy Route)");
-  assert.deepEqual(published.match, [{ host: ["dns.bunny.home"] }]);
+  assert.deepEqual(published.match, [{ host: ["dns.bunny.home"], protocol: "https://" }]);
   assert.deepEqual(published.handle[0].upstreams[0].dial, "192.168.4.90:5380");
 
   const policies = fake.get("apps/tls/automation/policies");

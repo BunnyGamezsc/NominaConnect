@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.4.3] - 2026-08-23
+
+Stable release: v1.4.2 fixes plus nuclear uninstall. Includes everything since v1.3.15 (HTTP→HTTPS auto-redirect, exposure health retry, Technitium-based LXC DNS, `nomina --version`).
+
+### Added
+- **Nuclear uninstall** (`nomina uninstall [--yes]`, TUI `Nuclear uninstall`): destroys every managed LXC recorded in NominaConnect state (provider references + retained services, deduped — unmanaged containers are never touched), then deletes `nomina.yaml`, the `.nomina/` state directory, and `/var/lib/nominaconnect/` (secrets store). Requires explicit confirmation unless `--yes`; per-LXC failures become warnings instead of aborting.
+- **HTTP→HTTPS auto-redirect for Caddy exposures** (`nomina caddy redirect on|off`, state-aware TUI toggle): plain-`http://` hits get a `308` to HTTPS.
+
+### Fixed
+- **Managed TLS routes also matched plain `:80` traffic** — host-only matcher shadowed the redirect and served cleartext ("Not secure"). Routes are pinned to `protocol: "https://"`; port-80 hits fall through to the redirect.
+
+## [1.4.2] - 2026-08-23 (Dev/Pre-release)
+
+### Fixed
+- **Managed TLS routes also matched plain `:80` traffic** — the matcher was host-only, so with redirects enabled the TLS route shadowed the 308 and exposures were served in cleartext ("Not secure"). Routes are now pinned to `protocol: "https://"`; port-80 hits fall through to the redirect.
+
+## [1.4.1] - 2026-08-23 (Dev/Pre-release)
+
+### Added
+- **HTTP→HTTPS auto-redirect for Caddy exposures** — `nomina caddy redirect on|off` (and a state-aware TUI toggle) persists the preference and re-publishes every exposure. With it enabled, plain-`http://` hits get a `308` to `https://`, so typing `dns.bunny.internal` without a scheme lands on TLS in any browser. Redirect routes are implementation detail: invisible to inspection/adoption, removed with unpublish, idempotent on republish.
+
 ## [1.4.0] - 2026-08-23
 
 Major hardening release: everything learned from the live `bunny.home` → `bunny.home.arpa` → `bunny.internal` migration on a real homelab.
