@@ -222,7 +222,7 @@ test("buildMenuOptions offers exposure publish when DNS and Caddy are provisione
   assert.equal(canPublishExposure(project), true);
   assert.deepEqual(
     buildMenuOptions(project).map((option) => option.value),
-    ["publish-exposure", "upgrade-service", "remove-service", "destroy-service", "init", "exit"]
+    ["publish-exposure", "toggle-http-redirect", "upgrade-service", "remove-service", "destroy-service", "init", "exit"]
   );
 });
 

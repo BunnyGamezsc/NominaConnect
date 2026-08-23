@@ -384,6 +384,9 @@ function appendPlatformService(lines, field, service) {
     return;
   }
   lines.push(`${field}:`, `      id: ${service.id}`, `      service: ${service.service}`);
+  if (service.httpRedirect !== undefined) {
+    lines.push(`      httpRedirect: ${service.httpRedirect === true}`);
+  }
   if (service.deployment !== undefined) {
     lines.push("      deployment:", `        ip: ${yamlScalar(service.deployment.ip)}`, `        hostname: ${yamlScalar(service.deployment.hostname)}`);
     if (service.deployment.bridge !== undefined) {

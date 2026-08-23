@@ -88,7 +88,7 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
         }
         throw error;
       }
-      const resources = routes.map((route) => toManagedResource(route, policies));
+      const resources = routes.filter((route) => !isRedirectRoute(route)).map((route) => toManagedResource(route, policies));
       return { resources };
     },
     async adopt(request) {
@@ -131,7 +131,7 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
       await ensureHttpServer(httpClient, endpoint);
       const newRoute = buildManagedRoute(request.hostname, request.backendIp, request.backendPort);
       const desiredPolicy = { subjects: [request.hostname], issuers: [issuerFor(request)] };
-      await upsertRoute(httpClient, endpoint, request.hostname, newRoute);
+      await upsertRoute(httpClient, endpoint, request.hostname, newRoute, request.httpRedirect === true);
       await upsertTlsPolicy(httpClient, endpoint, desiredPolicy);
       const locator = { host: request.hostname, configPath: `/config/apps/http/servers/srv0/routes/${request.hostname}` };
       return {
@@ -145,19 +145,20 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
       const endpoint = resolveEndpoint(request);
       const routes = await listRoutes(httpClient, endpoint);
       const existing = routes.find((r) => hostForRoute(r) === request.hostname);
+      const existingRedirect = routes.find((r) => r["@id"] === `${request.hostname}${REDIRECT_SUFFIX}`);
       const policies = await listTlsPolicies(httpClient, endpoint);
       const existingPolicy = policies.find((policy) => policy.subjects?.includes(request.hostname));
       if (existing === undefined && existingPolicy === undefined) {
         return { id: request.hostname };
       }
-      if (existing !== undefined) {
+      if (existing !== undefined || existingRedirect !== undefined) {
         if (request.fingerprint !== undefined) {
           const actual = await managedFingerprintFor(httpClient, endpoint, request.hostname);
           if (actual !== null && actual !== request.fingerprint) {
             throw new Error(`Route ${request.hostname} does not match managed fingerprint. Aborting deletion to preserve unrelated routes.`);
           }
         }
-        const remaining = routes.filter((r) => hostForRoute(r) !== request.hostname);
+        const remaining = routes.filter((r) => !isManagedRouteFor(r, request.hostname));
         await replaceMapValue(httpClient, endpoint, "/config/apps/http/servers/srv0/routes", remaining);
       }
       if (existingPolicy !== undefined) {
@@ -269,15 +270,16 @@ async function ensureHttpServer(httpClient, endpoint) {
   }
 }
 
-async function upsertRoute(httpClient, endpoint, hostname, newRoute) {
+async function upsertRoute(httpClient, endpoint, hostname, newRoute, httpRedirect = false) {
   const routes = await listRoutes(httpClient, endpoint);
-  const remaining = routes.filter((r) => hostForRoute(r) !== hostname);
+  const remaining = routes.filter((r) => !isManagedRouteFor(r, hostname));
+  const additions = httpRedirect ? [newRoute, buildRedirectRoute(hostname)] : [newRoute];
   const catchAllIndex = remaining.findIndex((r) => !hasHostMatcher(r));
   if (catchAllIndex === -1) {
-    remaining.push(newRoute);
+    remaining.push(...additions);
   } else {
     // Host-specific routes must precede hostless catch-alls or they are shadowed
-    remaining.splice(catchAllIndex, 0, newRoute);
+    remaining.splice(catchAllIndex, 0, ...additions);
   }
   await replaceMapValue(httpClient, endpoint, "/config/apps/http/servers/srv0/routes", remaining);
 }
@@ -411,6 +413,33 @@ function buildManagedRoute(hostname, backendIp, backendPort) {
     handle: [{ handler: "reverse_proxy", upstreams: [{ dial: `${backendIp}:${backendPort}` }] }],
     terminal: true
   };
+}
+
+const REDIRECT_SUFFIX = "-auto-http";
+
+// Plain-HTTP hits for an exposure are redirected to HTTPS instead of served.
+// The route matches only cleartext requests (protocol matcher) so it never
+// shadows the TLS route; @id carries the suffix so inspection/adoption treat
+// it as implementation detail rather than a second managed resource.
+function buildRedirectRoute(hostname) {
+  return {
+    "@id": `${hostname}${REDIRECT_SUFFIX}`,
+    match: [{ host: [hostname], protocol: "http://" }],
+    handle: [{
+      handler: "static_response",
+      status_code: 308,
+      headers: { Location: ["https://{http.request.host}{http.request.uri}"] }
+    }],
+    terminal: true
+  };
+}
+
+function isRedirectRoute(route) {
+  return typeof route["@id"] === "string" && route["@id"].endsWith(REDIRECT_SUFFIX);
+}
+
+function isManagedRouteFor(route, hostname) {
+  return hostForRoute(route) === hostname || route["@id"] === `${hostname}${REDIRECT_SUFFIX}`;
 }
 
 function issuerFor(request) {

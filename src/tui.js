@@ -132,6 +132,14 @@ export function canRemoveExposure(project) {
   return hasExposures(project);
 }
 
+export function canToggleHttpRedirect(project) {
+  const proxy = project?.config?.managedInventory?.platform?.reverseProxy;
+  if (proxy?.service !== "caddy") {
+    return false;
+  }
+  return project?.state?.providerReferences?.[proxy.id] !== undefined;
+}
+
 export function hasProvisionedServices(project) {
   if (!project?.state?.providerReferences) return false;
   return Object.keys(project.state.providerReferences).length > 0;
@@ -221,6 +229,14 @@ export function buildMenuOptions(project) {
       value: "change-domain",
       label: "Change the local domain",
       hint: "migrate exposures to a new TLD"
+    });
+  }
+  if (project !== undefined && canToggleHttpRedirect(project)) {
+    const enabled = project.config.managedInventory.platform.reverseProxy.httpRedirect === true;
+    options.push({
+      value: "toggle-http-redirect",
+      label: enabled ? "Turn OFF HTTP→HTTPS auto-redirect" : "Turn ON HTTP→HTTPS auto-redirect",
+      hint: "redirect plain :80 hits to HTTPS (308)"
     });
   }
   if (project !== undefined && canShowCaTrustGuide(project)) {
@@ -464,6 +480,18 @@ export async function runInteractiveApp(adapters) {
   if (action === "change-domain") {
     const result = await adapters.runCommand(["domain", "change"], adapters);
     clack.outro("Local domain changed. Exposures migrated.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
+    return result;
+  }
+  if (action === "toggle-http-redirect") {
+    const currentlyEnabled = project?.config?.managedInventory?.platform?.reverseProxy?.httpRedirect === true;
+    const result = await adapters.runCommand(
+      ["caddy", "redirect", currentlyEnabled ? "off" : "on"],
+      adapters
+    );
+    clack.outro(currentlyEnabled ? "HTTP→HTTPS auto-redirect disabled." : "HTTP→HTTPS auto-redirect enabled.");
     if (adapters.tracking) {
       adapters.tracking.run(adapters);
     }
