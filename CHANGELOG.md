@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.3.2] - 2026-08-23 (Dev/Pre-release)
+
+### Changed
+- Dev sync to `main` `v1.3.1` (step-ca APT key fix) — no new behavior, just publishes dev channel with the fix for `curl -fsSL .../dev/install-native.sh | bash -s dev`.
+
 ## [1.3.1] - 2026-08-23
 
 ### Fixed
