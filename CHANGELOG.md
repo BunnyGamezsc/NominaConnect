@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.5] - 2026-08-22 (Dev/Pre-release)
+
+### Fixed
+- **Recheck found no LXC and tracking warned `Technitium API endpoint is required`**:
+  - `checkIpAvailability` (`src/adapter-runtime.js:183`) only grepped `pct list` (no IP column on `nuc`, e.g. `100 running technitium`), so `192.168.4.86` on `101` was missed and `recheck` errored `No existing LXC found`; now falls back to `pct config <vmid>` `net0` `ip=` scan for each `VMID` from `pct list`
+  - `runAdoptionPass` (`src/adoption.js:185`) only passed `providerReferences` to `technitium`/`caddy` `inspect`/`healthCheck`, so `resolveEndpoint` threw `Technitium API endpoint is required` and pending `Failed to inspect technitium…` warning persisted; now passes `connectionSecretReference`/`ip`/`zone` (`caddy-internal-ca` falls back to `caddy` `ip`) and `proxy` exposure health also gets `ip`
+  - Test fixture `pct config` now vmid-aware (`100` → `pve` `10.0.0.1`, `120` → `technitium` `10.0.0.53`) to keep `184` tests passing
+
 ## [1.2.4] - 2026-08-22 (Dev/Pre-release)
 
 ### Added
