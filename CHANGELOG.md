@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.3.4] - 2026-08-23 (Dev/Pre-release)
+
+### Changed
+- Dev sync to `main` `v1.3.3` (step-ca `step: command not found` fix) — publishes dev channel with the fix for `curl -fsSL .../dev/install-native.sh | bash -s dev`.
+
 ## [1.3.3] - 2026-08-23
 
 ### Fixed
