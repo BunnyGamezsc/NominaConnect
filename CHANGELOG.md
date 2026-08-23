@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.3.3] - 2026-08-23
+
+### Fixed
+- **step-ca `step: command not found` / `Unit step-ca.service does not exist`** (`pct exec 102 -- ... step ca init ... exited with status 1`): `STEP_CA_INSTALL` only installed `step-ca`, but `step ca init` needs `step-cli`. Now `apt-get install --yes step-ca step-cli` (and `upgrade` installs both). Retry after `pct stop 102; pct destroy 102`.
+
 ## [1.3.1] - 2026-08-23
 
 ### Fixed

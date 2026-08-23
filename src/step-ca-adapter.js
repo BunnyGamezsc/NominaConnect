@@ -23,7 +23,7 @@ const STEP_CA_INSTALL = Object.freeze([
     ]
   },
   { binary: "/usr/bin/apt-get", args: ["update"] },
-  { binary: "/usr/bin/apt-get", args: ["install", "--yes", "step-ca"], timeoutMs: 180_000 },
+  { binary: "/usr/bin/apt-get", args: ["install", "--yes", "step-ca", "step-cli"], timeoutMs: 180_000 },
   {
     binary: "/bin/bash",
     args: [
@@ -52,7 +52,7 @@ export function createStepCaAdapter({ httpClient, secretResolver }) {
       }
       return {
         ...plan,
-        lxcCommands: [{ binary: "/usr/bin/apt-get", args: ["install", "--only-upgrade", "--yes", "step-ca"] }]
+        lxcCommands: [{ binary: "/usr/bin/apt-get", args: ["install", "--only-upgrade", "--yes", "step-ca", "step-cli"] }]
       };
     },
     async configure(request) {
