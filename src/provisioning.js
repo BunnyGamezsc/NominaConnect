@@ -82,7 +82,13 @@ export function resolveServiceDeployment(project, serviceName, options) {
     diskGb: options.diskGb ?? deploymentDefaults.resourceRecommendations.diskGb
   };
   const gateway = options.gateway ?? defaultGatewayFor(options.ip);
-  const nameserver = options.nameserver ?? options.gateway ?? gateway;
+  // Prefer the managed Technitium resolver over the gateway: router resolvers
+  // frequently answer with junk (bogus AAAA, rebind blocks) for local zones,
+  // which silently breaks ACME challenge validation inside service LXCs.
+  const dnsIp = project?.state?.providerReferences?.[project?.config?.managedInventory?.platform?.dns?.id]?.ip;
+  const nameserver = options.nameserver
+    ?? (serviceName !== "technitium" && dnsIp !== undefined ? dnsIp : undefined)
+    ?? gateway;
 
   return {
     node: project.config.proxmox.node,

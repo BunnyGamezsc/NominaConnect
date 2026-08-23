@@ -135,6 +135,35 @@ export async function withBoundedRetry(
   throw lastError;
 }
 
+// Retries a health check until it reports healthy or attempts run out.
+// Covers the window where a just-published exposure is still waiting on
+// ACME issuance, so publish does not report a false "unhealthy".
+export async function withHealthyRetry(
+  operation,
+  {
+    maxAttempts = 3,
+    baseDelayMs = 2000,
+    backoffFactor = 1.5,
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  } = {}
+) {
+  let attempt = 0;
+  let result;
+  let delayMs = baseDelayMs;
+  while (attempt < maxAttempts) {
+    result = await operation();
+    if (result?.status === "healthy") {
+      return result;
+    }
+    attempt += 1;
+    if (attempt < maxAttempts) {
+      await sleep(delayMs);
+      delayMs = delayMs * backoffFactor;
+    }
+  }
+  return result;
+}
+
 export function adoptServiceExposure(config, serviceId, observedExposure) {
   return {
     ...config,

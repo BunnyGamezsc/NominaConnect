@@ -147,7 +147,7 @@ test("nomina service add traefik provisions an unprivileged Debian LXC with defa
     unprivileged: true,
     template: "debian-12-standard",
     gateway: "10.0.0.1",
-    nameserver: "10.0.0.1",
+    nameserver: "10.0.0.53",
     resources: { cpus: 2, memoryMb: 512, diskGb: 4 }
   });
   assert.deepEqual(
@@ -270,7 +270,7 @@ test("nomina service add traefik accepts resource, bridge, storage, and hostname
     unprivileged: true,
     template: "debian-12-standard",
     gateway: "10.0.0.1",
-    nameserver: "10.0.0.1",
+    nameserver: "10.0.0.53",
     resources: { cpus: 4, memoryMb: 1024, diskGb: 16 }
   });
 });

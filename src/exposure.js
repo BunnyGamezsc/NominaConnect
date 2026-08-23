@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { withHealthyRetry } from "./adoption.js";
 import { getPlatformProvider } from "./providers.js";
 
 export async function publishManagedExposure({
   project,
   options,
-  providerAdapters
+  providerAdapters,
+  healthRetryOptions = {}
 }) {
   const dnsService = project.config.managedInventory.platform.dns;
   const proxyService = project.config.managedInventory.platform.reverseProxy;
@@ -129,26 +131,44 @@ export async function publishManagedExposure({
         endpoint: caEndpoint
       })
         ?? { tls: "valid", issuer: caService.service, status: "healthy" };
+      if (caExposureHealth?.status !== "healthy") {
+        caExposureHealth = await withHealthyRetry(
+          () => caAdapter.healthCheckExposure({
+            hostname,
+            backendIp,
+            backendPort,
+            ip: caIp,
+            endpoint: caEndpoint
+          }),
+          healthRetryOptions
+        );
+      }
     }
   }
 
-  const dnsExposureHealth = await technitiumAdapter.healthCheckExposure?.({
-    hostname,
-    backendIp,
-    backendPort,
-    zone: project.config.baseLocalDomain,
-    ip: dnsRef?.ip,
-    endpoint: dnsRef?.ip ? `http://${dnsRef.ip}:5380` : undefined,
-    connectionSecretReference: project.config.connectionSecretReferences[dnsService.id]
-  })
+  const dnsExposureHealth = await withHealthyRetry(
+    () => technitiumAdapter.healthCheckExposure({
+      hostname,
+      backendIp,
+      backendPort,
+      zone: project.config.baseLocalDomain,
+      ip: dnsRef?.ip,
+      endpoint: dnsRef?.ip ? `http://${dnsRef.ip}:5380` : undefined,
+      connectionSecretReference: project.config.connectionSecretReferences[dnsService.id]
+    }),
+    healthRetryOptions
+  )
     ?? { dns: "reachable", status: "healthy" };
-  const proxyExposureHealth = await proxyAdapter.healthCheckExposure?.({
-    hostname,
-    backendIp,
-    backendPort,
-    ip: proxyRef?.ip,
-    endpoint: proxyRef?.ip ? `http://${proxyRef.ip}:2019` : undefined
-  })
+  const proxyExposureHealth = await withHealthyRetry(
+    () => proxyAdapter.healthCheckExposure({
+      hostname,
+      backendIp,
+      backendPort,
+      ip: proxyRef?.ip,
+      endpoint: proxyRef?.ip ? `http://${proxyRef.ip}:2019` : undefined
+    }),
+    healthRetryOptions
+  )
     ?? { https: "reachable", status: "healthy" };
   const healthy = dnsExposureHealth.status === "healthy"
     && proxyExposureHealth.status === "healthy"
