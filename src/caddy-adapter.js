@@ -280,6 +280,10 @@ async function listTlsPolicies(httpClient, endpoint) {
 // Creates the dedicated :443/:80 servers when missing, and migrates any
 // legacy single-server config (srv0) into them: host routes belong to the
 // HTTPS server, hostless catch-alls to the HTTP server. srv0 is then removed.
+//
+// Ordering matters: srv0 must be deleted BEFORE its routes land in the new
+// servers, because Caddy enforces globally-unique @id values across the whole
+// config at write time ("duplicate ID found at ...").
 async function ensureServers(httpClient, endpoint) {
   let servers = {};
   try {
@@ -290,34 +294,56 @@ async function ensureServers(httpClient, endpoint) {
     }
   }
 
-  const legacyRoutes = Array.isArray(servers.srv0?.routes) ? servers.srv0.routes : [];
-  const httpsRoutes = [];
-  const httpRoutes = [];
-  for (const route of legacyRoutes) {
-    // Drop stale scheme pins from older publishes; servers carry the scheme now.
-    for (const matcher of route.match ?? []) {
-      delete matcher.protocol;
-    }
-    (hasHostMatcher(route) ? httpsRoutes : httpRoutes).push(route);
-  }
-
   const existingHttps = servers[TLS_SERVER];
   const existingHttp = servers[HTTP_SERVER];
 
-  if (existingHttps === undefined) {
-    await apiPut(httpClient, endpoint, `/config/apps/http/servers/${TLS_SERVER}`, { listen: [":443"], routes: httpsRoutes });
-  } else if (httpsRoutes.length > 0) {
-    await replaceMapValue(httpClient, endpoint, tlsRoutesPath(), [...(existingHttps.routes ?? []), ...httpsRoutes]);
-  }
-
-  if (existingHttp === undefined) {
-    await apiPut(httpClient, endpoint, `/config/apps/http/servers/${HTTP_SERVER}`, { listen: [":80"], routes: httpRoutes });
-  } else if (httpRoutes.length > 0) {
-    await replaceMapValue(httpClient, endpoint, httpRoutesPath(), [...(existingHttp.routes ?? []), ...httpRoutes]);
-  }
-
-  if (servers.srv0 !== undefined) {
+  const legacyRoutes = Array.isArray(servers.srv0?.routes) ? servers.srv0.routes : [];
+  if (legacyRoutes.length > 0) {
+    // Drop stale scheme pins from older publishes; servers carry the scheme now.
+    for (const route of legacyRoutes) {
+      for (const matcher of route.match ?? []) {
+        delete matcher.protocol;
+      }
+    }
+    // Remove srv0 first so its @ids are free to be recreated in the new servers.
     await apiDelete(httpClient, endpoint, "/config/apps/http/servers/srv0");
+    servers.srv0 = undefined;
+
+    const seen = new Set(
+      [...(existingHttps?.routes ?? []), ...(existingHttp?.routes ?? [])]
+        .map((route) => route["@id"])
+        .filter(Boolean)
+    );
+    const httpsRoutes = existingHttps?.routes ?? [];
+    const httpRoutes = existingHttp?.routes ?? [];
+    for (const route of legacyRoutes) {
+      if (route["@id"] !== undefined && seen.has(route["@id"])) {
+        continue;
+      }
+      if (route["@id"] !== undefined) {
+        seen.add(route["@id"]);
+      }
+      (hasHostMatcher(route) ? httpsRoutes : httpRoutes).push(route);
+    }
+
+    if (existingHttps === undefined) {
+      await apiPut(httpClient, endpoint, `/config/apps/http/servers/${TLS_SERVER}`, { listen: [":443"], routes: httpsRoutes });
+    } else {
+      await replaceMapValue(httpClient, endpoint, tlsRoutesPath(), httpsRoutes);
+    }
+    if (existingHttp === undefined) {
+      await apiPut(httpClient, endpoint, `/config/apps/http/servers/${HTTP_SERVER}`, { listen: [":80"], routes: httpRoutes });
+    } else {
+      await replaceMapValue(httpClient, endpoint, httpRoutesPath(), httpRoutes);
+    }
+    return;
+  }
+
+  if (existingHttps === undefined) {
+    await apiPut(httpClient, endpoint, `/config/apps/http/servers/${TLS_SERVER}`, { listen: [":443"], routes: [] });
+  }
+  if (existingHttp === undefined) {
+    await apiPut(httpClient, endpoint, `/config/apps/http/servers/${HTTP_SERVER}`, { listen: [":80"], routes: [] });
   }
 }
 

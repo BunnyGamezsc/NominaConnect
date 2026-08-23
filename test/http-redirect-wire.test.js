@@ -43,6 +43,21 @@ class FakeCaddyAdmin {
     }
   }
 
+  #collectIds(node, ids) {
+    if (node === undefined || node === null || typeof node !== "object") {
+      return;
+    }
+    if (typeof node["@id"] === "string" && node["@id"] !== "") {
+      if (ids.has(node["@id"])) {
+        throw new Error(`duplicate ID '${node["@id"]}' found in config`);
+      }
+      ids.add(node["@id"]);
+    }
+    for (const value of Object.values(node)) {
+      this.#collectIds(value, ids);
+    }
+  }
+
   async request({ method, url, body }) {
     const path = new URL(url).pathname.replace(/^\/config\/?/, "");
     const segments = path.split("/").filter(Boolean);
@@ -57,6 +72,8 @@ class FakeCaddyAdmin {
         } else {
           this.#set(segments, parsed);
         }
+        // Real Caddy enforces globally-unique @id values on every write.
+        this.#collectIds(this.config, new Set());
         return { status: 200, headers: {}, body: "null" };
       }
       if (method === "DELETE") {
@@ -135,6 +152,31 @@ test("republishing with the redirect stays idempotent and migrates legacy srv0 r
   assert.notEqual(httpsRoutes.find((route) => route["@id"] === "other.bunny.internal"), undefined,
     "unrelated host routes from srv0 must land in srv_https");
   assert.equal(httpRoutes.filter((route) => route["@id"] === "dns.bunny.internal-auto-http").length, 1);
+});
+
+test("migrating srv0 whose route ids collide with new publishes does not trip Caddy's duplicate-ID indexing", async () => {
+  // Exact shape observed live: srv0 still holds the old managed route when the
+  // first dual-server publish runs.
+  const fake = new FakeCaddyAdmin({
+    apps: { http: { servers: { srv0: { listen: [":80", ":443"], routes: [
+      { "@id": "dns.bunny.internal", match: [{ host: ["dns.bunny.internal"] }], handle: [{ handler: "reverse_proxy", upstreams: [{ dial: "192.168.4.90:5380" }] }], terminal: true },
+      { handle: [{ body: "OK", handler: "static_response", status_code: 200 }] }
+    ] } } } }
+  });
+
+  let threw = null;
+  try {
+    await createAdapter(fake).publishRoute(stepCaRequest({ httpRedirect: true }));
+  } catch (error) {
+    threw = error;
+  }
+  assert.equal(threw, null, `publish must migrate srv0 without duplicate-ID errors, got: ${threw}`);
+
+  const servers = fake.config.apps.http.servers;
+  assert.equal(servers.srv0, undefined);
+  const httpsRoutes = servers.srv_https.routes;
+  assert.equal(httpsRoutes.filter((route) => route["@id"] === "dns.bunny.internal").length, 1,
+    "the migrated route must exist exactly once");
 });
 
 test("unpublishRoute removes both the TLS and redirect routes", async () => {
