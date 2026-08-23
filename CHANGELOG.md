@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.2.6] - 2026-08-23 (Dev/Pre-release)
+
+### Fixed
+- **Caddy recheck 400 invalid traversal** (`Caddy Admin API /config/apps/http/servers/srv0/routes failed with status 400`): `Caddyfile` was `{ admin 0.0.0.0:2019 }` with no `http` server, so `GET /config/apps/http/servers/srv0/routes` → `400`. `listRoutes` now treats `400`/`invalid traversal` as empty, `publishRoute` ensures `srv0` via `PUT /config/apps/http/servers/srv0 {listen:[":80",":443"],routes:[]}`, and `CADDY_INSTALL` now writes `:80 { respond "OK" 200 }`.
+
 ## [1.2.5] - 2026-08-22 (Dev/Pre-release)
 
 ### Fixed
