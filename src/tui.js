@@ -823,9 +823,6 @@ export async function promptExposureServiceName(project, prompts) {
   if (choices.length === 0) {
     throw new Error("No exposures found to manage.");
   }
-  if (choices.length === 1) {
-    return choices[0].value;
-  }
   if (prompts?.select) {
     const selected = await prompts.select({
       message: "Which exposure would you like to manage?",
