@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.4.7] - 2026-08-23 (Dev/Pre-release)
+
+### Added
+- **Edit an exposure can flip the backend TLS setting** — the TUI re-asks "Does the backend serve HTTPS/TLS itself?" pre-filled with the stored value.
+- **README**: new "Exposing services" section documenting when `--backend-tls` should be on vs off.
+
+## [1.4.6] - 2026-08-23 (Dev/Pre-release)
+
+### Added
+- **TLS backends** (`--backend-tls`): publish HTTPS-only services (Proxmox `:8006`, OPNsense, Synology). Persisted as `exposure.backend.tls`; Caddy dials the backend over TLS with skip-verify on the internal hop only.
+
+### Fixed
+- **HTTP→HTTPS redirect silently never fired on Caddy 2.11.4** (`protocol` matcher never matches) → dual-server topology (`srv_https` :443 / `srv_http` :80) with automatic legacy `srv0` migration.
+- **Duplicate-ID error during srv0 migration** → `srv0` deleted before its routes are recreated.
+
 ## [1.4.4] - 2026-08-23 (Dev/Pre-release)
 
 ### Fixed
