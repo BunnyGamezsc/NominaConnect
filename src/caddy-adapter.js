@@ -1,6 +1,19 @@
 import { createHash } from "node:crypto";
 
 const CADDY_ADMIN_PORT = 2019;
+// Restarts of the distro unit reload only /etc/caddy/Caddyfile, wiping every
+// admin-API route and TLS policy. This drop-in prefers a persisted JSON dump
+// (/etc/caddy/caddy.json, refreshed after each publish/remove) when present.
+const CADDY_PERSISTENCE_DROPIN = [
+  "mkdir -p /etc/systemd/system/caddy.service.d",
+  "cat > /etc/systemd/system/caddy.service.d/nomina-persistence.conf <<'EOS'",
+  "[Service]",
+  "ExecStart=",
+  "ExecStart=/bin/sh -c 'if [ -s /etc/caddy/caddy.json ]; then exec /usr/bin/caddy run --config /etc/caddy/caddy.json; else exec /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile; fi'",
+  "EOS",
+  "systemctl daemon-reload"
+].join("\n");
+
 const CADDY_INSTALL = Object.freeze([
   { binary: "/usr/bin/apt-get", args: ["update"] },
   { binary: "/usr/bin/apt-get", args: ["install", "--yes", "debian-keyring", "debian-archive-keyring", "apt-transport-https", "curl"] },
@@ -14,13 +27,8 @@ const CADDY_INSTALL = Object.freeze([
       "-c",
       [
         "printf '{\\n  admin 0.0.0.0:2019\\n}\\n:80 {\\n  respond \"OK\" 200\\n}\\n' > /etc/caddy/Caddyfile",
-        "mkdir -p /etc/systemd/system/caddy.service.d",
-        "cat > /etc/systemd/system/caddy.service.d/nomina-persistence.conf <<'EOS'",
-        "[Service]",
-        "ExecStart=",
-        "ExecStart=/bin/sh -c 'if [ -s /etc/caddy/caddy.json ]; then exec /usr/bin/caddy run --config /etc/caddy/caddy.json; else exec /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile; fi'",
-        "EOS",
-        "systemctl daemon-reload && systemctl enable --now caddy && systemctl restart caddy"
+        CADDY_PERSISTENCE_DROPIN,
+        "systemctl enable --now caddy && systemctl restart caddy"
       ].join("\n")
     ],
     timeoutMs: 30_000
@@ -44,7 +52,12 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
       }
       return {
         ...plan,
-        lxcCommands: [{ binary: "/usr/bin/apt-get", args: ["install", "--only-upgrade", "--yes", "caddy"] }]
+        lxcCommands: [
+          { binary: "/usr/bin/apt-get", args: ["install", "--only-upgrade", "--yes", "caddy"] },
+          // Pre-existing installs lack the persistence drop-in; without it a
+          // restart wipes all published routes/TLS policies.
+          { binary: "/bin/bash", args: ["-c", `${CADDY_PERSISTENCE_DROPIN}\nsystemctl restart caddy`] }
+        ]
       };
     },
     async configure(request) {

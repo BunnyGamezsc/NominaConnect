@@ -18,6 +18,7 @@ import {
   clearPendingNotices
 } from "./tracking.js";
 import { getStepCaExportGuide, getStepCaTrustGuide } from "./ca-guide.js";
+import { VERSION } from "./version.js";
 import {
   promptCaddyOptions,
   promptExposureOptions,
@@ -50,6 +51,9 @@ export async function runCli(argumentsList, adapters) {
 }
 
 async function runCommand(command, rest, adapters) {
+  if (command === "--version" || command === "-v" || command === "version") {
+    return { stdout: `${VERSION}\n` };
+  }
   switch (command) {
     case "init":
       return initializeProject(parseInitOptions(rest), adapters);

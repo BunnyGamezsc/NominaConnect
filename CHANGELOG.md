@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.4.0] - 2026-08-23
+
+Major hardening release: everything learned from the live `bunny.home` → `bunny.home.arpa` → `bunny.internal` migration on a real homelab.
+
+### Added
+- **`nomina --version` / `nomina version`** — prints the CLI version (install scripts and channel checks).
+- **Exposure health retry** — publish now waits (bounded, with backoff) for ACME issuance to complete instead of reporting a false `unhealthy` while step-ca is still signing.
+- **Caddy persistence on upgrade** — `nomina service upgrade caddy` installs the systemd drop-in that survives restarts on pre-existing containers (previously only new installs got it).
+
+### Changed
+- **BREAKING**: newly provisioned service LXCs resolve DNS through **Technitium** instead of the network gateway (`src/provisioning.js`). Router resolvers answer local zones with bogus AAAA/rebind-blocked records, which silently broke ACME challenge validation inside the CA container ("authorization took too long"). Gateway remains the fallback for Technitium itself; explicit `--nameserver` still wins.
+
 ## [1.3.15] - 2026-08-23
 
 Stable release: squash of dev v1.3.6–v1.3.14 plus new features below.

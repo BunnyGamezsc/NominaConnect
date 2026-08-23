@@ -147,7 +147,7 @@ test("nomina service add caddy provisions an unprivileged Debian LXC with defaul
     unprivileged: true,
     template: "debian-12-standard",
     gateway: "10.0.0.1",
-    nameserver: "10.0.0.1",
+    nameserver: "10.0.0.53",
     resources: { cpus: 2, memoryMb: 512, diskGb: 4 }
   });
   assert.deepEqual(
