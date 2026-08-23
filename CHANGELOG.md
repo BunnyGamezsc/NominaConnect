@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.2.4] - 2026-08-22 (Dev/Pre-release)
+
+### Added
+- **Recheck provisioning to adopt existing LXC** (`dev:22cc0b0` + `c11bb46`):
+  - New `Recheck provisioning` TUI entry (`src/tui.js:95` `canRecheckProvisioning` → `buildMenuOptions`) appears when any platform service has a secret reference but no `providerReferences` (e.g. Technitium `192.168.4.90` `vmid 100` left running after `Unable to connect…` before `state.json` was written). Routes to `nomina service recheck` (`src/cli.js:135` `handleServiceCommand` → `recheckService`).
+  - `nomina service recheck [service] --ip <ip> --project-dir /root` finds the orphaned LXC via `proxmox.checkIpAvailability` (`known-collision lxc/100`), `pct config <vmid>` → `inspectLxc`, `withBoundedRetry` health (`GET /api/user/session/get` for Technitium, `GET /config/` for Caddy) and writes `providerReferences`/`deployment` without `pct create`. Use `nomina` → `Recheck provisioning` → `technitium` → `192.168.4.90` or `nomina service recheck caddy --ip 192.168.4.86`.
+
+### Fixed
+- **Caddy Admin API only listened on localhost** (`ss 127.0.0.1:2019`, `admin endpoint started localhost:2019`, host `curl http://192.168.4.86:2019/config/ → Connection refused`): `src/caddy-adapter.js:11` `CADDY_INSTALL` now ends with `printf '{\n  admin 0.0.0.0:2019\n}\n' > /etc/caddy/Caddyfile && systemctl enable --now caddy && systemctl restart caddy` (`30s`). Future `nomina service add caddy` is reachable at `http://192.168.4.86:2019`; existing `101` fix: `pct exec 101 -- bash -c 'printf "{\n  admin 0.0.0.0:2019\n}\n" > /etc/caddy/Caddyfile && systemctl restart caddy'`.
+
 ## [1.2.3] - 2026-08-22
 
 ### Fixed
