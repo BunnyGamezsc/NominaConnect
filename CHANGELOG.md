@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.4.2] - 2026-08-23 (Dev/Pre-release)
+
+### Fixed
+- **Managed TLS routes also matched plain `:80` traffic** — the matcher was host-only, so with redirects enabled the TLS route shadowed the 308 and exposures were served in cleartext ("Not secure"). Routes are now pinned to `protocol: "https://"`; port-80 hits fall through to the redirect.
+
 ## [1.4.1] - 2026-08-23 (Dev/Pre-release)
 
 ### Added
