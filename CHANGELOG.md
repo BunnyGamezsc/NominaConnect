@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.3.12] - 2026-08-23 (Dev/Pre-release)
+
+### Fixed
+- **Exposure DNS pointed at backend instead of Caddy** (`src/exposure.js:48` `publishRecord` used `backendIp` for the `A` record). `curl https://<hostname>` resolved `dig +short` to `192.168.4.90:443` (backend) not the reverse-proxy, so `Caddy` was bypassed and `443 Connection refused`. Now publishes `A → proxyRef.ip` (`reverseProxy` `caddy`/`traefik` `10.0.0.54`) and `Caddy` `reverse_proxy dial → backendIp:backendPort`. Existing exposures keep `exposure.backend` in `nomina.yaml`; only the `A` is repointed. Tests at `test/exposure-publish.test.js:1`.
+
 ## [1.3.11] - 2026-08-23 (Dev/Pre-release)
 
 ### Fixed

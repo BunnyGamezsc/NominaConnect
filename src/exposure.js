@@ -45,7 +45,7 @@ export async function publishManagedExposure({
   const publishRequest = {
     managedItemId: dnsService.id,
     hostname,
-    ip: backendIp,
+    ip: proxyRef?.ip ?? backendIp,
     zone: project.config.baseLocalDomain,
     endpoint: dnsRef?.ip ? `http://${dnsRef.ip}:5380` : undefined,
     ipForEndpoint: dnsRef?.ip,
