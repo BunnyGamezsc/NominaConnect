@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.3.9] - 2026-08-23 (Dev/Pre-release)
+
+### Added
+- **Edit and remove exposures from the Interactive CLI** (`src/tui.js:121` `hasExposures`/`canEditExposure`/`canRemoveExposure`, `src/tui.js:186` `buildMenuOptions`, `src/tui.js:358` `runInteractiveApp`): when at least one exposure exists, the main menu now shows `Edit an exposure` (re-prompt `Backend IP`/`Backend port` with current values as defaults and re-publish via `exposure publish` — same `src/cli.js:58` `publishManagedExposure` upsert `src/config.js:upsertManagedExposure`, so unchanged `nomina.yaml` fields keep their value) and `Remove an exposure` (select via `promptExposureServiceName` and disconnect via `service remove` `src/cli.js:886` `technitium.unpublishRecord` + `proxy.unpublishRoute`). Delete remains available as the generic `Remove a managed service` / `Destroy a service LXC` entries for platform LXCs.
+
 ## [1.3.8] - 2026-08-23 (Dev/Pre-release)
 
 ### Fixed

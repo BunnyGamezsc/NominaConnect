@@ -120,6 +120,18 @@ export function canPublishExposure(project) {
     && caProvisioned;
 }
 
+export function hasExposures(project) {
+  return (project?.config.managedInventory.services ?? []).some((s) => s.exposure?.hostname !== undefined);
+}
+
+export function canEditExposure(project) {
+  return canPublishExposure(project) && hasExposures(project);
+}
+
+export function canRemoveExposure(project) {
+  return hasExposures(project);
+}
+
 export function hasProvisionedServices(project) {
   if (!project?.state?.providerReferences) return false;
   return Object.keys(project.state.providerReferences).length > 0;
@@ -188,6 +200,20 @@ export function buildMenuOptions(project) {
       value: "publish-exposure",
       label: "Publish a web exposure",
       hint: "connect DNS and HTTPS routing"
+    });
+  }
+  if (project !== undefined && canEditExposure(project)) {
+    options.push({
+      value: "edit-exposure",
+      label: "Edit an exposure",
+      hint: "update backend IP or port"
+    });
+  }
+  if (project !== undefined && canRemoveExposure(project)) {
+    options.push({
+      value: "remove-exposure",
+      label: "Remove an exposure",
+      hint: "disconnect DNS and HTTPS routing"
     });
   }
   if (project !== undefined && canShowCaTrustGuide(project)) {
@@ -358,6 +384,55 @@ export async function runInteractiveApp(adapters) {
   if (action === "publish-exposure") {
     const result = await adapters.runCommand(["exposure", "publish"], adapters);
     clack.outro("Exposure published.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
+    return result;
+  }
+  if (action === "edit-exposure") {
+    const serviceName = await promptExposureServiceName(project, adapters.prompts);
+    const projectForEdit = loadProject(adapters.filesystem, projectDirectory);
+    const svc = (projectForEdit.config.managedInventory.services ?? []).find(
+      (s) => s.name === serviceName || s.exposure?.hostname === serviceName || s.id === serviceName
+    );
+    if (!svc?.exposure) {
+      throw new Error(`Exposure ${serviceName} not found.`);
+    }
+    let backendIp = svc.exposure.backend.ip;
+    let backendPortRaw = String(svc.exposure.backend.port);
+    if (adapters.prompts?.ask) {
+      const answerIp = await adapters.prompts.ask("Backend IP", svc.exposure.backend.ip);
+      if (answerIp && answerIp.trim() !== "") {
+        const err = validateIp(answerIp);
+        if (err) throw new Error(err);
+        backendIp = answerIp.trim();
+      }
+      const answerPort = await adapters.prompts.ask("Backend port", String(svc.exposure.backend.port));
+      if (answerPort && answerPort.trim() !== "") {
+        backendPortRaw = answerPort.trim();
+      }
+    } else if (adapters.prompts?.select) {
+      backendIp = svc.exposure.backend.ip;
+      backendPortRaw = String(svc.exposure.backend.port);
+    }
+    const backendPort = Number(backendPortRaw);
+    if (!Number.isInteger(backendPort) || backendPort <= 0) {
+      throw new Error(`Invalid backend port: ${backendPortRaw}.`);
+    }
+    const result = await adapters.runCommand(
+      ["exposure", "publish", "--name", svc.name, "--hostname", svc.exposure.hostname, "--backend-ip", backendIp, "--backend-port", String(backendPort)],
+      adapters
+    );
+    clack.outro("Exposure updated.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
+    return result;
+  }
+  if (action === "remove-exposure") {
+    const serviceName = await promptExposureServiceName(project, adapters.prompts);
+    const result = await adapters.runCommand(["service", "remove", serviceName], adapters);
+    clack.outro("Exposure removed.");
     if (adapters.tracking) {
       adapters.tracking.run(adapters);
     }
@@ -738,6 +813,34 @@ export async function promptRemoveServiceName(project, prompts) {
   if (prompts?.ask) {
     const text = choices.map((c) => `${c.label}`).join("; ");
     return prompts.ask(`Service to remove (${text})`, choices[0].value);
+  }
+  return choices[0].value;
+}
+
+export async function promptExposureServiceName(project, prompts) {
+  const choices = [];
+  for (const s of project.config.managedInventory.services ?? []) {
+    if (s?.exposure?.hostname) {
+      choices.push({ value: s.name ?? s.exposure.hostname, label: `${s.name} (${s.exposure.hostname})`, hint: `${s.exposure.backend.ip}:${s.exposure.backend.port}` });
+    }
+  }
+  if (choices.length === 0) {
+    throw new Error("No exposures found to manage.");
+  }
+  if (choices.length === 1) {
+    return choices[0].value;
+  }
+  if (prompts?.select) {
+    const selected = await prompts.select({
+      message: "Which exposure would you like to manage?",
+      options: choices
+    });
+    if (selected === undefined) throw new Error("Selection cancelled.");
+    return selected;
+  }
+  if (prompts?.ask) {
+    const text = choices.map((c) => `${c.label}`).join("; ");
+    return prompts.ask(`Exposure to manage (${text})`, choices[0].value);
   }
   return choices[0].value;
 }
