@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.3.13] - 2026-08-23 (Dev/Pre-release)
+
+### Fixed
+- **Remove an exposure: Service nc_… not found** — `promptExposureServiceName` (`src/tui.js:820`) now correctly returns stable `s.id` (`nc_…`) to avoid collision with platform key `dns`, but `removeService` (`src/cli.js:886`) only matched by `s.name`/`s.exposure.hostname`. Add `s.id === resolvedServiceName` check so `Remove an exposure` → `technitium (dns.bunny.home)` (`nc_86331352…`) resolves.
+
 ## [1.3.12] - 2026-08-23 (Dev/Pre-release)
 
 ### Fixed

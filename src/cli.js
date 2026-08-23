@@ -884,7 +884,7 @@ async function removeService(serviceName, rawOptions, adapters) {
   }
 
   const matchedService = (project.config.managedInventory.services ?? []).find(
-    (s) => s.name === resolvedServiceName || s.exposure?.hostname === resolvedServiceName
+    (s) => s.id === resolvedServiceName || s.name === resolvedServiceName || s.exposure?.hostname === resolvedServiceName
   );
 
   if (matchedService) {
