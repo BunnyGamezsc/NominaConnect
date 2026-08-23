@@ -294,6 +294,13 @@ export function buildMenuOptions(project) {
       });
     }
   }
+  if (project !== undefined) {
+    options.push({
+      value: "nuclear-uninstall",
+      label: "Nuclear uninstall",
+      hint: "destroy ALL managed LXC(s), config, and secrets"
+    });
+  }
   options.push({ value: "init", label: "Initialize a new project", hint: "first-time setup" });
   options.push({ value: "exit", label: "Exit", hint: "leave NominaConnect" });
   return options;
@@ -340,6 +347,14 @@ export async function runInteractiveApp(adapters) {
       clack.log.info(result.stdout.trim());
     }
     clack.outro("Changes displayed.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
+    return result;
+  }
+  if (action === "nuclear-uninstall") {
+    const result = await adapters.runCommand(["uninstall"], adapters);
+    clack.outro(result.cancelled ? "Nuclear uninstall cancelled." : "Nuclear uninstall complete.");
     if (adapters.tracking) {
       adapters.tracking.run(adapters);
     }

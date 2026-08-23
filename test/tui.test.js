@@ -197,7 +197,7 @@ test("buildMenuOptions offers Caddy after Technitium is provisioned", () => {
   assert.equal(canPublishExposure(project), false);
   assert.deepEqual(
     buildMenuOptions(project).map((option) => option.value),
-    ["provision-caddy", "upgrade-service", "remove-service", "destroy-service", "init", "exit"]
+    ["provision-caddy", "upgrade-service", "remove-service", "destroy-service", "nuclear-uninstall", "init", "exit"]
   );
 });
 
@@ -222,7 +222,7 @@ test("buildMenuOptions offers exposure publish when DNS and Caddy are provisione
   assert.equal(canPublishExposure(project), true);
   assert.deepEqual(
     buildMenuOptions(project).map((option) => option.value),
-    ["publish-exposure", "toggle-http-redirect", "upgrade-service", "remove-service", "destroy-service", "init", "exit"]
+    ["publish-exposure", "toggle-http-redirect", "upgrade-service", "remove-service", "destroy-service", "nuclear-uninstall", "init", "exit"]
   );
 });
 
@@ -443,7 +443,7 @@ test("buildMenuOptions hides Technitium when it is already provisioned", () => {
   assert.equal(canProvisionTechnitium(project), false);
   assert.deepEqual(
     buildMenuOptions(project).map((option) => option.value),
-    ["upgrade-service", "remove-service", "destroy-service", "init", "exit"]
+    ["upgrade-service", "remove-service", "destroy-service", "nuclear-uninstall", "init", "exit"]
   );
 });
 
@@ -569,7 +569,7 @@ test("buildMenuOptions offers Traefik after Technitium is provisioned", () => {
   assert.equal(canPublishExposure(project), false);
   assert.deepEqual(
     buildMenuOptions(project).map((option) => option.value),
-    ["provision-traefik", "upgrade-service", "remove-service", "destroy-service", "init", "exit"]
+    ["provision-traefik", "upgrade-service", "remove-service", "destroy-service", "nuclear-uninstall", "init", "exit"]
   );
 });
 
@@ -594,7 +594,7 @@ test("buildMenuOptions offers exposure publish when DNS and Traefik are provisio
   assert.equal(canPublishExposure(project), true);
   assert.deepEqual(
     buildMenuOptions(project).map((option) => option.value),
-    ["publish-exposure", "upgrade-service", "remove-service", "destroy-service", "init", "exit"]
+    ["publish-exposure", "upgrade-service", "remove-service", "destroy-service", "nuclear-uninstall", "init", "exit"]
   );
 });
 
