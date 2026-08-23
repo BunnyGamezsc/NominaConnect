@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.8] - 2026-08-23 (Dev/Pre-release)
+
+### Fixed
+- **Exposure publish failed: `Caddy Admin API POST /config/apps/http/servers/srv0/routes failed with status 500: {"error":"invalid traversal path at: config/apps/http"}`** — verified against real Caddy v2.11.4; three independent defects (`src/caddy-adapter.js`, new `test/caddy-adapter-wire.test.js`):
+  - Route payload carried a `tls` field, which is not a valid Caddy `Route` field (config load fails `unknown field "tls"`). TLS issuer now lives in `apps.tls.automation.policies` keyed by subject — `acme` + step-ca directory URL (`https://<caIp>:9000/acme/acme/directory`) when step-ca is selected, `{module:"internal"}` otherwise; trust is derived from the policy wire state by `healthCheckExposure`/`inspect`.
+  - `routes` is an array, so hostname-keyed PUT/DELETE could never work (`invalid array index` / traversal errors). Upserts rewrite the whole array via DELETE→PUT (Caddy PUT over an existing key returns `409 key already exists`), inserting host routes *before* hostless catch-alls — otherwise the installer's `:80 { respond "OK" }` route shadows every published exposure.
+  - `createHttpClient` used `globalThis.fetch`, which sends `sec-fetch-mode: cors`; current Caddy admin endpoints reject browser-like requests with `403 client is not allowed to access from origin ''`. Default transport is now `node:http`/`node:https` sending only explicit headers (`src/adapter-runtime.js`). Injectable `options.fetch` path kept for tests.
+
 ## [1.3.7] - 2026-08-23 (Dev/Pre-release)
 
 ### Added
