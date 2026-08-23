@@ -219,6 +219,34 @@ test("publishRoute bootstraps an empty Caddy config with a valid route and step-
   ]);
 });
 
+test("publishRoute prefers the step-ca hostname over the bare IP for the ACME directory URL", async () => {
+  const fake = new FakeCaddyAdmin();
+  const adapter = createCaddyAdapter({ httpClient: createHttpClient(fake), secretResolver: () => {} });
+
+  await adapter.publishRoute(stepCaRequest({
+    tls: { mode: "step-ca", trusted: true, caIp: "192.168.4.87", caHost: "step-ca.bunnyhome.test" }
+  }));
+
+  const policies = fake.get("apps/tls/automation/policies");
+  const policy = policies.find((entry) => entry.subjects?.includes("dns.bunny.home"));
+  assert.deepEqual(policy.issuers, [
+    { module: "acme", ca: "https://step-ca.bunnyhome.test:9000/acme/acme/directory" }
+  ]);
+});
+
+test("publishRoute falls back to the CA IP for the ACME directory URL when no hostname is known", async () => {
+  const fake = new FakeCaddyAdmin();
+  const adapter = createCaddyAdapter({ httpClient: createHttpClient(fake), secretResolver: () => {} });
+
+  await adapter.publishRoute(stepCaRequest());
+
+  const policies = fake.get("apps/tls/automation/policies");
+  const policy = policies.find((entry) => entry.subjects?.includes("dns.bunny.home"));
+  assert.deepEqual(policy.issuers, [
+    { module: "acme", ca: "https://192.168.4.87:9000/acme/acme/directory" }
+  ]);
+});
+
 test("publishRoute inserts the managed route before the installer catch-all so it is reachable", async () => {
   const fake = new FakeCaddyAdmin(INSTALLER_CADDYFILE_CONFIG);
   const adapter = createCaddyAdapter({ httpClient: createHttpClient(fake), secretResolver: () => {} });

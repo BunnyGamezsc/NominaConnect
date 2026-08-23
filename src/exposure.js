@@ -59,8 +59,15 @@ export async function publishManagedExposure({
   if (caStrategy === "caddy-internal-ca") {
     tlsOptions = { mode: "caddy-internal-ca", issuer: "caddy-internal-ca", trusted: true };
   } else if (caStrategy === "step-ca") {
-    const caIp = project.state.providerReferences[caService?.id]?.ip;
-    tlsOptions = { mode: "step-ca", issuer: "step-ca", ...(caIp ? { caIp } : {}), trusted: true };
+    const caRef = project.state.providerReferences[caService?.id];
+    const caHostname = caService.deployment?.hostname ?? "step-ca";
+    tlsOptions = {
+      mode: "step-ca",
+      issuer: "step-ca",
+      ...(caRef?.ip ? { caIp: caRef.ip } : {}),
+      caHost: `${caHostname}.${project.config.baseLocalDomain}`,
+      trusted: true
+    };
   } else {
     tlsOptions = { mode: "untrusted", trusted: false };
   }

@@ -8,7 +8,23 @@ const CADDY_INSTALL = Object.freeze([
   { binary: "/bin/bash", args: ["-c", "curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt | tee /etc/apt/sources.list.d/caddy-stable.list"] },
   { binary: "/usr/bin/apt-get", args: ["update"] },
   { binary: "/usr/bin/apt-get", args: ["install", "--yes", "caddy"], timeoutMs: 180_000 },
-  { binary: "/bin/bash", args: ["-c", "printf '{\\n  admin 0.0.0.0:2019\\n}\\n:80 {\\n  respond \"OK\" 200\\n}\\n' > /etc/caddy/Caddyfile && systemctl enable --now caddy && systemctl restart caddy"], timeoutMs: 30_000 }
+  {
+    binary: "/bin/bash",
+    args: [
+      "-c",
+      [
+        "printf '{\\n  admin 0.0.0.0:2019\\n}\\n:80 {\\n  respond \"OK\" 200\\n}\\n' > /etc/caddy/Caddyfile",
+        "mkdir -p /etc/systemd/system/caddy.service.d",
+        "cat > /etc/systemd/system/caddy.service.d/nomina-persistence.conf <<'EOS'",
+        "[Service]",
+        "ExecStart=",
+        "ExecStart=/bin/sh -c 'if [ -s /etc/caddy/caddy.json ]; then exec /usr/bin/caddy run --config /etc/caddy/caddy.json; else exec /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile; fi'",
+        "EOS",
+        "systemctl daemon-reload && systemctl enable --now caddy && systemctl restart caddy"
+      ].join("\n")
+    ],
+    timeoutMs: 30_000
+  }
 ]);
 
 export function createCaddyAdapter({ httpClient, secretResolver }) {
@@ -386,10 +402,12 @@ function buildManagedRoute(hostname, backendIp, backendPort) {
 
 function issuerFor(request) {
   if (request.caStrategy === "step-ca") {
-    const caIp = request.tls?.caIp;
+    // step-ca serving certs carry DNS SANs only (no IP SANs), so the ACME
+    // directory must be reached by hostname; fall back to the IP for older projects.
+    const caHost = request.tls?.caHost ?? request.tls?.caIp;
     const issuer = { module: "acme" };
-    if (caIp) {
-      issuer.ca = `https://${caIp}:9000/acme/acme/directory`;
+    if (caHost) {
+      issuer.ca = `https://${caHost}:9000/acme/acme/directory`;
     }
     return issuer;
   }

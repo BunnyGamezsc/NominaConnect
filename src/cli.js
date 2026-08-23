@@ -897,6 +897,9 @@ async function removeService(serviceName, rawOptions, adapters) {
       if (proxyService && providerAdapters[proxyService.service]?.unpublishRoute) {
         await providerAdapters[proxyService.service].unpublishRoute({ hostname });
       }
+      if (proxyService?.service === "caddy") {
+        persistCaddyLiveConfig(proxmox, project.state.providerReferences[proxyService.id]?.vmid);
+      }
     }
 
     const updatedServices = (project.config.managedInventory.services ?? []).filter(
@@ -1138,6 +1141,45 @@ async function recheckService(serviceName, rawOptions, adapters) {
   };
 }
 
+function stepCaCaHost(project) {
+  const caService = project.config.managedInventory.platform.certificateAuthority;
+  const hostname = caService?.deployment?.hostname ?? "step-ca";
+  return `${hostname}.${project.config.baseLocalDomain}`;
+}
+
+async function ensureCaddyTrustsStepCa(project, adapters) {
+  const { proxmox } = adapters;
+  const caService = project.config.managedInventory.platform.certificateAuthority;
+  const proxyService = project.config.managedInventory.platform.reverseProxy;
+  if (proxmox?.pctExec === undefined || caService?.service !== "step-ca" || proxyService === undefined) {
+    return;
+  }
+  const caRef = project.state.providerReferences[caService.id];
+  const proxyRef = project.state.providerReferences[proxyService.id];
+  if (typeof caRef?.ip !== "string" || !isIpAddress(caRef.ip) || proxyRef?.vmid === undefined) {
+    return;
+  }
+  const caHost = stepCaCaHost(project);
+  await proxmox.pctExec(proxyRef.vmid, {
+    binary: "/bin/bash",
+    args: ["-c", `grep -q '${caHost}' /etc/hosts || echo '${caRef.ip} ${caHost}' >> /etc/hosts`]
+  });
+  await proxmox.pctExec(proxyRef.vmid, {
+    binary: "/bin/bash",
+    args: ["-c", `mkdir -p /usr/local/share/ca-certificates && curl -skf https://${caHost}:9000/roots.pem -o /usr/local/share/ca-certificates/step-ca-root.crt && update-ca-certificates`]
+  });
+}
+
+function persistCaddyLiveConfig(proxmox, vmid) {
+  if (proxmox?.pctExec === undefined || vmid === undefined) {
+    return undefined;
+  }
+  return proxmox.pctExec(vmid, {
+    binary: "/bin/bash",
+    args: ["-c", "curl -sf http://127.0.0.1:2019/config/ > /etc/caddy/caddy.json"]
+  });
+}
+
 async function publishExposure(options, adapters) {
   const { filesystem, providerAdapters = {} } = adapters;
   assertProxmoxShell(adapters.runtime);
@@ -1145,6 +1187,8 @@ async function publishExposure(options, adapters) {
   const project = loadProject(filesystem, options.projectDir);
   const resolvedOptions = await promptExposureOptions(project, options, adapters.prompts);
   validateExposureOptions(resolvedOptions);
+
+  await ensureCaddyTrustsStepCa(project, adapters);
 
   const result = await publishManagedExposure({
     project,
@@ -1164,6 +1208,11 @@ async function publishExposure(options, adapters) {
   writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
   writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
   filesystem.chmod(project.statePath, 0o600);
+
+  const proxyServiceForPersistence = project.config.managedInventory.platform.reverseProxy;
+  if (proxyServiceForPersistence?.service === "caddy") {
+    persistCaddyLiveConfig(adapters.proxmox, project.state.providerReferences[proxyServiceForPersistence.id]?.vmid);
+  }
 
   const actionLabel = result.isUpdate ? "updated" : "published";
   const healthLabel = result.health.status === "healthy" ? "healthy" : "unhealthy";

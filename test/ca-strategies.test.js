@@ -517,6 +517,11 @@ test("nomina exposure publish with step-ca creates Technitium record, trusted Ca
   assert.equal(caddy.publishCalls[0].protocol, "https");
   assert.equal(caddy.publishCalls[0].caStrategy, "step-ca");
   assert.equal(caddy.publishCalls[0].tls.trusted, true);
+  assert.equal(
+    caddy.publishCalls[0].tls.caHost,
+    "step-ca.bunnyhome.test",
+    "exposure publish must hand Caddy a DNS name for step-ca, not the bare IP (step-ca serving certs have no IP SANs)"
+  );
 
   assert.equal(result.health.certificateAuthority?.status, "healthy");
   assert.equal(result.managedService.exposure.certificateAuthority, "step-ca");
@@ -525,6 +530,65 @@ test("nomina exposure publish with step-ca creates Technitium record, trusted Ca
   const config = filesystem.read("/projects/bunnyhome/nomina.yaml");
   assert.match(config, /certificateAuthority: step-ca/);
   assert.match(config, /trusted: true/);
+});
+
+test("nomina exposure publish with step-ca pins the CA host, trusts its root, and persists Caddy config in the proxy LXC", async () => {
+  const filesystem = new FakeFilesystem();
+  filesystem.mkdir("/projects/bunnyhome");
+  filesystem.mkdir("/projects/bunnyhome/.nomina");
+  filesystem.writeFile("/projects/bunnyhome/nomina.yaml", createProjectYaml({ caService: "step-ca", withCaDeployment: true }));
+  filesystem.writeFile(
+    "/projects/bunnyhome/.nomina/state.json",
+    JSON.stringify({
+      version: 1,
+      providerReferences: {
+        nc_dns_test: { vmid: 120, ip: "10.0.0.53" },
+        nc_proxy_test: { vmid: 121, ip: "10.0.0.54" },
+        nc_ca_test: { vmid: 122, ip: "10.0.0.55" }
+      },
+      tracking: { notices: [] }
+    })
+  );
+
+  const proxmox = createProxmoxAdapter();
+
+  await runCli(
+    [
+      "exposure", "publish",
+      "--project-dir", "/projects/bunnyhome",
+      "--name", "photos",
+      "--hostname", "photos.bunnyhome.test",
+      "--backend-ip", "10.0.0.100",
+      "--backend-port", "8080"
+    ],
+    {
+      filesystem,
+      runtime: proxmoxRootRuntime(),
+      proxmox,
+      providerAdapters: {
+        technitium: createTechnitiumAdapter(),
+        caddy: createCaddyAdapter(),
+        "step-ca": createStepCaAdapter()
+      }
+    }
+  );
+
+  const scripts = proxmox.execCalls
+    .filter((call) => call.vmid === 121)
+    .map((call) => `${call.command.binary ?? ""} ${(call.command.args ?? []).join(" ")}`);
+
+  assert.ok(
+    scripts.some((script) => script.includes("echo '10.0.0.55 step-ca.bunnyhome.test' >> /etc/hosts")),
+    `Caddy LXC must be able to resolve the CA name before issuance; got:\n${scripts.join("\n---\n")}`
+  );
+  assert.ok(
+    scripts.some((script) => script.includes("/usr/local/share/ca-certificates/step-ca-root.crt") && script.includes("update-ca-certificates")),
+    "Caddy LXC must trust the step-ca root before ACME issuance"
+  );
+  assert.ok(
+    scripts.some((script) => script.includes("curl -sf http://127.0.0.1:2019/config/ > /etc/caddy/caddy.json")),
+    "published routes/policies must be persisted inside the LXC so a Caddy restart does not wipe them"
+  );
 });
 
 test("nomina exposure publish without a CA retains HTTPS with untrusted TLS and never falls back to HTTP", async () => {
