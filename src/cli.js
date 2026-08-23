@@ -17,6 +17,7 @@ import {
   formatChangesDetail,
   clearPendingNotices
 } from "./tracking.js";
+import { getStepCaExportGuide, getStepCaTrustGuide } from "./ca-guide.js";
 import {
   promptCaddyOptions,
   promptExposureOptions,
@@ -56,10 +57,14 @@ async function runCommand(command, rest, adapters) {
       return handleServiceCommand(rest, adapters);
     case "exposure":
       return handleExposureCommand(rest, adapters);
+    case "domain":
+      return handleDomainCommand(rest, adapters);
     case "changes":
       return showChanges(rest, adapters);
     case "secret":
       return handleSecretCommand(rest, adapters);
+    case "ca":
+      return handleCaCommand(rest, adapters);
     default:
       throw new Error("Unknown command. Run nomina for the interactive menu.");
   }
@@ -137,6 +142,97 @@ async function handleSecretCommand(argumentsList, adapters) {
     throw new Error("Run nomina for the interactive menu, or use: nomina secret change");
   }
   return changeConnectionSecret(parseSecretChangeOptions(rest), adapters);
+}
+
+async function handleCaCommand(argumentsList, adapters) {
+  const [subcommand, ...rest] = argumentsList;
+  if (subcommand !== "guide" && subcommand !== "trust" && subcommand !== "cert" && subcommand !== "export" && subcommand !== undefined) {
+    throw new Error("Run nomina for the interactive menu, or use: nomina ca guide|cert|export");
+  }
+  if (subcommand === undefined || subcommand === "guide" || subcommand === "trust") {
+    return showCaTrustGuide(parseCaGuideOptions(rest), adapters);
+  }
+  if (subcommand === "cert") {
+    return showCaCertificate(parseCaGuideOptions(rest), adapters);
+  }
+  if (subcommand === "export") {
+    return exportCaCertificate(parseCaGuideOptions(rest), adapters);
+  }
+  throw new Error("Run nomina for the interactive menu, or use: nomina ca guide|cert|export");
+}
+
+async function showCaTrustGuide(options, adapters) {
+  const { filesystem } = adapters;
+  const project = loadProject(filesystem, options.projectDir);
+  const caService = project.config.managedInventory.platform.certificateAuthority;
+  if (caService?.service !== "step-ca") {
+    throw new Error("step-ca is not selected as the certificate authority for this project. The trust guide is only for step-ca.");
+  }
+  if (project.state.providerReferences[caService.id] === undefined) {
+    throw new Error("step-ca is not yet provisioned. Provision it first, then run nomina ca guide.");
+  }
+  const guide = getStepCaTrustGuide(project);
+  return { stdout: guide + "\n" };
+}
+
+async function showCaCertificate(options, adapters) {
+  const { filesystem } = adapters;
+  const project = loadProject(filesystem, options.projectDir);
+  const caService = project.config.managedInventory.platform.certificateAuthority;
+  if (caService?.service !== "step-ca") {
+    throw new Error("step-ca is not selected as the certificate authority for this project.");
+  }
+  return { stdout: await fetchStepCaRootPem(project, adapters) };
+}
+
+async function exportCaCertificate(options, adapters) {
+  const { filesystem } = adapters;
+  const project = loadProject(filesystem, options.projectDir);
+  const caService = project.config.managedInventory.platform.certificateAuthority;
+  if (caService?.service !== "step-ca") {
+    throw new Error("step-ca is not selected as the certificate authority for this project.");
+  }
+  const pem = await fetchStepCaRootPem(project, adapters);
+  const outputPath = options.output ?? "step-ca-root.crt";
+  filesystem.writeFile(outputPath, pem);
+  return { stdout: getStepCaExportGuide(project, outputPath) };
+}
+
+function parseCaGuideOptions(rawOptions) {
+  const options = {};
+  const optionNames = new Map([["--project-dir", "projectDir"], ["--output", "output"]]);
+  parseFlagOptions(rawOptions, optionNames, options);
+  return options;
+}
+
+async function fetchStepCaRootPem(project, adapters) {
+  const { proxmox, providerAdapters = {} } = adapters;
+  const caService = project.config.managedInventory.platform.certificateAuthority;
+  const caRef = project.state.providerReferences[caService.id];
+  if (caRef === undefined) {
+    throw new Error("step-ca is not yet provisioned.");
+  }
+  const vmid = caRef.vmid;
+  if (proxmox?.pctExec) {
+    for (const path of ["/var/lib/stepca/certs/root_ca.crt", "/root/.step/certs/root_ca.crt"]) {
+      try {
+        const result = await proxmox.pctExec(vmid, { binary: "/bin/cat", args: [path] });
+        if (result.stdout && result.stdout.includes("BEGIN CERTIFICATE")) {
+          return result.stdout + (result.stdout.endsWith("\n") ? "" : "\n");
+        }
+      } catch {}
+    }
+  }
+  const httpClient = providerAdapters["step-ca"]?.httpClient ?? adapters.httpClient;
+  if (httpClient && caRef.ip) {
+    try {
+      const result = await httpClient.request({ method: "GET", url: `https://${caRef.ip}:9000/roots.pem`, headers: {}, redactions: [] });
+      if (result.status === 200 && result.body.includes("BEGIN CERTIFICATE")) {
+        return result.body + (result.body.endsWith("\n") ? "" : "\n");
+      }
+    } catch {}
+  }
+  throw new Error(`Could not fetch step-ca root certificate from LXC ${vmid}. Try: pct exec ${vmid} -- cat /var/lib/stepca/certs/root_ca.crt`);
 }
 
 async function changeConnectionSecret(options, adapters) {
@@ -804,7 +900,7 @@ async function removeService(serviceName, rawOptions, adapters) {
   }
 
   const matchedService = (project.config.managedInventory.services ?? []).find(
-    (s) => s.name === resolvedServiceName || s.exposure?.hostname === resolvedServiceName
+    (s) => s.id === resolvedServiceName || s.name === resolvedServiceName || s.exposure?.hostname === resolvedServiceName
   );
 
   if (matchedService) {
@@ -816,6 +912,9 @@ async function removeService(serviceName, rawOptions, adapters) {
       const proxyService = project.config.managedInventory.platform.reverseProxy;
       if (proxyService && providerAdapters[proxyService.service]?.unpublishRoute) {
         await providerAdapters[proxyService.service].unpublishRoute({ hostname });
+      }
+      if (proxyService?.service === "caddy") {
+        persistCaddyLiveConfig(proxmox, project.state.providerReferences[proxyService.id]?.vmid);
       }
     }
 
@@ -1058,6 +1157,189 @@ async function recheckService(serviceName, rawOptions, adapters) {
   };
 }
 
+function stepCaCaHost(project) {
+  const caService = project.config.managedInventory.platform.certificateAuthority;
+  const hostname = caService?.deployment?.hostname ?? "step-ca";
+  return `${hostname}.${project.config.baseLocalDomain}`;
+}
+
+async function ensureCaddyTrustsStepCa(project, adapters) {
+  const { proxmox } = adapters;
+  const caService = project.config.managedInventory.platform.certificateAuthority;
+  const proxyService = project.config.managedInventory.platform.reverseProxy;
+  if (proxmox?.pctExec === undefined || caService?.service !== "step-ca" || proxyService === undefined) {
+    return;
+  }
+  const caRef = project.state.providerReferences[caService.id];
+  const proxyRef = project.state.providerReferences[proxyService.id];
+  if (typeof caRef?.ip !== "string" || !isIpAddress(caRef.ip) || proxyRef?.vmid === undefined) {
+    return;
+  }
+  const caHost = stepCaCaHost(project);
+  await proxmox.pctExec(proxyRef.vmid, {
+    binary: "/bin/bash",
+    args: ["-c", `grep -q '${caHost}' /etc/hosts || echo '${caRef.ip} ${caHost}' >> /etc/hosts`]
+  });
+  await proxmox.pctExec(proxyRef.vmid, {
+    binary: "/bin/bash",
+    args: ["-c", `mkdir -p /usr/local/share/ca-certificates && curl -skf https://${caHost}:9000/roots.pem -o /usr/local/share/ca-certificates/step-ca-root.crt && update-ca-certificates`]
+  });
+}
+
+function persistCaddyLiveConfig(proxmox, vmid) {
+  if (proxmox?.pctExec === undefined || vmid === undefined) {
+    return undefined;
+  }
+  return proxmox.pctExec(vmid, {
+    binary: "/bin/bash",
+    args: ["-c", "curl -sf http://127.0.0.1:2019/config/ > /etc/caddy/caddy.json"]
+  });
+}
+
+async function handleDomainCommand(argumentsList, adapters) {
+  const [subcommand, ...rest] = argumentsList;
+  if (subcommand !== "change") {
+    throw new Error("Run nomina for the interactive menu, or use: nomina domain change <new-domain>");
+  }
+  const [maybeDomain, ...rawOptions] = rest[0]?.startsWith("--") ? [undefined, ...rest] : rest;
+  const options = parseDomainChangeOptions(rawOptions);
+  if (options.domain === undefined && maybeDomain !== undefined) {
+    options.domain = maybeDomain;
+  }
+  return changeBaseDomain(options, adapters);
+}
+
+function isValidLocalDomain(domain) {
+  return typeof domain === "string" && /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(domain);
+}
+
+function parseDomainChangeOptions(rawOptions) {
+  const options = {};
+  const optionNames = new Map([["--project-dir", "projectDir"], ["--domain", "domain"]]);
+  parseFlagOptions(rawOptions, optionNames, options);
+  return options;
+}
+
+async function changeBaseDomain(options, adapters) {
+  const { filesystem, proxmox, providerAdapters = {}, prompts } = adapters;
+  assertProxmoxShell(adapters.runtime);
+
+  const project = loadProject(filesystem, options.projectDir);
+  let newDomain = typeof options.domain === "string" ? options.domain.trim() : undefined;
+  if ((newDomain === undefined || newDomain === "") && prompts?.ask !== undefined) {
+    newDomain = (await prompts.ask(`New local domain (current: ${project.config.baseLocalDomain})`, undefined))?.trim();
+  }
+  if (!isValidLocalDomain(newDomain)) {
+    throw new Error(`Invalid domain: ${newDomain}. Example: bunny.home.arpa`);
+  }
+
+  const oldDomain = project.config.baseLocalDomain;
+  if (newDomain.toLowerCase() === oldDomain.toLowerCase()) {
+    throw new Error(`${newDomain} is already the local domain.`);
+  }
+  newDomain = newDomain.toLowerCase();
+
+  const dnsService = project.config.managedInventory.platform.dns;
+  const proxyService = project.config.managedInventory.platform.reverseProxy;
+  const caService = project.config.managedInventory.platform.certificateAuthority;
+  if (proxyService?.service !== "caddy" && proxyService?.service !== "traefik") {
+    throw new Error("A supported reverse proxy must be provisioned before changing the local domain.");
+  }
+  const technitiumAdapter = providerAdapters.technitium;
+  const proxyAdapter = providerAdapters[proxyService.service];
+  if (technitiumAdapter?.publishRecord === undefined || proxyAdapter?.publishRoute === undefined) {
+    throw new Error("Provider adapter is unavailable.");
+  }
+
+  const state = project.state;
+  const dnsRef = state.providerReferences[dnsService.id];
+  const proxyRef = state.providerReferences[proxyService.id];
+  const swapHost = (hostname) => hostname.endsWith(`.${oldDomain}`)
+    ? `${hostname.slice(0, -(oldDomain.length + 1))}.${newDomain}`
+    : hostname;
+
+  const warnings = [];
+  const exposures = (project.config.managedInventory.services ?? []).filter(
+    (service) => service.exposure?.hostname !== undefined
+  );
+
+  for (const service of exposures) {
+    const oldHost = service.exposure.hostname;
+    try {
+      if (technitiumAdapter.deleteRecord !== undefined) {
+        await technitiumAdapter.deleteRecord({
+          hostname: oldHost,
+          ip: proxyRef?.ip,
+          endpoint: dnsRef?.ip ? `http://${dnsRef.ip}:5380` : undefined,
+          connectionSecretReference: project.config.connectionSecretReferences[dnsService.id]
+        });
+      }
+      await proxyAdapter.unpublishRoute({
+        hostname: oldHost,
+        ip: proxyRef?.ip,
+        endpoint: proxyRef?.ip ? `http://${proxyRef.ip}:2019` : undefined
+      });
+    } catch (error) {
+      warnings.push(`Could not clean up old record/route for ${oldHost}: ${error.message}`);
+    }
+  }
+
+  const renamedServices = (project.config.managedInventory.services ?? []).map((service) =>
+    service.exposure?.hostname !== undefined
+      ? { ...service, exposure: { ...service.exposure, hostname: swapHost(service.exposure.hostname) } }
+      : service
+  );
+  const workingProject = {
+    ...project,
+    config: {
+      ...project.config,
+      baseLocalDomain: newDomain,
+      managedInventory: {
+        ...project.config.managedInventory,
+        services: renamedServices
+      }
+    }
+  };
+
+  if (caService?.service === "step-ca") {
+    const caRef = state.providerReferences[caService.id];
+    if (proxmox?.pctExec !== undefined && caRef?.vmid !== undefined) {
+      await proxmox.pctExec(caRef.vmid, {
+        binary: "/bin/bash",
+        args: ["-c", `sed -i 's/"dnsNames": \\[/&\\n    "step-ca.${newDomain}",/' /var/lib/stepca/config/ca.json && rm -f /var/lib/stepca/certs/localhost.crt && systemctl restart step-ca`]
+      });
+    }
+    await ensureCaddyTrustsStepCa(workingProject, adapters);
+  }
+
+  for (const service of renamedServices) {
+    if (service.exposure === undefined) {
+      continue;
+    }
+      await publishManagedExposure({
+        project: workingProject,
+        options: {
+          name: service.name,
+          hostname: service.exposure.hostname,
+          backendIp: service.exposure.backend.ip,
+          backendPort: Number(service.exposure.backend.port)
+        },
+        providerAdapters
+      });
+  }
+
+  persistCaddyLiveConfig(proxmox, proxyRef?.vmid);
+
+  writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(workingProject.config));
+
+  return {
+    stdout: `Local domain changed to ${newDomain}. Migrated ${exposures.length} exposure(s). Health checks passed per exposure.${warnings.length > 0 ? `\nWarning: ${warnings.join("\nWarning: ")}` : ""}\n`,
+    domain: newDomain,
+    migratedExposures: exposures.length,
+    warnings
+  };
+}
+
 async function publishExposure(options, adapters) {
   const { filesystem, providerAdapters = {} } = adapters;
   assertProxmoxShell(adapters.runtime);
@@ -1065,6 +1347,8 @@ async function publishExposure(options, adapters) {
   const project = loadProject(filesystem, options.projectDir);
   const resolvedOptions = await promptExposureOptions(project, options, adapters.prompts);
   validateExposureOptions(resolvedOptions);
+
+  await ensureCaddyTrustsStepCa(project, adapters);
 
   const result = await publishManagedExposure({
     project,
@@ -1084,6 +1368,11 @@ async function publishExposure(options, adapters) {
   writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
   writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
   filesystem.chmod(project.statePath, 0o600);
+
+  const proxyServiceForPersistence = project.config.managedInventory.platform.reverseProxy;
+  if (proxyServiceForPersistence?.service === "caddy") {
+    persistCaddyLiveConfig(adapters.proxmox, project.state.providerReferences[proxyServiceForPersistence.id]?.vmid);
+  }
 
   const actionLabel = result.isUpdate ? "updated" : "published";
   const healthLabel = result.health.status === "healthy" ? "healthy" : "unhealthy";

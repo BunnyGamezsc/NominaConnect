@@ -1,5 +1,6 @@
 import * as clack from "@clack/prompts";
 import { INITIAL_PLATFORM_CATALOG } from "./catalog.js";
+import { canShowCaTrustGuide } from "./ca-guide.js";
 import { findProjectDirectory, loadProject } from "./config.js";
 import { TECHNITIUM_DEPLOYMENT, CADDY_DEPLOYMENT, TRAEFIK_DEPLOYMENT, STEP_CA_DEPLOYMENT, TAILSCALE_DEPLOYMENT, NETBIRD_DEPLOYMENT, defaultGatewayFor } from "./provisioning.js";
 import { formatPendingNotices } from "./tracking.js";
@@ -119,6 +120,18 @@ export function canPublishExposure(project) {
     && caProvisioned;
 }
 
+export function hasExposures(project) {
+  return (project?.config.managedInventory.services ?? []).some((s) => s.exposure?.hostname !== undefined);
+}
+
+export function canEditExposure(project) {
+  return canPublishExposure(project) && hasExposures(project);
+}
+
+export function canRemoveExposure(project) {
+  return hasExposures(project);
+}
+
 export function hasProvisionedServices(project) {
   if (!project?.state?.providerReferences) return false;
   return Object.keys(project.state.providerReferences).length > 0;
@@ -187,6 +200,39 @@ export function buildMenuOptions(project) {
       value: "publish-exposure",
       label: "Publish a web exposure",
       hint: "connect DNS and HTTPS routing"
+    });
+  }
+  if (project !== undefined && canEditExposure(project)) {
+    options.push({
+      value: "edit-exposure",
+      label: "Edit an exposure",
+      hint: "update backend IP or port"
+    });
+  }
+  if (project !== undefined && canRemoveExposure(project)) {
+    options.push({
+      value: "remove-exposure",
+      label: "Remove an exposure",
+      hint: "disconnect DNS and HTTPS routing"
+    });
+  }
+  if (project !== undefined && hasExposures(project)) {
+    options.push({
+      value: "change-domain",
+      label: "Change the local domain",
+      hint: "migrate exposures to a new TLD"
+    });
+  }
+  if (project !== undefined && canShowCaTrustGuide(project)) {
+    options.push({
+      value: "view-ca-guide",
+      label: "View step-ca trust guide",
+      hint: "install CA root on devices"
+    });
+    options.push({
+      value: "export-ca-cert",
+      label: "Export step-ca root certificate",
+      hint: "save cert + scp/install steps"
     });
   }
   if (project !== undefined && hasProvisionedServices(project)) {
@@ -350,6 +396,85 @@ export async function runInteractiveApp(adapters) {
   if (action === "publish-exposure") {
     const result = await adapters.runCommand(["exposure", "publish"], adapters);
     clack.outro("Exposure published.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
+    return result;
+  }
+  if (action === "edit-exposure") {
+    const serviceName = await promptExposureServiceName(project, adapters.prompts);
+    const projectForEdit = loadProject(adapters.filesystem, projectDirectory);
+    const svc = (projectForEdit.config.managedInventory.services ?? []).find(
+      (s) => s.name === serviceName || s.exposure?.hostname === serviceName || s.id === serviceName
+    );
+    if (!svc?.exposure) {
+      throw new Error(`Exposure ${serviceName} not found.`);
+    }
+    let backendIp = svc.exposure.backend.ip;
+    let backendPortRaw = String(svc.exposure.backend.port);
+    if (adapters.prompts?.ask) {
+      const answerIp = await adapters.prompts.ask("Backend IP", svc.exposure.backend.ip);
+      if (answerIp && answerIp.trim() !== "") {
+        const err = validateIp(answerIp);
+        if (err) throw new Error(err);
+        backendIp = answerIp.trim();
+      }
+      const answerPort = await adapters.prompts.ask("Backend port", String(svc.exposure.backend.port));
+      if (answerPort && answerPort.trim() !== "") {
+        backendPortRaw = answerPort.trim();
+      }
+    } else if (adapters.prompts?.select) {
+      backendIp = svc.exposure.backend.ip;
+      backendPortRaw = String(svc.exposure.backend.port);
+    }
+    const backendPort = Number(backendPortRaw);
+    if (!Number.isInteger(backendPort) || backendPort <= 0) {
+      throw new Error(`Invalid backend port: ${backendPortRaw}.`);
+    }
+    const result = await adapters.runCommand(
+      ["exposure", "publish", "--name", svc.name, "--hostname", svc.exposure.hostname, "--backend-ip", backendIp, "--backend-port", String(backendPort)],
+      adapters
+    );
+    clack.outro("Exposure updated.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
+    return result;
+  }
+  if (action === "remove-exposure") {
+    const serviceName = await promptExposureServiceName(project, adapters.prompts);
+    const result = await adapters.runCommand(["service", "remove", serviceName], adapters);
+    clack.outro("Exposure removed.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
+    return result;
+  }
+  if (action === "view-ca-guide") {
+    const result = await adapters.runCommand(["ca", "guide"], adapters);
+    if (result.stdout) {
+      clack.log.info(result.stdout.trim());
+    }
+    clack.outro("Trust guide displayed.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
+    return result;
+  }
+  if (action === "change-domain") {
+    const result = await adapters.runCommand(["domain", "change"], adapters);
+    clack.outro("Local domain changed. Exposures migrated.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
+    return result;
+  }
+  if (action === "export-ca-cert") {
+    const result = await adapters.runCommand(["ca", "export"], adapters);
+    if (result.stdout) {
+      clack.log.info(result.stdout.trim());
+    }
+    clack.outro("Certificate exported. Follow the steps above to trust it on your devices.");
     if (adapters.tracking) {
       adapters.tracking.run(adapters);
     }
@@ -697,11 +822,7 @@ export async function promptRemoveServiceName(project, prompts) {
       choices.push({ value: item.service, label: `${item.service} (${key})`, hint: `LXC vmid ${project.state.providerReferences[item.id].vmid}` });
     }
   }
-  for (const s of project.config.managedInventory.services ?? []) {
-    if (s && project.state.providerReferences[s.id]) {
-      choices.push({ value: s.name ?? s.exposure?.hostname, label: `${s.name} (exposure)`, hint: s.exposure?.hostname });
-    }
-  }
+  // Exposures are not platform services - use promptExposureServiceName / Remove an exposure
   if (choices.length === 0) {
     throw new Error("No provisioned services found to remove.");
   }
@@ -719,6 +840,31 @@ export async function promptRemoveServiceName(project, prompts) {
   if (prompts?.ask) {
     const text = choices.map((c) => `${c.label}`).join("; ");
     return prompts.ask(`Service to remove (${text})`, choices[0].value);
+  }
+  return choices[0].value;
+}
+
+export async function promptExposureServiceName(project, prompts) {
+  const choices = [];
+  for (const s of project.config.managedInventory.services ?? []) {
+    if (s?.exposure?.hostname) {
+      choices.push({ value: s.id, label: `${s.name} (${s.exposure.hostname})`, hint: `${s.exposure.backend.ip}:${s.exposure.backend.port}` });
+    }
+  }
+  if (choices.length === 0) {
+    throw new Error("No exposures found to manage.");
+  }
+  if (prompts?.select) {
+    const selected = await prompts.select({
+      message: "Which exposure would you like to manage?",
+      options: choices
+    });
+    if (selected === undefined) throw new Error("Selection cancelled.");
+    return selected;
+  }
+  if (prompts?.ask) {
+    const text = choices.map((c) => `${c.label}`).join("; ");
+    return prompts.ask(`Exposure to manage (${text})`, choices[0].value);
   }
   return choices[0].value;
 }

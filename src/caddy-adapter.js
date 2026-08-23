@@ -8,7 +8,23 @@ const CADDY_INSTALL = Object.freeze([
   { binary: "/bin/bash", args: ["-c", "curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt | tee /etc/apt/sources.list.d/caddy-stable.list"] },
   { binary: "/usr/bin/apt-get", args: ["update"] },
   { binary: "/usr/bin/apt-get", args: ["install", "--yes", "caddy"], timeoutMs: 180_000 },
-  { binary: "/bin/bash", args: ["-c", "printf '{\\n  admin 0.0.0.0:2019\\n}\\n:80 {\\n  respond \"OK\" 200\\n}\\n' > /etc/caddy/Caddyfile && systemctl enable --now caddy && systemctl restart caddy"], timeoutMs: 30_000 }
+  {
+    binary: "/bin/bash",
+    args: [
+      "-c",
+      [
+        "printf '{\\n  admin 0.0.0.0:2019\\n}\\n:80 {\\n  respond \"OK\" 200\\n}\\n' > /etc/caddy/Caddyfile",
+        "mkdir -p /etc/systemd/system/caddy.service.d",
+        "cat > /etc/systemd/system/caddy.service.d/nomina-persistence.conf <<'EOS'",
+        "[Service]",
+        "ExecStart=",
+        "ExecStart=/bin/sh -c 'if [ -s /etc/caddy/caddy.json ]; then exec /usr/bin/caddy run --config /etc/caddy/caddy.json; else exec /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile; fi'",
+        "EOS",
+        "systemctl daemon-reload && systemctl enable --now caddy && systemctl restart caddy"
+      ].join("\n")
+    ],
+    timeoutMs: 30_000
+  }
 ]);
 
 export function createCaddyAdapter({ httpClient, secretResolver }) {
@@ -49,15 +65,17 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
       }
       const endpoint = resolveEndpoint(request);
       let routes;
+      let policies;
       try {
         routes = await listRoutes(httpClient, endpoint);
+        policies = await listTlsPolicies(httpClient, endpoint);
       } catch (error) {
         if (isUnreachable(error)) {
           throw error;
         }
         throw error;
       }
-      const resources = routes.map(toManagedResource);
+      const resources = routes.map((route) => toManagedResource(route, policies));
       return { resources };
     },
     async adopt(request) {
@@ -76,7 +94,7 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
       return {
         managedInventoryUpdate: (request.managed ?? []).map((resource) => ({
           ...resource,
-          fingerprint: resource.fingerprint ?? fingerprintFor(resource.locator ?? { host: resource.id }, routeFromResource(resource))
+          fingerprint: resource.fingerprint ?? fingerprintFor(resource.locator ?? { host: resource.id }, { route: routeFromResource(resource), tls: resource.tls })
         }))
       };
     },
@@ -97,46 +115,16 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
       if (request.connectionSecretReference !== undefined) {
         try { secretResolver.resolve(request.connectionSecretReference); } catch {}
       }
-      const routes = await listRoutes(httpClient, endpoint);
-      const existing = routes.find((r) => hostForRoute(r) === request.hostname);
-      const newRoute = buildRoute(request);
-      const newFingerprint = fingerprintFor({ host: request.hostname, configPath: `/config/apps/http/servers/srv0/routes/${request.hostname}` }, newRoute);
-      if (existing !== undefined) {
-        const existingFingerprint = fingerprintFor({ host: request.hostname, configPath: `/config/apps/http/servers/srv0/routes/${request.hostname}` }, existing);
-        if (existingFingerprint === newFingerprint) {
-          return { id: request.hostname, locator: { host: request.hostname, configPath: `/config/apps/http/servers/srv0/routes/${request.hostname}` }, fingerprint: newFingerprint, route: formatRoute(request.hostname, newRoute) };
-        }
-        try {
-          await apiPut(httpClient, endpoint, `/config/apps/http/servers/srv0/routes/${encodeURIComponent(request.hostname)}`, newRoute);
-        } catch (error) {
-          if (/invalid traversal|400/.test(error.message)) {
-            await ensureHttpServer(httpClient, endpoint);
-            await apiPut(httpClient, endpoint, `/config/apps/http/servers/srv0/routes/${encodeURIComponent(request.hostname)}`, newRoute);
-          } else {
-            throw error;
-          }
-        }
-      } else {
-        const hasIndexPath = routes.length === 0;
-        // Use targeted PUT to create at host key; fallback to POST array if needed
-        try {
-          await apiPut(httpClient, endpoint, `/config/apps/http/servers/srv0/routes/${encodeURIComponent(request.hostname)}`, newRoute);
-        } catch (error) {
-          if (/invalid traversal|400/.test(error.message)) {
-            await ensureHttpServer(httpClient, endpoint);
-            await apiPut(httpClient, endpoint, `/config/apps/http/servers/srv0/routes/${encodeURIComponent(request.hostname)}`, newRoute);
-          } else if (hasIndexPath) {
-            await apiPost(httpClient, endpoint, "/config/apps/http/servers/srv0/routes", newRoute);
-          } else {
-            throw error;
-          }
-        }
-      }
+      await ensureHttpServer(httpClient, endpoint);
+      const newRoute = buildManagedRoute(request.hostname, request.backendIp, request.backendPort);
+      const desiredPolicy = { subjects: [request.hostname], issuers: [issuerFor(request)] };
+      await upsertRoute(httpClient, endpoint, request.hostname, newRoute);
+      await upsertTlsPolicy(httpClient, endpoint, desiredPolicy);
       const locator = { host: request.hostname, configPath: `/config/apps/http/servers/srv0/routes/${request.hostname}` };
       return {
         id: request.hostname,
         locator,
-        fingerprint: newFingerprint,
+        fingerprint: fingerprintFor(locator, { route: newRoute, tls: desiredPolicy }),
         route: formatRoute(request.hostname, newRoute)
       };
     },
@@ -144,16 +132,25 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
       const endpoint = resolveEndpoint(request);
       const routes = await listRoutes(httpClient, endpoint);
       const existing = routes.find((r) => hostForRoute(r) === request.hostname);
-      if (existing === undefined) {
+      const policies = await listTlsPolicies(httpClient, endpoint);
+      const existingPolicy = policies.find((policy) => policy.subjects?.includes(request.hostname));
+      if (existing === undefined && existingPolicy === undefined) {
         return { id: request.hostname };
       }
-      if (request.fingerprint !== undefined) {
-        const actual = fingerprintFor({ host: request.hostname, configPath: `/config/apps/http/servers/srv0/routes/${request.hostname}` }, existing);
-        if (actual !== request.fingerprint) {
-          throw new Error(`Route ${request.hostname} does not match managed fingerprint. Aborting deletion to preserve unrelated routes.`);
+      if (existing !== undefined) {
+        if (request.fingerprint !== undefined) {
+          const actual = await managedFingerprintFor(httpClient, endpoint, request.hostname);
+          if (actual !== null && actual !== request.fingerprint) {
+            throw new Error(`Route ${request.hostname} does not match managed fingerprint. Aborting deletion to preserve unrelated routes.`);
+          }
         }
+        const remaining = routes.filter((r) => hostForRoute(r) !== request.hostname);
+        await replaceMapValue(httpClient, endpoint, "/config/apps/http/servers/srv0/routes", remaining);
       }
-      await apiDelete(httpClient, endpoint, `/config/apps/http/servers/srv0/routes/${encodeURIComponent(request.hostname)}`);
+      if (existingPolicy !== undefined) {
+        const remainingPolicies = policies.filter((policy) => !policy.subjects?.includes(request.hostname));
+        await replaceMapValue(httpClient, endpoint, "/config/apps/tls/automation/policies", remainingPolicies);
+      }
       return { id: request.hostname };
     },
     async deleteRoute(request) {
@@ -162,8 +159,10 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
     async healthCheckExposure(request) {
       const endpoint = resolveEndpoint(request);
       let routes;
+      let policies;
       try {
         routes = await listRoutes(httpClient, endpoint);
+        policies = await listTlsPolicies(httpClient, endpoint);
       } catch (error) {
         if (isUnreachable(error)) {
           return { https: "unreachable", status: "unhealthy" };
@@ -174,22 +173,14 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
       if (matched === undefined) {
         return { https: "unreachable", status: "unhealthy" };
       }
-      // Always HTTPS; trusted depends on TLS mode
-      const tls = matched.tls ?? {};
-      const trusted = tls.trusted === true || tls.issuer === "internal" && request.tls?.trusted === true || false;
-      // For untrusted exposures, Caddy still serves HTTPS but reports untrusted
-      const routeTrusted = matched.tls?.trusted ?? (matched.tls?.issuer !== undefined ? true : false);
-      // If no CA configured, Caddy serves HTTPS with untrusted cert
-      // We report healthy regardless of trust, but include tls trusted flag for caller to interpret
-      // For spec: exposure without CA should be untrusted but not fallback to HTTP
-      const httpsReachable = "reachable";
-      // Determine if this route matches requested backend
+      const policy = policies.find((entry) => entry.subjects?.includes(request.hostname));
+      const tls = tlsSummaryFor(policy?.issuers?.[0]);
       const dial = matched.handle?.[0]?.upstreams?.[0]?.dial ?? matched.upstreams?.[0]?.dial;
       const expectedDial = request.backendIp && request.backendPort ? `${request.backendIp}:${request.backendPort}` : undefined;
       if (expectedDial !== undefined && dial !== undefined && dial !== expectedDial) {
-        return { https: httpsReachable, tls: routeTrusted ? "valid" : "untrusted", status: "unhealthy" };
+        return { https: "reachable", tls: tls.trusted ? "valid" : "untrusted", status: "unhealthy" };
       }
-      return { https: httpsReachable, tls: routeTrusted ? "valid" : "untrusted", status: "healthy" };
+      return { https: "reachable", tls: tls.trusted ? "valid" : "untrusted", status: "healthy" };
     }
   });
 }
@@ -224,7 +215,23 @@ async function listRoutes(httpClient, endpoint) {
     return [];
   } catch (error) {
     const msg = error.message ?? "";
-    if (/404|not found|no such|invalid traversal/i.test(msg) || /400/.test(msg)) {
+    if (/404|not found|no such|invalid traversal|cannot unmarshal|invalid array index/i.test(msg) || /400/.test(msg)) {
+      return [];
+    }
+    throw error;
+  }
+}
+
+async function listTlsPolicies(httpClient, endpoint) {
+  try {
+    const payload = await apiGet(httpClient, endpoint, "/config/apps/tls/automation/policies");
+    if (Array.isArray(payload)) {
+      return payload;
+    }
+    return [];
+  } catch (error) {
+    const msg = error.message ?? "";
+    if (/404|not found|no such|invalid traversal|cannot unmarshal|invalid array index/i.test(msg) || /400/.test(msg)) {
       return [];
     }
     throw error;
@@ -235,12 +242,76 @@ async function ensureHttpServer(httpClient, endpoint) {
   try {
     await apiGet(httpClient, endpoint, "/config/apps/http/servers/srv0");
   } catch (error) {
-    if (/404|not found|no such|invalid traversal|400/.test(error.message)) {
-      await apiPut(httpClient, endpoint, "/config/apps/http/servers/srv0", { listen: [":80", ":443"], routes: [] });
+    if (/404|not found|no such|invalid traversal|cannot unmarshal|invalid array index|400/.test(error.message)) {
+      try {
+        await apiPut(httpClient, endpoint, "/config/apps/http/servers/srv0", { listen: [":80", ":443"], routes: [] });
+      } catch (putError) {
+        if (!/already exists|409/.test(putError.message ?? "")) {
+          throw putError;
+        }
+      }
     } else {
       throw error;
     }
   }
+}
+
+async function upsertRoute(httpClient, endpoint, hostname, newRoute) {
+  const routes = await listRoutes(httpClient, endpoint);
+  const remaining = routes.filter((r) => hostForRoute(r) !== hostname);
+  const catchAllIndex = remaining.findIndex((r) => !hasHostMatcher(r));
+  if (catchAllIndex === -1) {
+    remaining.push(newRoute);
+  } else {
+    // Host-specific routes must precede hostless catch-alls or they are shadowed
+    remaining.splice(catchAllIndex, 0, newRoute);
+  }
+  await replaceMapValue(httpClient, endpoint, "/config/apps/http/servers/srv0/routes", remaining);
+}
+
+async function upsertTlsPolicy(httpClient, endpoint, desiredPolicy) {
+  const policies = await listTlsPolicies(httpClient, endpoint);
+  const hasTlsApp = await tlsAppExists(httpClient, endpoint);
+  if (policies.length === 0 && !hasTlsApp) {
+    await apiPut(httpClient, endpoint, "/config/apps/tls", { automation: { policies: [desiredPolicy] } });
+    return;
+  }
+  const remaining = policies.filter((policy) => !policy.subjects?.includes(desiredPolicy.subjects[0]));
+  remaining.push(desiredPolicy);
+  await replaceMapValue(httpClient, endpoint, "/config/apps/tls/automation/policies", remaining);
+}
+
+// Caddy's admin API refuses to PUT over an existing key (409), so replacing a
+// value requires deleting it first and putting the new value back.
+async function replaceMapValue(httpClient, endpoint, path, value) {
+  await apiDelete(httpClient, endpoint, path);
+  await apiPut(httpClient, endpoint, path, value);
+}
+
+async function tlsAppExists(httpClient, endpoint) {
+  try {
+    await apiGet(httpClient, endpoint, "/config/apps/tls/automation/policies");
+    return true;
+  } catch (error) {
+    if (/404|not found|no such|invalid traversal|cannot unmarshal|invalid array index|400/.test(error.message)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function managedFingerprintFor(httpClient, endpoint, hostname) {
+  const [routes, policies] = await Promise.all([
+    listRoutes(httpClient, endpoint),
+    listTlsPolicies(httpClient, endpoint)
+  ]);
+  const route = routes.find((r) => hostForRoute(r) === hostname);
+  if (route === undefined) {
+    return null;
+  }
+  const policy = policies.find((entry) => entry.subjects?.includes(hostname));
+  const locator = { host: hostname, configPath: `/config/apps/http/servers/srv0/routes/${hostname}` };
+  return fingerprintFor(locator, { route, tls: policy });
 }
 
 async function apiGet(httpClient, endpoint, path) {
@@ -320,29 +391,38 @@ async function apiDelete(httpClient, endpoint, path) {
   return null;
 }
 
-function buildRoute(request) {
-  const { hostname, backendIp, backendPort, tls, caStrategy } = request;
-  const trusted = tls?.trusted === true;
-  let tlsConfig;
-  if (caStrategy === "caddy-internal-ca") {
-    tlsConfig = { issuer: "internal", trusted: true };
-  } else if (caStrategy === "step-ca") {
-    const caIp = tls?.caIp ?? request.caIp;
-    tlsConfig = caIp ? { issuer: "acme", ca: `https://${caIp}:9000/acme/acme/directory`, trusted: true } : { issuer: "acme", trusted: true };
-  } else {
-    tlsConfig = trusted ? { trusted: true } : { trusted: false, issuer: "internal" };
-    if (!trusted) {
-      // Untrusted still serves HTTPS with self-signed/internal cert
-      tlsConfig.issuer = "internal";
-    }
-  }
+function buildManagedRoute(hostname, backendIp, backendPort) {
   return {
     "@id": hostname,
     match: [{ host: [hostname] }],
     handle: [{ handler: "reverse_proxy", upstreams: [{ dial: `${backendIp}:${backendPort}` }] }],
-    terminal: true,
-    tls: tlsConfig
+    terminal: true
   };
+}
+
+function issuerFor(request) {
+  if (request.caStrategy === "step-ca") {
+    // step-ca serving certs carry DNS SANs only (no IP SANs), so the ACME
+    // directory must be reached by hostname; fall back to the IP for older projects.
+    const caHost = request.tls?.caHost ?? request.tls?.caIp;
+    const issuer = { module: "acme" };
+    if (caHost) {
+      issuer.ca = `https://${caHost}:9000/acme/acme/directory`;
+    }
+    return issuer;
+  }
+  return { module: "internal" };
+}
+
+function tlsSummaryFor(issuer) {
+  if (issuer?.module === "acme") {
+    return { issuer: "acme", trusted: true, ...(issuer.ca ? { ca: issuer.ca } : {}) };
+  }
+  return { issuer: "internal", trusted: false };
+}
+
+function hasHostMatcher(route) {
+  return route.match?.some((matcher) => matcher.host !== undefined);
 }
 
 function hostForRoute(route) {
@@ -359,18 +439,19 @@ function hostForRoute(route) {
   return undefined;
 }
 
-function toManagedResource(route) {
+function toManagedResource(route, policies = []) {
   const host = hostForRoute(route) ?? route["@id"] ?? "unknown";
   const locator = { host, configPath: `/config/apps/http/servers/srv0/routes/${host}` };
   const dial = route.handle?.[0]?.upstreams?.[0]?.dial;
-  const tls = route.tls;
+  const policy = policies.find((entry) => entry.subjects?.includes(host));
+  const tls = tlsSummaryFor(policy?.issuers?.[0]);
   const [backendIp, backendPortRaw] = typeof dial === "string" && dial.includes(":") ? dial.split(":") : [undefined, undefined];
   const backendPort = backendPortRaw !== undefined ? Number(backendPortRaw) : undefined;
   const backend = backendIp !== undefined && backendPort !== undefined ? { ip: backendIp, port: backendPort } : undefined;
   return {
     id: host,
     locator,
-    fingerprint: fingerprintFor(locator, route),
+    fingerprint: fingerprintFor(locator, { route, tls: policy }),
     route: formatRoute(host, route),
     handle: route.handle,
     match: route.match,

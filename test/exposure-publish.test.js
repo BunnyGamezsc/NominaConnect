@@ -202,7 +202,7 @@ test("nomina exposure publish creates Technitium record and Caddy HTTPS route to
   assert.equal(technitium.publishCalls.length, 1);
   assert.equal(caddy.publishCalls.length, 1);
   assert.equal(technitium.publishCalls[0].hostname, "photos.bunnyhome.test");
-  assert.equal(technitium.publishCalls[0].ip, "10.0.0.100");
+  assert.equal(technitium.publishCalls[0].ip, "10.0.0.54");
   assert.equal(caddy.publishCalls[0].hostname, "photos.bunnyhome.test");
   assert.equal(caddy.publishCalls[0].backendIp, "10.0.0.100");
   assert.equal(caddy.publishCalls[0].backendPort, 8080);
@@ -260,7 +260,7 @@ test("nomina exposure publish updates an existing managed hostname", async () =>
 
   assert.equal(
     technitium.inspect().resources.find((resource) => resource.id === "photos.bunnyhome.test").record,
-    "photos.bunnyhome.test A 10.0.0.100"
+    "photos.bunnyhome.test A 10.0.0.54"
   );
   assert.match(
     caddy.inspect().resources.find((resource) => resource.id === "photos.bunnyhome.test").route,
@@ -350,7 +350,7 @@ test("nomina exposure publish creates Technitium record and Traefik HTTPS route 
   assert.equal(technitium.publishCalls.length, 1);
   assert.equal(traefik.publishCalls.length, 1);
   assert.equal(technitium.publishCalls[0].hostname, "photos.bunnyhome.test");
-  assert.equal(technitium.publishCalls[0].ip, "10.0.0.100");
+  assert.equal(technitium.publishCalls[0].ip, "10.0.0.54");
   assert.equal(traefik.publishCalls[0].hostname, "photos.bunnyhome.test");
   assert.equal(traefik.publishCalls[0].backendIp, "10.0.0.100");
   assert.equal(traefik.publishCalls[0].backendPort, 8080);
@@ -408,7 +408,7 @@ test("nomina exposure publish updates an existing managed hostname with Traefik"
 
   assert.equal(
     technitium.inspect().resources.find((resource) => resource.id === "photos.bunnyhome.test").record,
-    "photos.bunnyhome.test A 10.0.0.100"
+    "photos.bunnyhome.test A 10.0.0.54"
   );
   assert.match(
     traefik.inspect().resources.find((resource) => resource.id === "photos.bunnyhome.test").route,

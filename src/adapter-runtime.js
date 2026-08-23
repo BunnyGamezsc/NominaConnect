@@ -1,5 +1,7 @@
 import { spawn as spawnProcess } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
+import https from "node:https";
 import path from "node:path";
 
 import { createCaddyAdapter } from "./caddy-adapter.js";
@@ -107,38 +109,89 @@ export class HttpRequestError extends Error {
 }
 
 export function createHttpClient(options = {}) {
-  const fetchImpl = options.fetch ?? globalThis.fetch;
+  const fetchImpl = options.fetch;
   const defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
   return Object.freeze({
     async request(request) {
       const timeoutMs = request.timeoutMs ?? defaultTimeoutMs;
       const redactions = request.redactions ?? [];
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      if (fetchImpl !== undefined) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const response = await fetchImpl(request.url, {
+            method: request.method ?? "GET",
+            headers: request.headers,
+            body: request.body,
+            signal: controller.signal
+          });
+          const body = await response.text();
+          return {
+            status: response.status,
+            body: redactValue(body, redactions)
+          };
+        } catch (error) {
+          if (error.name === "AbortError") {
+            throw new HttpRequestError({
+              url: redactValue(request.url, redactions),
+              timedOut: true
+            });
+          }
+          throw error;
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      // Default transport sends only the caller's headers. globalThis.fetch
+      // injects browser headers (e.g. sec-fetch-mode: cors) that Caddy's
+      // admin endpoint rejects with 403.
       try {
-        const response = await fetchImpl(request.url, {
-          method: request.method ?? "GET",
-          headers: request.headers,
-          body: request.body,
-          signal: controller.signal
-        });
-        const body = await response.text();
-        return {
-          status: response.status,
-          body: redactValue(body, redactions)
-        };
+        const result = await requestViaNodeModules(
+          { url: request.url, method: request.method, headers: request.headers, body: request.body },
+          timeoutMs
+        );
+        return { status: result.status, body: redactValue(result.body, redactions) };
       } catch (error) {
-        if (error.name === "AbortError") {
+        if ((/** @type {{timedOut?: boolean}} */ (error))?.timedOut === true) {
           throw new HttpRequestError({
             url: redactValue(request.url, redactions),
             timedOut: true
           });
         }
         throw error;
-      } finally {
-        clearTimeout(timer);
       }
     }
+  });
+}
+
+function requestViaNodeModules({ url, method = "GET", headers = {}, body }, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const transport = target.protocol === "https:" ? https : http;
+    const request = transport.request(target, { method, headers }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => {
+        resolve({
+          status: response.statusCode,
+          body: Buffer.concat(chunks).toString("utf8")
+        });
+      });
+    });
+    const timer = setTimeout(() => {
+      const timeoutError = /** @type {{timedOut?: boolean} & Error} */ (new Error(`Request to ${url} timed out.`));
+      timeoutError.timedOut = true;
+      request.destroy(timeoutError);
+    }, timeoutMs);
+    request.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    request.on("close", () => clearTimeout(timer));
+    if (body !== undefined) {
+      request.write(body);
+    }
+    request.end();
   });
 }
 

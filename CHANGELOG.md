@@ -1,5 +1,71 @@
 # Changelog
 
+## [1.3.15] - 2026-08-23
+
+Stable release: squash of dev v1.3.6–v1.3.14 plus new features below.
+
+### Added
+- **Change the local domain from the CLI/TUI** (`nomina domain change <new-domain>`, TUI `Change the local domain`): migrates every exposure to a new base local domain end-to-end — renames hostnames in `nomina.yaml`, cleans up old Technitium records and Caddy routes (cleanup failures become non-blocking warnings), extends step-ca `dnsNames` SANs for `step-ca.<new-domain>` and restarts it, re-pins/re-trusts the CA in the Caddy LXC, republishes each exposure (fresh ACME certs under the new names), and persists live Caddy config.
+- **Export the step-ca root certificate** (`nomina ca export [--output step-ca-root.crt]`, TUI `Export step-ca root certificate`): fetches the root (via `pct exec`, HTTPS fallback), writes it to disk, and prints scp retrieval plus per-device install steps (macOS/Windows/Linux/Firefox/iOS/Android).
+
+### Fixed
+- **Exposure DNS pointed at backend instead of Caddy** — Technitium `A` now publishes the reverse-proxy IP; backend only in Caddy's `reverse_proxy` dial.
+- **step-ca exposures failed ACME issuance** (`x509: ... no IP SANs`) — ACME directory URL uses the CA hostname (`step-ca.<baseLocalDomain>`), init requests that SAN, and publish pins/trusts the CA name+root in the Caddy LXC before issuing.
+- **Caddy restart wiped published routes/TLS policies** — installer adds a systemd drop-in preferring persisted `/etc/caddy/caddy.json`; publish/remove dump live config after each mutation.
+- Exposure remove/edit picker fixes (NominaConnect ID resolution, platform-key collision).
+
+## [1.3.14] - 2026-08-23 (Dev/Pre-release)
+
+### Fixed
+- **step-ca exposures failed ACME issuance: `x509: cannot validate certificate for <caIp> because it doesn't contain any IP SANs`** (live exposure trial on `nuc`):
+  - ACME directory URL now uses the CA **hostname** `step-ca.<baseLocalDomain>` instead of the bare IP (`src/exposure.js` `tls.caHost`, `src/caddy-adapter.js` `issuerFor` prefers hostname, IP kept as fallback for older projects).
+  - `step ca init` now requests the SAN: `--dns "$(hostname -f),localhost,step-ca.<zone>"` (`src/step-ca-adapter.js`).
+  - `exposure publish` prepares the Caddy LXC before issuance: pins `<caIp> step-ca.<zone>` into `/etc/hosts` and installs the CA root into `/usr/local/share/ca-certificates` + `update-ca-certificates` (`src/cli.js`, idempotent).
+- **Caddy restart wiped all published routes and TLS policies** (admin-API config is ephemeral; unit loaded only `/etc/caddy/Caddyfile`): installer writes systemd drop-in `nomina-persistence.conf` that prefers persisted `/etc/caddy/caddy.json`; publish/remove now dump live config to that file after every mutation (`src/cli.js`).
+
+## [1.3.13] - 2026-08-23 (Dev/Pre-release)
+
+### Fixed
+- **Remove an exposure: Service nc_… not found** — `promptExposureServiceName` (`src/tui.js:820`) now correctly returns stable `s.id` (`nc_…`) to avoid collision with platform key `dns`, but `removeService` (`src/cli.js:886`) only matched by `s.name`/`s.exposure.hostname`. Add `s.id === resolvedServiceName` check so `Remove an exposure` → `technitium (dns.bunny.home)` (`nc_86331352…`) resolves.
+
+## [1.3.12] - 2026-08-23 (Dev/Pre-release)
+
+### Fixed
+- **Exposure DNS pointed at backend instead of Caddy** (`src/exposure.js:48` `publishRecord` used `backendIp` for the `A` record). `curl https://<hostname>` resolved `dig +short` to `192.168.4.90:443` (backend) not the reverse-proxy, so `Caddy` was bypassed and `443 Connection refused`. Now publishes `A → proxyRef.ip` (`reverseProxy` `caddy`/`traefik` `10.0.0.54`) and `Caddy` `reverse_proxy dial → backendIp:backendPort`. Existing exposures keep `exposure.backend` in `nomina.yaml`; only the `A` is repointed. Tests at `test/exposure-publish.test.js:1`.
+
+## [1.3.11] - 2026-08-23 (Dev/Pre-release)
+
+### Fixed
+- **Edit an exposure jumped straight to Backend IP** (`src/tui.js:820` `promptExposureServiceName` auto-returned when only one exposure existed). Picker (`Which exposure would you like to manage?`) now always renders, so `Edit an exposure` shows the list first (`src/tui.js:392`).
+
+## [1.3.10] - 2026-08-23 (Dev/Pre-release)
+
+### Fixed
+- **Remove an exposure deleted Technitium and Edit showed wrong prompt** (`src/tui.js:787` `promptRemoveServiceName` listed exposures alongside platform services; `src/tui.js:820` `promptExposureServiceName` returned `s.name` which collides with platform key `dns` in `src/cli.js:831` `key === resolvedServiceName`). `Remove a managed service` now lists only managed platform inventory (`dns`, `reverseProxy` `caddy`/`traefik`, `certificateAuthority` `step-ca`/`caddy-internal-ca`, `vpn` `tailscale`/`netbird`); exposures are isolated to `Edit an exposure` / `Remove an exposure` via `promptExposureServiceName` returning stable `s.id`. `Edit an exposure` now shows the exposure picker list first, then prompts `Backend IP`/`Backend port` with current `exposure.backend` as defaults (`src/tui.js:392`).
+
+## [1.3.9] - 2026-08-23 (Dev/Pre-release)
+
+### Added
+- **Edit and remove exposures from the Interactive CLI** (`src/tui.js:121` `hasExposures`/`canEditExposure`/`canRemoveExposure`, `src/tui.js:186` `buildMenuOptions`, `src/tui.js:358` `runInteractiveApp`): when at least one exposure exists, the main menu now shows `Edit an exposure` (re-prompt `Backend IP`/`Backend port` with current values as defaults and re-publish via `exposure publish` — same `src/cli.js:58` `publishManagedExposure` upsert `src/config.js:upsertManagedExposure`, so unchanged `nomina.yaml` fields keep their value) and `Remove an exposure` (select via `promptExposureServiceName` and disconnect via `service remove` `src/cli.js:886` `technitium.unpublishRecord` + `proxy.unpublishRoute`). Delete remains available as the generic `Remove a managed service` / `Destroy a service LXC` entries for platform LXCs.
+
+## [1.3.8] - 2026-08-23 (Dev/Pre-release)
+
+### Fixed
+- **Exposure publish failed: `Caddy Admin API POST /config/apps/http/servers/srv0/routes failed with status 500: {"error":"invalid traversal path at: config/apps/http"}`** — verified against real Caddy v2.11.4; three independent defects (`src/caddy-adapter.js`, new `test/caddy-adapter-wire.test.js`):
+  - Route payload carried a `tls` field, which is not a valid Caddy `Route` field (config load fails `unknown field "tls"`). TLS issuer now lives in `apps.tls.automation.policies` keyed by subject — `acme` + step-ca directory URL (`https://<caIp>:9000/acme/acme/directory`) when step-ca is selected, `{module:"internal"}` otherwise; trust is derived from the policy wire state by `healthCheckExposure`/`inspect`.
+  - `routes` is an array, so hostname-keyed PUT/DELETE could never work (`invalid array index` / traversal errors). Upserts rewrite the whole array via DELETE→PUT (Caddy PUT over an existing key returns `409 key already exists`), inserting host routes *before* hostless catch-alls — otherwise the installer's `:80 { respond "OK" }` route shadows every published exposure.
+  - `createHttpClient` used `globalThis.fetch`, which sends `sec-fetch-mode: cors`; current Caddy admin endpoints reject browser-like requests with `403 client is not allowed to access from origin ''`. Default transport is now `node:http`/`node:https` sending only explicit headers (`src/adapter-runtime.js`). Injectable `options.fetch` path kept for tests.
+
+## [1.3.7] - 2026-08-23 (Dev/Pre-release)
+
+### Added
+- **step-ca trust guide** (`nomina ca guide` / `View step-ca trust guide`): `src/ca-guide.js` `getStepCaTrustGuide` prints CA IP/vmid-aware instructions to fetch `root_ca.crt` (`pct exec <vmid> -- cat /var/lib/stepca/certs/root_ca.crt` or `curl -k https://<caIp>:9000/roots.pem`) and install on macOS/Windows/Linux/iOS/Android/Firefox; `nomina ca cert` exports the cert via `pct exec` or `https://<caIp>:9000/roots.pem`. Answers "when I add a new exposure, will it get a step-ca cert?" — yes, when `step-ca` is selected and provisioned, `Caddy` requests via `ACME https://<caIp>:9000/acme/acme/directory` with `tls.trusted:true`; without trusting the root, browsers show untrusted but still HTTPS.
+
+## [1.3.6] - 2026-08-23 (Dev/Pre-release)
+
+### Changed
+- Dev sync to `main` `v1.3.5` (step-ca `step-ca.service` STEPPATH fix) — publishes dev channel with the fix for `curl -fsSL .../dev/install-native.sh | bash -s dev`.
+
 ## [1.3.5] - 2026-08-23
 
 ### Fixed

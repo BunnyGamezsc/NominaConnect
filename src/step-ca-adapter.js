@@ -5,34 +5,37 @@ const STEP_CA_HEALTH_PATH = "/health";
 const STEP_CA_ACME_DIRECTORY_PATH = "/acme/acme/directory";
 const STEP_CA_ROOTS_PATH = "/roots.pem";
 
-const STEP_CA_INSTALL = Object.freeze([
-  { binary: "/usr/bin/apt-get", args: ["update"] },
-  { binary: "/usr/bin/apt-get", args: ["install", "--yes", "curl", "ca-certificates", "gnupg"] },
-  {
-    binary: "/bin/bash",
-    args: [
-      "-c",
-      "mkdir -p /etc/apt/keyrings && curl -fsSL https://packages.smallstep.com/keys/apt/repo-signing-key.gpg -o /etc/apt/keyrings/smallstep.asc"
-    ]
-  },
-  {
-    binary: "/bin/bash",
-    args: [
-      "-c",
-      "cat > /etc/apt/sources.list.d/smallstep.sources <<'EOS'\nTypes: deb\nURIs: https://packages.smallstep.com/stable/debian\nSuites: debs\nComponents: main\nSigned-By: /etc/apt/keyrings/smallstep.asc\nEOS"
-    ]
-  },
-  { binary: "/usr/bin/apt-get", args: ["update"] },
-  { binary: "/usr/bin/apt-get", args: ["install", "--yes", "step-ca", "step-cli"], timeoutMs: 180_000 },
-  {
-    binary: "/bin/bash",
-    args: [
-      "-c",
-      "mkdir -p /var/lib/stepca && if [ ! -f /var/lib/stepca/config/ca.json ]; then PASSWORD=$(cat /var/lib/stepca/password.txt 2>/dev/null || echo \"nomina-step-ca-$(head -c 12 /dev/urandom | base64)\"); echo \"$PASSWORD\" > /var/lib/stepca/password.txt; chmod 600 /var/lib/stepca/password.txt; STEPPATH=/var/lib/stepca step ca init --deployment-type standalone --name \"NominaConnect CA\" --dns \"$(hostname -f),localhost\" --address \":9000\" --provisioner admin --password-file /var/lib/stepca/password.txt --acme || true; fi && cat > /etc/systemd/system/step-ca.service <<'EOS'\n[Unit]\nDescription=Smallstep CA\nAfter=network.target\n[Service]\nType=simple\nUser=root\nEnvironment=STEPPATH=/var/lib/stepca\nExecStart=/usr/bin/step-ca --password-file /var/lib/stepca/password.txt /var/lib/stepca/config/ca.json\nRestart=always\nRestartSec=5\n[Install]\nWantedBy=multi-user.target\nEOS\nsystemctl daemon-reload && systemctl enable --now step-ca"
-    ],
-    timeoutMs: 30_000
-  }
-]);
+function buildStepCaInstall(zone) {
+  const dnsNames = `$(hostname -f),localhost${zone ? `,step-ca.${zone}` : ""}`;
+  return [
+    { binary: "/usr/bin/apt-get", args: ["update"] },
+    { binary: "/usr/bin/apt-get", args: ["install", "--yes", "curl", "ca-certificates", "gnupg"] },
+    {
+      binary: "/bin/bash",
+      args: [
+        "-c",
+        "mkdir -p /etc/apt/keyrings && curl -fsSL https://packages.smallstep.com/keys/apt/repo-signing-key.gpg -o /etc/apt/keyrings/smallstep.asc"
+      ]
+    },
+    {
+      binary: "/bin/bash",
+      args: [
+        "-c",
+        "cat > /etc/apt/sources.list.d/smallstep.sources <<'EOS'\nTypes: deb\nURIs: https://packages.smallstep.com/stable/debian\nSuites: debs\nComponents: main\nSigned-By: /etc/apt/keyrings/smallstep.asc\nEOS"
+      ]
+    },
+    { binary: "/usr/bin/apt-get", args: ["update"] },
+    { binary: "/usr/bin/apt-get", args: ["install", "--yes", "step-ca", "step-cli"], timeoutMs: 180_000 },
+    {
+      binary: "/bin/bash",
+      args: [
+        "-c",
+        `mkdir -p /var/lib/stepca && if [ ! -f /var/lib/stepca/config/ca.json ]; then PASSWORD=$(cat /var/lib/stepca/password.txt 2>/dev/null || echo "nomina-step-ca-$(head -c 12 /dev/urandom | base64)"); echo "$PASSWORD" > /var/lib/stepca/password.txt; chmod 600 /var/lib/stepca/password.txt; STEPPATH=/var/lib/stepca step ca init --deployment-type standalone --name "NominaConnect CA" --dns "${dnsNames}" --address ":9000" --provisioner admin --password-file /var/lib/stepca/password.txt --acme || true; fi && cat > /etc/systemd/system/step-ca.service <<'EOS'\n[Unit]\nDescription=Smallstep CA\nAfter=network.target\n[Service]\nType=simple\nUser=root\nEnvironment=STEPPATH=/var/lib/stepca\nExecStart=/usr/bin/step-ca --password-file /var/lib/stepca/password.txt /var/lib/stepca/config/ca.json\nRestart=always\nRestartSec=5\n[Install]\nWantedBy=multi-user.target\nEOS\nsystemctl daemon-reload && systemctl enable --now step-ca`
+      ],
+      timeoutMs: 30_000
+    }
+  ];
+}
 
 export function createStepCaAdapter({ httpClient, secretResolver }) {
   return Object.freeze({
@@ -42,7 +45,7 @@ export function createStepCaAdapter({ httpClient, secretResolver }) {
           secretResolver.resolve(plan.connectionSecretReference);
         } catch {}
       }
-      return { ...plan, lxcCommands: [...STEP_CA_INSTALL] };
+      return { ...plan, lxcCommands: buildStepCaInstall(plan?.zone) };
     },
     async upgrade(plan) {
       if (plan.connectionSecretReference !== undefined) {
