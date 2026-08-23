@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.3.6] - 2026-08-23 (Dev/Pre-release)
+
+### Changed
+- Dev sync to `main` `v1.3.5` (step-ca `step-ca.service` STEPPATH fix) — publishes dev channel with the fix for `curl -fsSL .../dev/install-native.sh | bash -s dev`.
+
 ## [1.3.5] - 2026-08-23
 
 ### Fixed
