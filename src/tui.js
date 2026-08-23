@@ -93,6 +93,18 @@ export function canUpdateConnectionSecret(project) {
   return hasSecret && hasProvisioned;
 }
 
+export function canRecheckProvisioning(project) {
+  if (!project?.config?.connectionSecretReferences || !project?.state) {
+    return false;
+  }
+  for (const item of Object.values(project.config.managedInventory.platform ?? {})) {
+    if (item && project.config.connectionSecretReferences[item.id] !== undefined && project.state.providerReferences?.[item.id] === undefined) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function canPublishExposure(project) {
   const dnsService = project?.config.managedInventory.platform.dns;
   const proxyService = project?.config.managedInventory.platform.reverseProxy;
@@ -201,6 +213,13 @@ export function buildMenuOptions(project) {
       value: "update-secret",
       label: "Update connection secret",
       hint: "change stored provider password"
+    });
+  }
+  if (project !== undefined && canRecheckProvisioning(project)) {
+    options.push({
+      value: "recheck-service",
+      label: "Recheck provisioning",
+      hint: "adopt existing LXC if healthy"
     });
   }
   if (project !== undefined) {
@@ -363,6 +382,14 @@ export async function runInteractiveApp(adapters) {
   if (action === "update-secret") {
     const result = await adapters.runCommand(["secret", "change"], adapters);
     clack.outro("Connection secret updated.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
+    return result;
+  }
+  if (action === "recheck-service") {
+    const result = await adapters.runCommand(["service", "recheck"], adapters);
+    clack.outro("Recheck complete.");
     if (adapters.tracking) {
       adapters.tracking.run(adapters);
     }

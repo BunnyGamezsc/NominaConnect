@@ -1,5 +1,43 @@
 # Changelog
 
+## [1.3.0] - 2026-08-23
+
+### Added
+- **Real step-ca certificate authority with trusted Caddy exposures** (#17):
+  - New `src/step-ca-adapter.js` (`createStepCaAdapter`) manages a dedicated unprivileged Debian LXC (`STEP_CA_DEPLOYMENT` `2 CPU/512 MB/4 GB`, `debian-12-standard`) via `pct` and `step-ca` smallstep APT repository (`apt-get install step-ca` `180s`, `step ca init` standalone `NominaConnect CA` on `:9000` with ACME provisioner)
+  - `Caddy` adapter now publishes trusted routes via `step-ca` ACME (`https://<caIp>:9000/acme/acme/directory`, `tls.trusted:true`) and retains untrusted HTTPS (`tls.trusted:false` `issuer: internal`) when no CA is selected — never falls back to HTTP
+  - `exposure publish` resolves `step-ca` `https://<ip>:9000` endpoint (vs `caddy-internal-ca` `http://<ip>:2019`), verifies CA health (`GET /health`) and ACME directory (`GET /acme/acme/directory` → `/roots.pem` fallback), and reports `certificateAuthority: {tls: valid|unreachable|invalid}` as a precise verification warning when issuance/trust/reachability fails (`src/exposure.js:103` `caEndpoint`, `src/caddy-adapter.js:330`)
+  - Dedicated LXC lifecycle (`provision`, `inspect`, `healthCheck`, `explicit upgrade` via `apt-get install --only-upgrade --yes step-ca`), `inspect` preserves unmanaged provisioners and `healthCheckExposure` distinguishes trust/issue vs reachability
+
+### Fixed
+- **Promotes dev pre-releases 1.2.4–1.2.6 to stable** (previously dev-only):
+  - `Recheck provisioning` (`nomina service recheck`) to adopt orphaned LXCs after transient `HttpRequestError` left `state.json` unwritten
+  - `Caddy Admin API` now `0.0.0.0:2019` with `:80 { respond "OK" 200 }` server; `listRoutes`/`publishRoute` handle `400 invalid traversal` by ensuring `srv0` (`PUT /config/apps/http/servers/srv0`)
+  - `IP preflight` via `pct config` `net0` `ip=` scan (not just `pct list`) and `runAdoptionPass` now passes `connectionSecretReference`/`ip`/`zone` to `inspect`/`healthCheck` to avoid `Technitium API endpoint is required` warnings
+
+## [1.2.6] - 2026-08-23 (Dev/Pre-release)
+
+### Fixed
+- **Caddy recheck 400 invalid traversal** (`Caddy Admin API /config/apps/http/servers/srv0/routes failed with status 400`): `Caddyfile` was `{ admin 0.0.0.0:2019 }` with no `http` server, so `GET /config/apps/http/servers/srv0/routes` → `400`. `listRoutes` now treats `400`/`invalid traversal` as empty, `publishRoute` ensures `srv0` via `PUT /config/apps/http/servers/srv0 {listen:[":80",":443"],routes:[]}`, and `CADDY_INSTALL` now writes `:80 { respond "OK" 200 }`.
+
+## [1.2.5] - 2026-08-22 (Dev/Pre-release)
+
+### Fixed
+- **Recheck found no LXC and tracking warned `Technitium API endpoint is required`**:
+  - `checkIpAvailability` (`src/adapter-runtime.js:183`) only grepped `pct list` (no IP column on `nuc`, e.g. `100 running technitium`), so `192.168.4.86` on `101` was missed and `recheck` errored `No existing LXC found`; now falls back to `pct config <vmid>` `net0` `ip=` scan for each `VMID` from `pct list`
+  - `runAdoptionPass` (`src/adoption.js:185`) only passed `providerReferences` to `technitium`/`caddy` `inspect`/`healthCheck`, so `resolveEndpoint` threw `Technitium API endpoint is required` and pending `Failed to inspect technitium…` warning persisted; now passes `connectionSecretReference`/`ip`/`zone` (`caddy-internal-ca` falls back to `caddy` `ip`) and `proxy` exposure health also gets `ip`
+  - Test fixture `pct config` now vmid-aware (`100` → `pve` `10.0.0.1`, `120` → `technitium` `10.0.0.53`) to keep `184` tests passing
+
+## [1.2.4] - 2026-08-22 (Dev/Pre-release)
+
+### Added
+- **Recheck provisioning to adopt existing LXC** (`dev:22cc0b0` + `c11bb46`):
+  - New `Recheck provisioning` TUI entry (`src/tui.js:95` `canRecheckProvisioning` → `buildMenuOptions`) appears when any platform service has a secret reference but no `providerReferences` (e.g. Technitium `192.168.4.90` `vmid 100` left running after `Unable to connect…` before `state.json` was written). Routes to `nomina service recheck` (`src/cli.js:135` `handleServiceCommand` → `recheckService`).
+  - `nomina service recheck [service] --ip <ip> --project-dir /root` finds the orphaned LXC via `proxmox.checkIpAvailability` (`known-collision lxc/100`), `pct config <vmid>` → `inspectLxc`, `withBoundedRetry` health (`GET /api/user/session/get` for Technitium, `GET /config/` for Caddy) and writes `providerReferences`/`deployment` without `pct create`. Use `nomina` → `Recheck provisioning` → `technitium` → `192.168.4.90` or `nomina service recheck caddy --ip 192.168.4.86`.
+
+### Fixed
+- **Caddy Admin API only listened on localhost** (`ss 127.0.0.1:2019`, `admin endpoint started localhost:2019`, host `curl http://192.168.4.86:2019/config/ → Connection refused`): `src/caddy-adapter.js:11` `CADDY_INSTALL` now ends with `printf '{\n  admin 0.0.0.0:2019\n}\n' > /etc/caddy/Caddyfile && systemctl enable --now caddy && systemctl restart caddy` (`30s`). Future `nomina service add caddy` is reachable at `http://192.168.4.86:2019`; existing `101` fix: `pct exec 101 -- bash -c 'printf "{\n  admin 0.0.0.0:2019\n}\n" > /etc/caddy/Caddyfile && systemctl restart caddy'`.
+
 ## [1.2.3] - 2026-08-22
 
 ### Fixed

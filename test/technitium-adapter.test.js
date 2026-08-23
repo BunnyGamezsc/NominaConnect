@@ -135,6 +135,22 @@ function createProxmoxCommandFixture(overrides = {}) {
         return { exitCode: 0, stdout: "", stderr: "" };
       }
       if (command.binary === "/usr/sbin/pct" && command.args[0] === "config") {
+        const vmid = command.args[1];
+        if (vmid === "100") {
+          return {
+            exitCode: 0,
+            stdout: [
+              "hostname: pve",
+              "cores: 1",
+              "memory: 512",
+              "net0: name=eth0,bridge=vmbr0,ip=10.0.0.1/24",
+              "rootfs: local:vm-100-disk-0,size=8G",
+              "unprivileged: 1",
+              ""
+            ].join("\n"),
+            stderr: ""
+          };
+        }
         return {
           exitCode: 0,
           stdout: [

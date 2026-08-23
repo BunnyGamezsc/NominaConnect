@@ -104,18 +104,22 @@ export async function publishManagedExposure({
     if (caAdapter !== undefined) {
       const caPlugin = getPlatformProvider(caService.service);
       const caRef = project.state.providerReferences[caService.id];
+      const caIp = caRef?.ip ?? proxyRef?.ip;
+      const caEndpoint = caIp
+        ? (caService.service === "step-ca" ? `https://${caIp}:9000` : `http://${caIp}:2019`)
+        : undefined;
       caInspection = await caPlugin.inspect(caAdapter, caService, {
         providerReferences: collectManagedCaReferences(project, hostname),
-        ip: caRef?.ip ?? proxyRef?.ip,
-        endpoint: (caRef?.ip ?? proxyRef?.ip) ? `http://${caRef?.ip ?? proxyRef?.ip}:2019` : undefined,
+        ip: caIp,
+        endpoint: caEndpoint,
         connectionSecretReference: project.config.connectionSecretReferences[caService.id]
       });
       caExposureHealth = await caAdapter.healthCheckExposure?.({
         hostname,
         backendIp,
         backendPort,
-        ip: caRef?.ip ?? proxyRef?.ip,
-        endpoint: (caRef?.ip ?? proxyRef?.ip) ? `http://${caRef?.ip ?? proxyRef?.ip}:2019` : undefined
+        ip: caIp,
+        endpoint: caEndpoint
       })
         ?? { tls: "valid", issuer: caService.service, status: "healthy" };
     }

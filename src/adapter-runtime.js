@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { createCaddyAdapter } from "./caddy-adapter.js";
+import { createStepCaAdapter } from "./step-ca-adapter.js";
 import { createTechnitiumAdapter } from "./technitium-adapter.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -172,7 +173,7 @@ export function createProductionAdapters(options = {}) {
     technitium: createTechnitiumAdapter({ httpClient, secretResolver }),
     caddy: caddyAdapter,
     traefik: createProviderAdapter("traefik", secretResolver),
-    "step-ca": createProviderAdapter("step-ca", secretResolver),
+    "step-ca": createStepCaAdapter({ httpClient, secretResolver }),
     "caddy-internal-ca": caddyInternalCaAdapter,
     tailscale: createProviderAdapter("tailscale", secretResolver),
     netbird: createProviderAdapter("netbird", secretResolver)
@@ -185,11 +186,26 @@ function createProxmoxAdapter(commandRunner) {
     async checkIpAvailability(ip) {
       const result = await commandRunner.run({ binary: "/usr/sbin/pct", args: ["list"] });
       const matchingLine = result.stdout.split("\n").find((line) => line.includes(ip));
-      if (matchingLine === undefined) {
-        return { status: "available" };
+      if (matchingLine !== undefined) {
+        const vmid = matchingLine.trim().split(/\s+/)[0];
+        if (/^\d+$/.test(vmid)) {
+          return { status: "known-collision", conflictWith: `lxc/${vmid}` };
+        }
       }
-      const vmid = matchingLine.trim().split(/\s+/)[0];
-      return { status: "known-collision", conflictWith: `lxc/${vmid}` };
+      const vmids = result.stdout
+        .split("\n")
+        .slice(1)
+        .map((line) => line.trim().split(/\s+/)[0])
+        .filter((candidate) => /^\d+$/.test(candidate));
+      for (const vmid of vmids) {
+        try {
+          const config = await runUnchecked(commandRunner, { binary: "/usr/sbin/pct", args: ["config", String(vmid)] });
+          if (config.stdout.includes(ip)) {
+            return { status: "known-collision", conflictWith: `lxc/${vmid}` };
+          }
+        } catch {}
+      }
+      return { status: "available" };
     },
     async validateProvisioningPrerequisites(spec) {
       await assertStorageAvailable(commandRunner, spec.storage);
