@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.4.1] - 2026-08-23 (Dev/Pre-release)
+
+### Added
+- **HTTP→HTTPS auto-redirect for Caddy exposures** — `nomina caddy redirect on|off` (and a state-aware TUI toggle) persists the preference and re-publishes every exposure. With it enabled, plain-`http://` hits get a `308` to `https://`, so typing `dns.bunny.internal` without a scheme lands on TLS in any browser. Redirect routes are implementation detail: invisible to inspection/adoption, removed with unpublish, idempotent on republish.
+
 ## [1.4.0] - 2026-08-23
 
 Major hardening release: everything learned from the live `bunny.home` → `bunny.home.arpa` → `bunny.internal` migration on a real homelab.
