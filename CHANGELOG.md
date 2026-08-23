@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.3.10] - 2026-08-23 (Dev/Pre-release)
+
+### Fixed
+- **Remove an exposure deleted Technitium and Edit showed wrong prompt** (`src/tui.js:787` `promptRemoveServiceName` listed exposures alongside platform services; `src/tui.js:820` `promptExposureServiceName` returned `s.name` which collides with platform key `dns` in `src/cli.js:831` `key === resolvedServiceName`). `Remove a managed service` now lists only managed platform inventory (`dns`, `reverseProxy` `caddy`/`traefik`, `certificateAuthority` `step-ca`/`caddy-internal-ca`, `vpn` `tailscale`/`netbird`); exposures are isolated to `Edit an exposure` / `Remove an exposure` via `promptExposureServiceName` returning stable `s.id`. `Edit an exposure` now shows the exposure picker list first, then prompts `Backend IP`/`Backend port` with current `exposure.backend` as defaults (`src/tui.js:392`).
+
 ## [1.3.9] - 2026-08-23 (Dev/Pre-release)
 
 ### Added
