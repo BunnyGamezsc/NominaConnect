@@ -720,3 +720,90 @@ connectionSecretReferences:
 
   assert.match(result.stdout, /Traefik provisioned/);
 });
+
+test("editing an exposure lets you flip the backend TLS setting", async () => {
+  const filesystem = {
+    exists: (path) => path === "/projects/home/nomina.yaml" || path === "/projects/home/.nomina/state.json",
+    read: (path) => path.endsWith("state.json")
+      ? JSON.stringify({
+          version: 1,
+          providerReferences: { d: { vmid: 1, ip: "10.0.0.53" }, p: { vmid: 2, ip: "10.0.0.54" } },
+          tracking: { notices: [] }
+        })
+      : `apiVersion: nomina.connect/v0alpha1
+kind: NominaConnect
+proxmox:
+  node: pve-1
+  defaultBridge: vmbr0
+  defaultStorage: local-lvm
+baseLocalDomain: bunny.internal
+managedInventory:
+  platform:
+    dns:
+      id: d
+      service: technitium
+      deployment:
+        ip: 10.0.0.53
+        hostname: technitium
+    reverseProxy:
+      id: p
+      service: caddy
+      deployment:
+        ip: 10.0.0.54
+        hostname: caddy
+    certificateAuthority: null
+    vpn: null
+  services:
+    - id: e1
+      name: pve
+      exposure:
+        hostname: pve.bunny.internal
+        backend:
+          ip: 10.0.0.1
+          port: 8006
+          tls: true
+        protocol: https
+connectionSecretReferences: {}
+`
+  };
+
+  const commands = [];
+  await runInteractiveApp({
+    filesystem,
+    cwd: "/projects/home",
+    interactive: {
+      chooseAction: async () => "edit-exposure"
+    },
+    prompts: {
+      ask: async (message) => message.startsWith("Exposure to manage") ? "e1" : undefined,
+      confirm: async ({ initialValue }) => initialValue === true ? false : true // flip the TLS answer
+    },
+    runCommand: async (argumentsList) => {
+      commands.push(argumentsList);
+      return { stdout: "updated\n" };
+    }
+  });
+
+  assert.equal(commands.length, 1);
+  assert.equal(commands[0].includes("--backend-tls"), false,
+    "answering 'no' to the TLS prompt must drop the --backend-tls flag");
+
+  commands.length = 0;
+  await runInteractiveApp({
+    filesystem,
+    cwd: "/projects/home",
+    interactive: {
+      chooseAction: async () => "edit-exposure"
+    },
+    prompts: {
+      ask: async (message) => message.startsWith("Exposure to manage") ? "e1" : undefined,
+      confirm: async ({ initialValue }) => initialValue === true
+    },
+    runCommand: async (argumentsList) => {
+      commands.push(argumentsList);
+      return { stdout: "updated\n" };
+    }
+  });
+  assert.equal(commands[0].includes("--backend-tls"), true,
+    "keeping the TLS answer must preserve the --backend-tls flag");
+});

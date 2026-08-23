@@ -462,8 +462,17 @@ export async function runInteractiveApp(adapters) {
     if (!Number.isInteger(backendPort) || backendPort <= 0) {
       throw new Error(`Invalid backend port: ${backendPortRaw}.`);
     }
+    // Ask with the stored value as default so edits can flip the TLS setting.
+    let backendTls = svc.exposure.backend.tls === true;
+    if (adapters.prompts !== undefined) {
+      backendTls = await confirmPrompt(
+        adapters.prompts,
+        "Does the backend serve HTTPS/TLS itself? (e.g. Proxmox :8006, OPNsense)",
+        backendTls
+      );
+    }
     const publishArgs = ["exposure", "publish", "--name", svc.name, "--hostname", svc.exposure.hostname, "--backend-ip", backendIp, "--backend-port", String(backendPort)];
-    if (svc.exposure.backend.tls === true) {
+    if (backendTls) {
       publishArgs.push("--backend-tls");
     }
     const result = await adapters.runCommand(publishArgs, adapters);
