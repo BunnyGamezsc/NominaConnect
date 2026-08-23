@@ -409,7 +409,9 @@ async function apiDelete(httpClient, endpoint, path) {
 function buildManagedRoute(hostname, backendIp, backendPort) {
   return {
     "@id": hostname,
-    match: [{ host: [hostname] }],
+    // Scheme-pinned: without this the route also matches plain :80 traffic
+    // (shadowing any HTTP->HTTPS redirect) and proxies it in cleartext.
+    match: [{ host: [hostname], protocol: "https://" }],
     handle: [{ handler: "reverse_proxy", upstreams: [{ dial: `${backendIp}:${backendPort}` }] }],
     terminal: true
   };

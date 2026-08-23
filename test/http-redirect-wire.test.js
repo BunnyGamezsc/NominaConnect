@@ -96,6 +96,8 @@ test("publishRoute adds an HTTP->HTTPS redirect route when httpRedirect is enabl
   const redirectRoute = routes.find((route) => route["@id"] === "dns.bunny.internal-auto-http");
 
   assert.notEqual(tlsRoute, undefined, "TLS route must still exist");
+  assert.equal(tlsRoute.match[0].protocol, "https://",
+    "TLS route must be scheme-pinned, otherwise it matches plain :80 traffic and shadows the redirect");
   assert.notEqual(redirectRoute, undefined, "redirect route must be created");
   assert.deepEqual(redirectRoute.match, [{ host: ["dns.bunny.internal"], protocol: "http://" }]);
   assert.equal(redirectRoute.handle[0].handler, "static_response");
