@@ -216,11 +216,23 @@ export function buildMenuOptions(project) {
       hint: "disconnect DNS and HTTPS routing"
     });
   }
+  if (project !== undefined && hasExposures(project)) {
+    options.push({
+      value: "change-domain",
+      label: "Change the local domain",
+      hint: "migrate exposures to a new TLD"
+    });
+  }
   if (project !== undefined && canShowCaTrustGuide(project)) {
     options.push({
       value: "view-ca-guide",
       label: "View step-ca trust guide",
       hint: "install CA root on devices"
+    });
+    options.push({
+      value: "export-ca-cert",
+      label: "Export step-ca root certificate",
+      hint: "save cert + scp/install steps"
     });
   }
   if (project !== undefined && hasProvisionedServices(project)) {
@@ -444,6 +456,25 @@ export async function runInteractiveApp(adapters) {
       clack.log.info(result.stdout.trim());
     }
     clack.outro("Trust guide displayed.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
+    return result;
+  }
+  if (action === "change-domain") {
+    const result = await adapters.runCommand(["domain", "change"], adapters);
+    clack.outro("Local domain changed. Exposures migrated.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
+    return result;
+  }
+  if (action === "export-ca-cert") {
+    const result = await adapters.runCommand(["ca", "export"], adapters);
+    if (result.stdout) {
+      clack.log.info(result.stdout.trim());
+    }
+    clack.outro("Certificate exported. Follow the steps above to trust it on your devices.");
     if (adapters.tracking) {
       adapters.tracking.run(adapters);
     }
