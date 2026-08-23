@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.3.1] - 2026-08-23
+
+### Fixed
+- **step-ca APT key 404** (`curl: (22) The requested URL returned error: 404 gpg: no valid OpenPGP data found`): `https://packages.smallstep.com/keys/apt/GPG-KEY.asc` was removed upstream. `STEP_CA_INSTALL` now uses `https://packages.smallstep.com/keys/apt/repo-signing-key.gpg` → `/etc/apt/keyrings/smallstep.asc` and `DEB822` `smallstep.sources` (`Types: deb URIs: https://packages.smallstep.com/stable/debian Suites: debs`) per https://smallstep.com/docs/step-ca/installation. Retry after `pct stop 102; pct destroy 102` and `curl -fsSL .../main/install-native.sh | bash`.
+
 ## [1.3.0] - 2026-08-23
 
 ### Added

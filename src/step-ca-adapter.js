@@ -12,14 +12,14 @@ const STEP_CA_INSTALL = Object.freeze([
     binary: "/bin/bash",
     args: [
       "-c",
-      "curl -fsSL https://packages.smallstep.com/keys/apt/GPG-KEY.asc | gpg --dearmor -o /usr/share/keyrings/smallstep-archive-keyring.gpg"
+      "mkdir -p /etc/apt/keyrings && curl -fsSL https://packages.smallstep.com/keys/apt/repo-signing-key.gpg -o /etc/apt/keyrings/smallstep.asc"
     ]
   },
   {
     binary: "/bin/bash",
     args: [
       "-c",
-      "echo 'deb [signed-by=/usr/share/keyrings/smallstep-archive-keyring.gpg] https://packages.smallstep.com/stable/debian stable main' > /etc/apt/sources.list.d/smallstep.list"
+      "cat > /etc/apt/sources.list.d/smallstep.sources <<'EOS'\nTypes: deb\nURIs: https://packages.smallstep.com/stable/debian\nSuites: debs\nComponents: main\nSigned-By: /etc/apt/keyrings/smallstep.asc\nEOS"
     ]
   },
   { binary: "/usr/bin/apt-get", args: ["update"] },
