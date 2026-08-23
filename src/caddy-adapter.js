@@ -129,7 +129,7 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
         try { secretResolver.resolve(request.connectionSecretReference); } catch {}
       }
       await ensureServers(httpClient, endpoint);
-      const newRoute = buildManagedRoute(request.hostname, request.backendIp, request.backendPort);
+      const newRoute = buildManagedRoute(request.hostname, request.backendIp, request.backendPort, request.backendTls === true);
       const desiredPolicy = { subjects: [request.hostname], issuers: [issuerFor(request)] };
       await upsertRoute(httpClient, endpoint, TLS_SERVER, request.hostname, [newRoute]);
       if (request.httpRedirect === true) {
@@ -491,11 +491,18 @@ async function apiDelete(httpClient, endpoint, path) {
   return null;
 }
 
-function buildManagedRoute(hostname, backendIp, backendPort) {
+function buildManagedRoute(hostname, backendIp, backendPort, backendTls = false) {
   return {
     "@id": hostname,
     match: [{ host: [hostname] }],
-    handle: [{ handler: "reverse_proxy", upstreams: [{ dial: `${backendIp}:${backendPort}` }] }],
+    handle: [{
+      handler: "reverse_proxy",
+      upstreams: [{ dial: `${backendIp}:${backendPort}` }],
+      // Some backends (Proxmox, OPNsense, ...) are HTTPS-only. Caddy then
+      // dials them over TLS; their self-signed certs are not trusted by the
+      // container, hence skip-verify on the internal hop only.
+      ...(backendTls ? { transport: { protocol: "http", tls: { insecure_skip_verify: true } } } : {})
+    }],
     terminal: true
   };
 }

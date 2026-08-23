@@ -462,10 +462,11 @@ export async function runInteractiveApp(adapters) {
     if (!Number.isInteger(backendPort) || backendPort <= 0) {
       throw new Error(`Invalid backend port: ${backendPortRaw}.`);
     }
-    const result = await adapters.runCommand(
-      ["exposure", "publish", "--name", svc.name, "--hostname", svc.exposure.hostname, "--backend-ip", backendIp, "--backend-port", String(backendPort)],
-      adapters
-    );
+    const publishArgs = ["exposure", "publish", "--name", svc.name, "--hostname", svc.exposure.hostname, "--backend-ip", backendIp, "--backend-port", String(backendPort)];
+    if (svc.exposure.backend.tls === true) {
+      publishArgs.push("--backend-tls");
+    }
+    const result = await adapters.runCommand(publishArgs, adapters);
     clack.outro("Exposure updated.");
     if (adapters.tracking) {
       adapters.tracking.run(adapters);
@@ -808,8 +809,14 @@ export async function promptExposureOptions(project, existingOptions, prompts) {
     ?? await askRequired(prompts, "Backend IP", validateIp);
   const backendPort = existingOptions.backendPort
     ?? Number(await askPrompt(prompts, "Backend port", "8080"));
+  const backendTls = existingOptions.backendTls
+    ?? await confirmPrompt(
+      prompts,
+      "Does the backend serve HTTPS/TLS itself? (e.g. Proxmox :8006, OPNsense)",
+      false
+    );
 
-  return { ...existingOptions, name, hostname, backendIp, backendPort };
+  return { ...existingOptions, name, hostname, backendIp, backendPort, backendTls };
 }
 
 async function askPrompt(prompts, question, fallback = undefined) {

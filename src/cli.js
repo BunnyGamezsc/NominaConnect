@@ -1330,7 +1330,8 @@ async function changeBaseDomain(options, adapters) {
           name: service.name,
           hostname: service.exposure.hostname,
           backendIp: service.exposure.backend.ip,
-          backendPort: Number(service.exposure.backend.port)
+          backendPort: Number(service.exposure.backend.port),
+          backendTls: service.exposure.backend.tls === true
         },
         providerAdapters
       });
@@ -1396,7 +1397,8 @@ async function handleCaddyCommand(argumentsList, adapters) {
         name: service.name,
         hostname: service.exposure.hostname,
         backendIp: service.exposure.backend.ip,
-        backendPort: Number(service.exposure.backend.port)
+        backendPort: Number(service.exposure.backend.port),
+        backendTls: service.exposure.backend.tls === true
       },
       providerAdapters
     });
@@ -1644,9 +1646,11 @@ function parseExposurePublishOptions(rawOptions) {
     ["--name", "name"],
     ["--hostname", "hostname"],
     ["--backend-ip", "backendIp"],
-    ["--backend-port", "backendPort"]
+    ["--backend-port", "backendPort"],
+    ["--backend-tls", "backendTls"]
   ]);
-  parseFlagOptions(rawOptions, optionNames, options);
+  const booleanFlags = new Set(["--backend-tls"]);
+  parseFlagOptions(rawOptions, optionNames, options, booleanFlags);
   if (options.backendPort !== undefined) {
     options.backendPort = Number(options.backendPort);
   }

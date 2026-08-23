@@ -41,8 +41,7 @@ export async function publishManagedExposure({
     throw new Error(`${proxyLabel} provider adapter is unavailable.`);
   }
 
-  const { name, hostname, backendIp, backendPort } = options;
-  const dnsRef = project.state.providerReferences[dnsService.id];
+  const { name, hostname, backendIp, backendPort } = options;  const dnsRef = project.state.providerReferences[dnsService.id];
   const proxyRef = project.state.providerReferences[proxyService.id];
   const publishRequest = {
     managedItemId: dnsService.id,
@@ -79,6 +78,7 @@ export async function publishManagedExposure({
     hostname,
     backendIp,
     backendPort,
+    backendTls: options.backendTls === true,
     protocol: "https",
     caStrategy,
     tls: tlsOptions,
@@ -184,7 +184,11 @@ export async function publishManagedExposure({
     name,
     exposure: {
       hostname,
-      backend: { ip: backendIp, port: backendPort },
+      backend: {
+        ip: backendIp,
+        port: backendPort,
+        ...(options.backendTls === true ? { tls: true } : {})
+      },
       protocol: "https",
       certificateAuthority: caStrategy,
       tls: {

@@ -362,6 +362,9 @@ function appendManagedServices(lines, services) {
         "        backend:",
         `          ip: ${yamlScalar(service.exposure.backend.ip)}`,
         `          port: ${service.exposure.backend.port}`,
+        ...(service.exposure.backend.tls !== undefined
+          ? [`          tls: ${service.exposure.backend.tls === true}`]
+          : []),
         `        protocol: ${yamlScalar(service.exposure.protocol)}`
       );
       if (service.exposure.certificateAuthority !== undefined) {
