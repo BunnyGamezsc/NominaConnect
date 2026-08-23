@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.3.14] - 2026-08-23 (Dev/Pre-release)
+
+### Fixed
+- **step-ca exposures failed ACME issuance: `x509: cannot validate certificate for <caIp> because it doesn't contain any IP SANs`** (live exposure trial on `nuc`):
+  - ACME directory URL now uses the CA **hostname** `step-ca.<baseLocalDomain>` instead of the bare IP (`src/exposure.js` `tls.caHost`, `src/caddy-adapter.js` `issuerFor` prefers hostname, IP kept as fallback for older projects).
+  - `step ca init` now requests the SAN: `--dns "$(hostname -f),localhost,step-ca.<zone>"` (`src/step-ca-adapter.js`).
+  - `exposure publish` prepares the Caddy LXC before issuance: pins `<caIp> step-ca.<zone>` into `/etc/hosts` and installs the CA root into `/usr/local/share/ca-certificates` + `update-ca-certificates` (`src/cli.js`, idempotent).
+- **Caddy restart wiped all published routes and TLS policies** (admin-API config is ephemeral; unit loaded only `/etc/caddy/Caddyfile`): installer writes systemd drop-in `nomina-persistence.conf` that prefers persisted `/etc/caddy/caddy.json`; publish/remove now dump live config to that file after every mutation (`src/cli.js`).
+
 ## [1.3.13] - 2026-08-23 (Dev/Pre-release)
 
 ### Fixed
