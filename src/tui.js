@@ -1,5 +1,6 @@
 import * as clack from "@clack/prompts";
 import { INITIAL_PLATFORM_CATALOG } from "./catalog.js";
+import { canShowCaTrustGuide } from "./ca-guide.js";
 import { findProjectDirectory, loadProject } from "./config.js";
 import { TECHNITIUM_DEPLOYMENT, CADDY_DEPLOYMENT, TRAEFIK_DEPLOYMENT, STEP_CA_DEPLOYMENT, TAILSCALE_DEPLOYMENT, NETBIRD_DEPLOYMENT, defaultGatewayFor } from "./provisioning.js";
 import { formatPendingNotices } from "./tracking.js";
@@ -189,6 +190,13 @@ export function buildMenuOptions(project) {
       hint: "connect DNS and HTTPS routing"
     });
   }
+  if (project !== undefined && canShowCaTrustGuide(project)) {
+    options.push({
+      value: "view-ca-guide",
+      label: "View step-ca trust guide",
+      hint: "install CA root on devices"
+    });
+  }
   if (project !== undefined && hasProvisionedServices(project)) {
     options.push({
       value: "upgrade-service",
@@ -350,6 +358,17 @@ export async function runInteractiveApp(adapters) {
   if (action === "publish-exposure") {
     const result = await adapters.runCommand(["exposure", "publish"], adapters);
     clack.outro("Exposure published.");
+    if (adapters.tracking) {
+      adapters.tracking.run(adapters);
+    }
+    return result;
+  }
+  if (action === "view-ca-guide") {
+    const result = await adapters.runCommand(["ca", "guide"], adapters);
+    if (result.stdout) {
+      clack.log.info(result.stdout.trim());
+    }
+    clack.outro("Trust guide displayed.");
     if (adapters.tracking) {
       adapters.tracking.run(adapters);
     }

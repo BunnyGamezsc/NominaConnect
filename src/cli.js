@@ -17,6 +17,7 @@ import {
   formatChangesDetail,
   clearPendingNotices
 } from "./tracking.js";
+import { getStepCaTrustGuide } from "./ca-guide.js";
 import {
   promptCaddyOptions,
   promptExposureOptions,
@@ -60,6 +61,8 @@ async function runCommand(command, rest, adapters) {
       return showChanges(rest, adapters);
     case "secret":
       return handleSecretCommand(rest, adapters);
+    case "ca":
+      return handleCaCommand(rest, adapters);
     default:
       throw new Error("Unknown command. Run nomina for the interactive menu.");
   }
@@ -137,6 +140,83 @@ async function handleSecretCommand(argumentsList, adapters) {
     throw new Error("Run nomina for the interactive menu, or use: nomina secret change");
   }
   return changeConnectionSecret(parseSecretChangeOptions(rest), adapters);
+}
+
+async function handleCaCommand(argumentsList, adapters) {
+  const [subcommand, ...rest] = argumentsList;
+  if (subcommand !== "guide" && subcommand !== "trust" && subcommand !== "cert" && subcommand !== undefined) {
+    throw new Error("Run nomina for the interactive menu, or use: nomina ca guide|cert");
+  }
+  const effectiveSubcommand = subcommand ?? "guide";
+  if (effectiveSubcommand === "guide" || effectiveSubcommand === "trust") {
+    return showCaTrustGuide(parseCaGuideOptions(rest), adapters);
+  }
+  if (effectiveSubcommand === "cert") {
+    return showCaCertificate(parseCaGuideOptions(rest), adapters);
+  }
+  throw new Error("Run nomina for the interactive menu, or use: nomina ca guide|cert");
+}
+
+async function showCaTrustGuide(options, adapters) {
+  const { filesystem } = adapters;
+  const project = loadProject(filesystem, options.projectDir);
+  const caService = project.config.managedInventory.platform.certificateAuthority;
+  if (caService?.service !== "step-ca") {
+    throw new Error("step-ca is not selected as the certificate authority for this project. The trust guide is only for step-ca.");
+  }
+  if (project.state.providerReferences[caService.id] === undefined) {
+    throw new Error("step-ca is not yet provisioned. Provision it first, then run nomina ca guide.");
+  }
+  const guide = getStepCaTrustGuide(project);
+  return { stdout: guide + "\n" };
+}
+
+async function showCaCertificate(options, adapters) {
+  const { filesystem, proxmox, providerAdapters = {} } = adapters;
+  const project = loadProject(filesystem, options.projectDir);
+  const caService = project.config.managedInventory.platform.certificateAuthority;
+  if (caService?.service !== "step-ca") {
+    throw new Error("step-ca is not selected as the certificate authority for this project.");
+  }
+  const caRef = project.state.providerReferences[caService.id];
+  if (caRef === undefined) {
+    throw new Error("step-ca is not yet provisioned.");
+  }
+  const vmid = caRef.vmid;
+  if (proxmox?.pctExec) {
+    try {
+      const result = await proxmox.pctExec(vmid, { binary: "/bin/cat", args: ["/var/lib/stepca/certs/root_ca.crt"] });
+      if (result.stdout && result.stdout.includes("BEGIN CERTIFICATE")) {
+        return { stdout: result.stdout + (result.stdout.endsWith("\n") ? "" : "\n") };
+      }
+    } catch {}
+    try {
+      const fallback = await proxmox.pctExec(vmid, { binary: "/bin/cat", args: ["/root/.step/certs/root_ca.crt"] });
+      if (fallback.stdout && fallback.stdout.includes("BEGIN CERTIFICATE")) {
+        return { stdout: fallback.stdout + (fallback.stdout.endsWith("\n") ? "" : "\n") };
+      }
+    } catch {}
+  }
+  const httpClient = providerAdapters["step-ca"]?.httpClient ?? adapters.httpClient;
+  if (httpClient) {
+    try {
+      const endpoint = caRef.ip ? `https://${caRef.ip}:9000` : undefined;
+      if (endpoint) {
+        const result = await httpClient.request({ method: "GET", url: `${endpoint}/roots.pem`, headers: {}, redactions: [] });
+        if (result.status === 200 && result.body.includes("BEGIN CERTIFICATE")) {
+          return { stdout: result.body + (result.body.endsWith("\n") ? "" : "\n") };
+        }
+      }
+    } catch {}
+  }
+  throw new Error(`Could not fetch step-ca root certificate from LXC ${vmid}. Try: pct exec ${vmid} -- cat /var/lib/stepca/certs/root_ca.crt`);
+}
+
+function parseCaGuideOptions(rawOptions) {
+  const options = {};
+  const optionNames = new Map([["--project-dir", "projectDir"]]);
+  parseFlagOptions(rawOptions, optionNames, options);
+  return options;
 }
 
 async function changeConnectionSecret(options, adapters) {

@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.3.7] - 2026-08-23 (Dev/Pre-release)
+
+### Added
+- **step-ca trust guide** (`nomina ca guide` / `View step-ca trust guide`): `src/ca-guide.js` `getStepCaTrustGuide` prints CA IP/vmid-aware instructions to fetch `root_ca.crt` (`pct exec <vmid> -- cat /var/lib/stepca/certs/root_ca.crt` or `curl -k https://<caIp>:9000/roots.pem`) and install on macOS/Windows/Linux/iOS/Android/Firefox; `nomina ca cert` exports the cert via `pct exec` or `https://<caIp>:9000/roots.pem`. Answers "when I add a new exposure, will it get a step-ca cert?" — yes, when `step-ca` is selected and provisioned, `Caddy` requests via `ACME https://<caIp>:9000/acme/acme/directory` with `tls.trusted:true`; without trusting the root, browsers show untrusted but still HTTPS.
+
 ## [1.3.6] - 2026-08-23 (Dev/Pre-release)
 
 ### Changed
