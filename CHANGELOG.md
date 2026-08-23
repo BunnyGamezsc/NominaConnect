@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.3.15] - 2026-08-23
+
+Stable release: squash of dev v1.3.6–v1.3.14 plus new features below.
+
+### Added
+- **Change the local domain from the CLI/TUI** (`nomina domain change <new-domain>`, TUI `Change the local domain`): migrates every exposure to a new base local domain end-to-end — renames hostnames in `nomina.yaml`, cleans up old Technitium records and Caddy routes (cleanup failures become non-blocking warnings), extends step-ca `dnsNames` SANs for `step-ca.<new-domain>` and restarts it, re-pins/re-trusts the CA in the Caddy LXC, republishes each exposure (fresh ACME certs under the new names), and persists live Caddy config.
+- **Export the step-ca root certificate** (`nomina ca export [--output step-ca-root.crt]`, TUI `Export step-ca root certificate`): fetches the root (via `pct exec`, HTTPS fallback), writes it to disk, and prints scp retrieval plus per-device install steps (macOS/Windows/Linux/Firefox/iOS/Android).
+
+### Fixed
+- **Exposure DNS pointed at backend instead of Caddy** — Technitium `A` now publishes the reverse-proxy IP; backend only in Caddy's `reverse_proxy` dial.
+- **step-ca exposures failed ACME issuance** (`x509: ... no IP SANs`) — ACME directory URL uses the CA hostname (`step-ca.<baseLocalDomain>`), init requests that SAN, and publish pins/trusts the CA name+root in the Caddy LXC before issuing.
+- **Caddy restart wiped published routes/TLS policies** — installer adds a systemd drop-in preferring persisted `/etc/caddy/caddy.json`; publish/remove dump live config after each mutation.
+- Exposure remove/edit picker fixes (NominaConnect ID resolution, platform-key collision).
+
 ## [1.3.14] - 2026-08-23 (Dev/Pre-release)
 
 ### Fixed
