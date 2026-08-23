@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.4.4] - 2026-08-23 (Dev/Pre-release)
+
+### Fixed
+- **HTTP→HTTPS redirect silently never worked on Caddy 2.11.4** — the `protocol` request matcher is silently never matched by that build, so HTTPS requests matched no route and Caddy's JSON-mode default answered an empty `200` (and with redirects off, plain HTTP proxied cleartext). Routes now live on **two dedicated servers** — `srv_https` (:443, TLS routes) and `srv_http` (:80, 308 redirects) — eliminating protocol matchers entirely.
+- **Automatic legacy migration**: `publishRoute` migrates old single-server configs (`srv0`) into the new servers — host routes → `srv_https`, hostless catch-alls → `srv_http`, stale scheme pins stripped, then `srv0` removed. Existing containers upgrade in place on the next publish; no manual wipe needed.
+
 ## [1.4.3] - 2026-08-23
 
 Stable release: v1.4.2 fixes plus nuclear uninstall. Includes everything since v1.3.15 (HTTP→HTTPS auto-redirect, exposure health retry, Technitium-based LXC DNS, `nomina --version`).
