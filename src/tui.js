@@ -791,11 +791,7 @@ export async function promptRemoveServiceName(project, prompts) {
       choices.push({ value: item.service, label: `${item.service} (${key})`, hint: `LXC vmid ${project.state.providerReferences[item.id].vmid}` });
     }
   }
-  for (const s of project.config.managedInventory.services ?? []) {
-    if (s && project.state.providerReferences[s.id]) {
-      choices.push({ value: s.name ?? s.exposure?.hostname, label: `${s.name} (exposure)`, hint: s.exposure?.hostname });
-    }
-  }
+  // Exposures are not platform services - use promptExposureServiceName / Remove an exposure
   if (choices.length === 0) {
     throw new Error("No provisioned services found to remove.");
   }
