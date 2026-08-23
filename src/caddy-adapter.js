@@ -80,7 +80,7 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
       let routes;
       let policies;
       try {
-        routes = await listRoutes(httpClient, endpoint);
+        routes = await listRoutes(httpClient, endpoint, TLS_SERVER);
         policies = await listTlsPolicies(httpClient, endpoint);
       } catch (error) {
         if (isUnreachable(error)) {
@@ -94,7 +94,7 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
     async adopt(request) {
       const locators = new Map();
       for (const resource of request.managed ?? []) {
-        const key = locatorKey(resource.locator ?? { host: resource.id, configPath: `/config/apps/http/servers/srv0/routes/${resource.id}` });
+        const key = locatorKey(resource.locator ?? { host: resource.id, configPath: `/config/apps/http/servers/${TLS_SERVER}/routes/${resource.id}` });
         locators.set(key, (locators.get(key) ?? 0) + 1);
       }
       const ambiguous = [...locators.entries()].filter(([, count]) => count > 1).map(([key]) => key);
@@ -128,12 +128,17 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
       if (request.connectionSecretReference !== undefined) {
         try { secretResolver.resolve(request.connectionSecretReference); } catch {}
       }
-      await ensureHttpServer(httpClient, endpoint);
+      await ensureServers(httpClient, endpoint);
       const newRoute = buildManagedRoute(request.hostname, request.backendIp, request.backendPort);
       const desiredPolicy = { subjects: [request.hostname], issuers: [issuerFor(request)] };
-      await upsertRoute(httpClient, endpoint, request.hostname, newRoute, request.httpRedirect === true);
+      await upsertRoute(httpClient, endpoint, TLS_SERVER, request.hostname, [newRoute]);
+      if (request.httpRedirect === true) {
+        await upsertRoute(httpClient, endpoint, HTTP_SERVER, request.hostname, [buildRedirectRoute(request.hostname)]);
+      } else {
+        await removeRedirect(httpClient, endpoint, request.hostname);
+      }
       await upsertTlsPolicy(httpClient, endpoint, desiredPolicy);
-      const locator = { host: request.hostname, configPath: `/config/apps/http/servers/srv0/routes/${request.hostname}` };
+      const locator = { host: request.hostname, configPath: `/config/apps/http/servers/${TLS_SERVER}/routes/${request.hostname}` };
       return {
         id: request.hostname,
         locator,
@@ -143,6 +148,7 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
     },
     async unpublishRoute(request) {
       const endpoint = resolveEndpoint(request);
+      await ensureServers(httpClient, endpoint);
       const routes = await listRoutes(httpClient, endpoint);
       const existing = routes.find((r) => hostForRoute(r) === request.hostname);
       const existingRedirect = routes.find((r) => r["@id"] === `${request.hostname}${REDIRECT_SUFFIX}`);
@@ -159,7 +165,12 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
           }
         }
         const remaining = routes.filter((r) => !isManagedRouteFor(r, request.hostname));
-        await replaceMapValue(httpClient, endpoint, "/config/apps/http/servers/srv0/routes", remaining);
+        await replaceMapValue(httpClient, endpoint, tlsRoutesPath(), remaining);
+        const httpRoutesNow = await listRoutes(httpClient, endpoint, HTTP_SERVER);
+        const remainingHttp = httpRoutesNow.filter((r) => !isManagedRouteFor(r, request.hostname));
+        if (remainingHttp.length !== httpRoutesNow.length) {
+          await replaceMapValue(httpClient, endpoint, httpRoutesPath(), remainingHttp);
+        }
       }
       if (existingPolicy !== undefined) {
         const remainingPolicies = policies.filter((policy) => !policy.subjects?.includes(request.hostname));
@@ -175,7 +186,7 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
       let routes;
       let policies;
       try {
-        routes = await listRoutes(httpClient, endpoint);
+        routes = await listRoutes(httpClient, endpoint, TLS_SERVER);
         policies = await listTlsPolicies(httpClient, endpoint);
       } catch (error) {
         if (isUnreachable(error)) {
@@ -209,9 +220,23 @@ function resolveEndpoint(request) {
   return `http://127.0.0.1:${CADDY_ADMIN_PORT}`;
 }
 
-async function listRoutes(httpClient, endpoint) {
+const TLS_SERVER = "srv_https";
+const HTTP_SERVER = "srv_http";
+
+// Caddy 2.11.x silently never matches the "protocol" request matcher, so
+// scheme separation is done with two servers instead: srv_https (:443) holds
+// the TLS routes, srv_http (:80) holds the 308 redirects.
+function tlsRoutesPath() {
+  return `/config/apps/http/servers/${TLS_SERVER}/routes`;
+}
+
+function httpRoutesPath() {
+  return `/config/apps/http/servers/${HTTP_SERVER}/routes`;
+}
+
+async function listRoutes(httpClient, endpoint, server = TLS_SERVER) {
   try {
-    const payload = await apiGet(httpClient, endpoint, "/config/apps/http/servers/srv0/routes");
+    const payload = await apiGet(httpClient, endpoint, `/config/apps/http/servers/${server}/routes`);
     if (Array.isArray(payload)) {
       return payload;
     }
@@ -252,28 +277,54 @@ async function listTlsPolicies(httpClient, endpoint) {
   }
 }
 
-async function ensureHttpServer(httpClient, endpoint) {
+// Creates the dedicated :443/:80 servers when missing, and migrates any
+// legacy single-server config (srv0) into them: host routes belong to the
+// HTTPS server, hostless catch-alls to the HTTP server. srv0 is then removed.
+async function ensureServers(httpClient, endpoint) {
+  let servers = {};
   try {
-    await apiGet(httpClient, endpoint, "/config/apps/http/servers/srv0");
+    servers = await apiGet(httpClient, endpoint, "/config/apps/http/servers") ?? {};
   } catch (error) {
-    if (/404|not found|no such|invalid traversal|cannot unmarshal|invalid array index|400/.test(error.message)) {
-      try {
-        await apiPut(httpClient, endpoint, "/config/apps/http/servers/srv0", { listen: [":80", ":443"], routes: [] });
-      } catch (putError) {
-        if (!/already exists|409/.test(putError.message ?? "")) {
-          throw putError;
-        }
-      }
-    } else {
+    if (!/404|400|invalid traversal|not found/i.test(error.message)) {
       throw error;
     }
   }
+
+  const legacyRoutes = Array.isArray(servers.srv0?.routes) ? servers.srv0.routes : [];
+  const httpsRoutes = [];
+  const httpRoutes = [];
+  for (const route of legacyRoutes) {
+    // Drop stale scheme pins from older publishes; servers carry the scheme now.
+    for (const matcher of route.match ?? []) {
+      delete matcher.protocol;
+    }
+    (hasHostMatcher(route) ? httpsRoutes : httpRoutes).push(route);
+  }
+
+  const existingHttps = servers[TLS_SERVER];
+  const existingHttp = servers[HTTP_SERVER];
+
+  if (existingHttps === undefined) {
+    await apiPut(httpClient, endpoint, `/config/apps/http/servers/${TLS_SERVER}`, { listen: [":443"], routes: httpsRoutes });
+  } else if (httpsRoutes.length > 0) {
+    await replaceMapValue(httpClient, endpoint, tlsRoutesPath(), [...(existingHttps.routes ?? []), ...httpsRoutes]);
+  }
+
+  if (existingHttp === undefined) {
+    await apiPut(httpClient, endpoint, `/config/apps/http/servers/${HTTP_SERVER}`, { listen: [":80"], routes: httpRoutes });
+  } else if (httpRoutes.length > 0) {
+    await replaceMapValue(httpClient, endpoint, httpRoutesPath(), [...(existingHttp.routes ?? []), ...httpRoutes]);
+  }
+
+  if (servers.srv0 !== undefined) {
+    await apiDelete(httpClient, endpoint, "/config/apps/http/servers/srv0");
+  }
 }
 
-async function upsertRoute(httpClient, endpoint, hostname, newRoute, httpRedirect = false) {
-  const routes = await listRoutes(httpClient, endpoint);
+async function upsertRoute(httpClient, endpoint, server, hostname, additions) {
+  const path = `/config/apps/http/servers/${server}/routes`;
+  const routes = await listRoutes(httpClient, endpoint, server);
   const remaining = routes.filter((r) => !isManagedRouteFor(r, hostname));
-  const additions = httpRedirect ? [newRoute, buildRedirectRoute(hostname)] : [newRoute];
   const catchAllIndex = remaining.findIndex((r) => !hasHostMatcher(r));
   if (catchAllIndex === -1) {
     remaining.push(...additions);
@@ -281,7 +332,15 @@ async function upsertRoute(httpClient, endpoint, hostname, newRoute, httpRedirec
     // Host-specific routes must precede hostless catch-alls or they are shadowed
     remaining.splice(catchAllIndex, 0, ...additions);
   }
-  await replaceMapValue(httpClient, endpoint, "/config/apps/http/servers/srv0/routes", remaining);
+  await replaceMapValue(httpClient, endpoint, path, remaining);
+}
+
+async function removeRedirect(httpClient, endpoint, hostname) {
+  const routes = await listRoutes(httpClient, endpoint, HTTP_SERVER);
+  const filtered = routes.filter((r) => r["@id"] !== `${hostname}${REDIRECT_SUFFIX}`);
+  if (filtered.length !== routes.length) {
+    await replaceMapValue(httpClient, endpoint, httpRoutesPath(), filtered);
+  }
 }
 
 async function upsertTlsPolicy(httpClient, endpoint, desiredPolicy) {
@@ -317,7 +376,7 @@ async function tlsAppExists(httpClient, endpoint) {
 
 async function managedFingerprintFor(httpClient, endpoint, hostname) {
   const [routes, policies] = await Promise.all([
-    listRoutes(httpClient, endpoint),
+    listRoutes(httpClient, endpoint, TLS_SERVER),
     listTlsPolicies(httpClient, endpoint)
   ]);
   const route = routes.find((r) => hostForRoute(r) === hostname);
@@ -325,7 +384,7 @@ async function managedFingerprintFor(httpClient, endpoint, hostname) {
     return null;
   }
   const policy = policies.find((entry) => entry.subjects?.includes(hostname));
-  const locator = { host: hostname, configPath: `/config/apps/http/servers/srv0/routes/${hostname}` };
+  const locator = { host: hostname, configPath: `/config/apps/http/servers/${TLS_SERVER}/routes/${hostname}` };
   return fingerprintFor(locator, { route, tls: policy });
 }
 
@@ -409,9 +468,7 @@ async function apiDelete(httpClient, endpoint, path) {
 function buildManagedRoute(hostname, backendIp, backendPort) {
   return {
     "@id": hostname,
-    // Scheme-pinned: without this the route also matches plain :80 traffic
-    // (shadowing any HTTP->HTTPS redirect) and proxies it in cleartext.
-    match: [{ host: [hostname], protocol: "https://" }],
+    match: [{ host: [hostname] }],
     handle: [{ handler: "reverse_proxy", upstreams: [{ dial: `${backendIp}:${backendPort}` }] }],
     terminal: true
   };
@@ -485,7 +542,7 @@ function hostForRoute(route) {
 
 function toManagedResource(route, policies = []) {
   const host = hostForRoute(route) ?? route["@id"] ?? "unknown";
-  const locator = { host, configPath: `/config/apps/http/servers/srv0/routes/${host}` };
+  const locator = { host, configPath: `/config/apps/http/servers/${TLS_SERVER}/routes/${host}` };
   const dial = route.handle?.[0]?.upstreams?.[0]?.dial;
   const policy = policies.find((entry) => entry.subjects?.includes(host));
   const tls = tlsSummaryFor(policy?.issuers?.[0]);

@@ -91,13 +91,12 @@ test("publishRoute adds an HTTP->HTTPS redirect route when httpRedirect is enabl
   const fake = new FakeCaddyAdmin();
   await createAdapter(fake).publishRoute(stepCaRequest({ httpRedirect: true }));
 
-  const routes = fake.config.apps.http.servers.srv0.routes;
+  const routes = fake.config.apps.http.servers.srv_https.routes;
   const tlsRoute = routes.find((route) => route["@id"] === "dns.bunny.internal");
-  const redirectRoute = routes.find((route) => route["@id"] === "dns.bunny.internal-auto-http");
+  const redirectRoute = (fake.config.apps.http.servers.srv_http?.routes ?? [])
+    .find((route) => route["@id"] === "dns.bunny.internal-auto-http");
 
   assert.notEqual(tlsRoute, undefined, "TLS route must still exist");
-  assert.equal(tlsRoute.match[0].protocol, "https://",
-    "TLS route must be scheme-pinned, otherwise it matches plain :80 traffic and shadows the redirect");
   assert.notEqual(redirectRoute, undefined, "redirect route must be created");
   assert.deepEqual(redirectRoute.match, [{ host: ["dns.bunny.internal"], protocol: "http://" }]);
   assert.equal(redirectRoute.handle[0].handler, "static_response");
@@ -112,11 +111,11 @@ test("publishRoute does not add a redirect route by default", async () => {
   const fake = new FakeCaddyAdmin();
   await createAdapter(fake).publishRoute(stepCaRequest());
 
-  const routes = fake.config.apps.http.servers.srv0.routes;
+  const routes = fake.config.apps.http.servers.srv_https.routes;
   assert.equal(routes.some((route) => route["@id"] === "dns.bunny.internal-auto-http"), false);
 });
 
-test("republishing with the redirect stays idempotent and preserves unrelated routes", async () => {
+test("republishing with the redirect stays idempotent and migrates legacy srv0 routes", async () => {
   const fake = new FakeCaddyAdmin({
     apps: { http: { servers: { srv0: { listen: [":80", ":443"], routes: [
       { "@id": "other.bunny.internal", match: [{ host: ["other.bunny.internal"] }], handle: [{ handler: "reverse_proxy", upstreams: [{ dial: "10.0.0.9:80" }] }], terminal: true }
@@ -126,10 +125,16 @@ test("republishing with the redirect stays idempotent and preserves unrelated ro
   await adapter.publishRoute(stepCaRequest({ httpRedirect: true }));
   await adapter.publishRoute(stepCaRequest({ httpRedirect: true }));
 
-  const routes = fake.config.apps.http.servers.srv0.routes;
-  assert.equal(routes.filter((route) => route["@id"] === "dns.bunny.internal").length, 1);
-  assert.equal(routes.filter((route) => route["@id"] === "dns.bunny.internal-auto-http").length, 1);
-  assert.notEqual(routes.find((route) => route["@id"] === "other.bunny.internal"), undefined);
+  const servers = fake.config.apps.http.servers;
+  assert.equal(servers.srv0, undefined, "legacy srv0 must be migrated away");
+  assert.deepEqual(servers.srv_https.listen, [":443"]);
+  assert.deepEqual(servers.srv_http.listen, [":80"]);
+  const httpsRoutes = servers.srv_https.routes;
+  const httpRoutes = servers.srv_http.routes;
+  assert.equal(httpsRoutes.filter((route) => route["@id"] === "dns.bunny.internal").length, 1);
+  assert.notEqual(httpsRoutes.find((route) => route["@id"] === "other.bunny.internal"), undefined,
+    "unrelated host routes from srv0 must land in srv_https");
+  assert.equal(httpRoutes.filter((route) => route["@id"] === "dns.bunny.internal-auto-http").length, 1);
 });
 
 test("unpublishRoute removes both the TLS and redirect routes", async () => {
@@ -138,9 +143,11 @@ test("unpublishRoute removes both the TLS and redirect routes", async () => {
   await adapter.publishRoute(stepCaRequest({ httpRedirect: true }));
   await adapter.unpublishRoute({ hostname: "dns.bunny.internal", ip: "192.168.4.86" });
 
-  const routes = fake.config.apps.http.servers.srv0.routes ?? [];
-  assert.equal(routes.some((route) => route["@id"] === "dns.bunny.internal"), false);
-  assert.equal(routes.some((route) => route["@id"] === "dns.bunny.internal-auto-http"), false);
+  const tlsRoutes = fake.config.apps.http.servers.srv_https.routes ?? [];
+  const httpRoutes = fake.config.apps.http.servers.srv_http?.routes ?? [];
+  assert.equal(tlsRoutes.some((route) => route["@id"] === "dns.bunny.internal"), false);
+  assert.equal(httpRoutes.some((route) => route["@id"] === "dns.bunny.internal-auto-http"), false,
+    "redirect must be removed from srv_http too");
 });
 
 test("inspect does not report the redirect route as a separate managed resource", async () => {
