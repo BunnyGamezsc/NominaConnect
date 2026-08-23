@@ -8,8 +8,9 @@ import {
 } from "./config.js";
 import { publishManagedExposure } from "./exposure.js";
 import { getPlatformProvider } from "./providers.js";
-import { provisionPlatformService } from "./provisioning.js";
+import { provisionPlatformService, resolveServiceDeployment } from "./provisioning.js";
 import { ensureConnectionSecret, updateConnectionSecret } from "./secrets.js";
+import { withBoundedRetry } from "./adoption.js";
 import {
   runTrackingJob,
   formatPendingNotices,
@@ -114,7 +115,12 @@ async function handleServiceCommand(argumentsList, adapters) {
     return destroyService(serviceName, rawOptions, adapters);
   }
 
-  throw new Error("Run nomina for the interactive menu, or use: nomina service add|upgrade|remove|destroy <name>");
+  if (subcommand === "recheck") {
+    const [serviceName, ...rawOptions] = rest[0]?.startsWith("--") ? [undefined, ...rest] : rest;
+    return recheckService(serviceName, rawOptions, adapters);
+  }
+
+  throw new Error("Run nomina for the interactive menu, or use: nomina service add|upgrade|remove|destroy|recheck <name>");
 }
 
 async function handleExposureCommand(argumentsList, adapters) {
@@ -948,6 +954,110 @@ async function destroyService(serviceName, rawOptions, adapters) {
   };
 }
 
+async function recheckService(serviceName, rawOptions, adapters) {
+  const { filesystem, runtime, proxmox, providerAdapters = {}, prompts } = adapters;
+  assertProxmoxShell(runtime);
+  const options = parseServiceRecheckOptions(rawOptions);
+  const project = loadProject(filesystem, options.projectDir);
+  let resolvedServiceName = serviceName;
+  if (resolvedServiceName === undefined) {
+    const loaded = loadProject(filesystem, options.projectDir);
+    resolvedServiceName = await promptServiceName(loaded, prompts);
+  }
+  const platformEntries = Object.entries(project.config.managedInventory.platform);
+  const matchedPlatform = platformEntries.find(
+    ([key, item]) => item?.service === resolvedServiceName || key === resolvedServiceName || item?.id === resolvedServiceName
+  );
+  if (!matchedPlatform || !matchedPlatform[1]) {
+    throw new Error(`Service ${resolvedServiceName} is not configured in this project.`);
+  }
+  const [platformKey, managedItem] = matchedPlatform;
+  const existingRef = project.state.providerReferences?.[managedItem.id];
+  if (existingRef !== undefined) {
+    throw new Error(`Service ${resolvedServiceName} is already provisioned (vmid ${existingRef.vmid}). Use 'nomina service upgrade' or check health.`);
+  }
+  let ip = options.ip;
+  if (ip === undefined) {
+    if (prompts?.ask === undefined) {
+      throw new Error("Static IP is required. Pass --ip <address> or run from an interactive terminal.");
+    }
+    ip = await (async () => {
+      while (true) {
+        const answer = await prompts.ask(`Static IP for ${resolvedServiceName} to recheck`, undefined);
+        if (answer && /^(?:\d{1,3}\.){3}\d{1,3}$/.test(answer.trim())) return answer.trim();
+        if (prompts?.warn) prompts.warn("Enter a valid IPv4 address, for example 10.0.0.53.");
+      }
+    })();
+  }
+  if (!isIpAddress(ip)) {
+    throw new Error(`Invalid static IP: ${ip}.`);
+  }
+  if (proxmox === undefined || typeof proxmox.checkIpAvailability !== "function") {
+    throw new Error("Proxmox adapter is unavailable.");
+  }
+  const availability = await proxmox.checkIpAvailability(ip);
+  if (availability.status !== "known-collision") {
+    throw new Error(`No existing LXC found at ${ip}. Run 'nomina service add ${resolvedServiceName} --ip ${ip}' to create a new one.`);
+  }
+  const vmid = Number(String(availability.conflictWith).split("/")[1] ?? String(availability.conflictWith).replace(/\D/g, ""));
+  if (!Number.isFinite(vmid)) {
+    throw new Error(`Could not determine vmid for ${ip} (${availability.conflictWith}).`);
+  }
+  const lxcInfo = typeof proxmox.inspectLxc === "function" ? await proxmox.inspectLxc(vmid) : {};
+  const providerAdapter = providerAdapters[managedItem.service] ?? providerAdapters.caddy;
+  if (providerAdapter === undefined) {
+    throw new Error(`${resolvedServiceName} provider adapter is unavailable.`);
+  }
+  const connectionSecretReference = project.config.connectionSecretReferences[managedItem.id];
+  // Ensure secret exists (for Technitium etc.)
+  await ensureConnectionSecret(adapters, resolvedServiceName.charAt(0).toUpperCase() + resolvedServiceName.slice(1), connectionSecretReference);
+  const providerContext = {
+    connectionSecretReference,
+    ip,
+    zone: project.config.baseLocalDomain
+  };
+  const plugin = getPlatformProvider(managedItem.service);
+  const health = await withBoundedRetry(
+    () => plugin.healthCheck(providerAdapter, managedItem, providerContext),
+    { maxRetries: 6, baseDelayMs: 2000, backoffFactor: 1.5 }
+  );
+  if (health.status !== "healthy") {
+    throw new Error(`LXC ${vmid} at ${ip} is not healthy (process=${health.process}, endpoint=${health.endpoint}). Check 'pct exec ${vmid} -- systemctl status' and try again.`);
+  }
+  const inspection = await withBoundedRetry(
+    () => plugin.inspect(providerAdapter, managedItem, { ...providerContext, providerReferences: platformKey === "dns" ? [project.config.baseLocalDomain] : [] }),
+    { maxRetries: 6, baseDelayMs: 2000, backoffFactor: 1.5 }
+  );
+  const deployment = {
+    ip,
+    hostname: lxcInfo.hostname ?? `${resolvedServiceName}`,
+    bridge: lxcInfo.bridge ?? project.config.proxmox.defaultBridge,
+    storage: lxcInfo.storage ?? project.config.proxmox.defaultStorage,
+    template: lxcInfo.template ?? project.config.proxmox.defaultStorage,
+    resources: managedItem.deployment?.resources ?? { cpus: 2, memoryMb: 512, diskGb: 4 }
+  };
+  // Prefer actual lxcSpec-like deployment if inspection provides it, but keep our constructed one
+  const updatedConfig = updatePlatformDeployment(project.config, platformKey, deployment);
+  const updatedState = {
+    ...project.state,
+    providerReferences: {
+      ...project.state.providerReferences,
+      [managedItem.id]: { vmid, ip }
+    }
+  };
+  writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
+  writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
+  filesystem.chmod(project.statePath, 0o600);
+  const healthLabel = health.status === "healthy" ? "healthy" : "unhealthy";
+  return {
+    stdout: `Rechecked ${resolvedServiceName}: LXC ${vmid} at ${ip} (${deployment.hostname}) is ${healthLabel} and adopted. Inspected ${inspection?.managed?.length ?? 0} managed resource(s).\n`,
+    health,
+    inspection,
+    vmid,
+    ip
+  };
+}
+
 async function publishExposure(options, adapters) {
   const { filesystem, providerAdapters = {} } = adapters;
   assertProxmoxShell(adapters.runtime);
@@ -1171,6 +1281,16 @@ function parseServiceDestroyOptions(rawOptions) {
   ]);
   const booleanFlags = new Set(["--confirm", "--yes", "-y"]);
   parseFlagOptions(rawOptions, optionNames, options, booleanFlags);
+  return options;
+}
+
+function parseServiceRecheckOptions(rawOptions) {
+  const options = {};
+  const optionNames = new Map([
+    ["--project-dir", "projectDir"],
+    ["--ip", "ip"]
+  ]);
+  parseFlagOptions(rawOptions, optionNames, options);
   return options;
 }
 
