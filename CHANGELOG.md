@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.3.11] - 2026-08-23 (Dev/Pre-release)
+
+### Fixed
+- **Edit an exposure jumped straight to Backend IP** (`src/tui.js:820` `promptExposureServiceName` auto-returned when only one exposure existed). Picker (`Which exposure would you like to manage?`) now always renders, so `Edit an exposure` shows the list first (`src/tui.js:392`).
+
 ## [1.3.10] - 2026-08-23 (Dev/Pre-release)
 
 ### Fixed
