@@ -821,7 +821,7 @@ export async function promptExposureServiceName(project, prompts) {
   const choices = [];
   for (const s of project.config.managedInventory.services ?? []) {
     if (s?.exposure?.hostname) {
-      choices.push({ value: s.name ?? s.exposure.hostname, label: `${s.name} (${s.exposure.hostname})`, hint: `${s.exposure.backend.ip}:${s.exposure.backend.port}` });
+      choices.push({ value: s.id, label: `${s.name} (${s.exposure.hostname})`, hint: `${s.exposure.backend.ip}:${s.exposure.backend.port}` });
     }
   }
   if (choices.length === 0) {
