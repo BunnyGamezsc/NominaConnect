@@ -8,7 +8,7 @@ const CADDY_INSTALL = Object.freeze([
   { binary: "/bin/bash", args: ["-c", "curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt | tee /etc/apt/sources.list.d/caddy-stable.list"] },
   { binary: "/usr/bin/apt-get", args: ["update"] },
   { binary: "/usr/bin/apt-get", args: ["install", "--yes", "caddy"], timeoutMs: 180_000 },
-  { binary: "/bin/bash", args: ["-c", "printf '{\\n  admin 0.0.0.0:2019\\n}\\n' > /etc/caddy/Caddyfile && systemctl enable --now caddy && systemctl restart caddy"], timeoutMs: 30_000 }
+  { binary: "/bin/bash", args: ["-c", "printf '{\\n  admin 0.0.0.0:2019\\n}\\n:80 {\\n  respond \"OK\" 200\\n}\\n' > /etc/caddy/Caddyfile && systemctl enable --now caddy && systemctl restart caddy"], timeoutMs: 30_000 }
 ]);
 
 export function createCaddyAdapter({ httpClient, secretResolver }) {
@@ -106,14 +106,26 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
         if (existingFingerprint === newFingerprint) {
           return { id: request.hostname, locator: { host: request.hostname, configPath: `/config/apps/http/servers/srv0/routes/${request.hostname}` }, fingerprint: newFingerprint, route: formatRoute(request.hostname, newRoute) };
         }
-        await apiPut(httpClient, endpoint, `/config/apps/http/servers/srv0/routes/${encodeURIComponent(request.hostname)}`, newRoute);
+        try {
+          await apiPut(httpClient, endpoint, `/config/apps/http/servers/srv0/routes/${encodeURIComponent(request.hostname)}`, newRoute);
+        } catch (error) {
+          if (/invalid traversal|400/.test(error.message)) {
+            await ensureHttpServer(httpClient, endpoint);
+            await apiPut(httpClient, endpoint, `/config/apps/http/servers/srv0/routes/${encodeURIComponent(request.hostname)}`, newRoute);
+          } else {
+            throw error;
+          }
+        }
       } else {
         const hasIndexPath = routes.length === 0;
         // Use targeted PUT to create at host key; fallback to POST array if needed
         try {
           await apiPut(httpClient, endpoint, `/config/apps/http/servers/srv0/routes/${encodeURIComponent(request.hostname)}`, newRoute);
         } catch (error) {
-          if (hasIndexPath) {
+          if (/invalid traversal|400/.test(error.message)) {
+            await ensureHttpServer(httpClient, endpoint);
+            await apiPut(httpClient, endpoint, `/config/apps/http/servers/srv0/routes/${encodeURIComponent(request.hostname)}`, newRoute);
+          } else if (hasIndexPath) {
             await apiPost(httpClient, endpoint, "/config/apps/http/servers/srv0/routes", newRoute);
           } else {
             throw error;
@@ -212,10 +224,22 @@ async function listRoutes(httpClient, endpoint) {
     return [];
   } catch (error) {
     const msg = error.message ?? "";
-    if (/404|not found|no such/i.test(msg)) {
+    if (/404|not found|no such|invalid traversal/i.test(msg) || /400/.test(msg)) {
       return [];
     }
     throw error;
+  }
+}
+
+async function ensureHttpServer(httpClient, endpoint) {
+  try {
+    await apiGet(httpClient, endpoint, "/config/apps/http/servers/srv0");
+  } catch (error) {
+    if (/404|not found|no such|invalid traversal|400/.test(error.message)) {
+      await apiPut(httpClient, endpoint, "/config/apps/http/servers/srv0", { listen: [":80", ":443"], routes: [] });
+    } else {
+      throw error;
+    }
   }
 }
 
