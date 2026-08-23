@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.3.5] - 2026-08-23
+
+### Fixed
+- **step-ca init succeeded but `Failed to enable unit: Unit step-ca.service does not exist`** (`Generating root certificate... done! ... Your PKI is ready ... Failed to enable unit`): `step ca init` wrote to `/root/.step` (`$HOME/.step`) not `/var/lib/stepca`, and the `step-ca` Debian package provides no systemd unit on `debian-13`. `STEP_CA_INSTALL` now uses `STEPPATH=/var/lib/stepca`, creates `/etc/systemd/system/step-ca.service` (`Environment=STEPPATH=/var/lib/stepca ExecStart=/usr/bin/step-ca --password-file /var/lib/stepca/password.txt /var/lib/stepca/config/ca.json`), `daemon-reload` and `enable --now`. Retry after `pct stop 102; pct destroy 102`.
+
 ## [1.3.3] - 2026-08-23
 
 ### Fixed

@@ -28,7 +28,7 @@ const STEP_CA_INSTALL = Object.freeze([
     binary: "/bin/bash",
     args: [
       "-c",
-      "mkdir -p /var/lib/stepca && [ -f /var/lib/stepca/config/ca.json ] || ( PASSWORD=$(cat /var/lib/stepca/password.txt 2>/dev/null || echo 'nomina-step-ca-$(head -c 12 /dev/urandom | base64)'); echo \"$PASSWORD\" > /var/lib/stepca/password.txt; chmod 600 /var/lib/stepca/password.txt; step ca init --deployment-type standalone --name \"NominaConnect CA\" --dns \"$(hostname -f),localhost\" --address \":9000\" --provisioner admin --password-file /var/lib/stepca/password.txt --acme || true ) && systemctl enable --now step-ca"
+      "mkdir -p /var/lib/stepca && if [ ! -f /var/lib/stepca/config/ca.json ]; then PASSWORD=$(cat /var/lib/stepca/password.txt 2>/dev/null || echo \"nomina-step-ca-$(head -c 12 /dev/urandom | base64)\"); echo \"$PASSWORD\" > /var/lib/stepca/password.txt; chmod 600 /var/lib/stepca/password.txt; STEPPATH=/var/lib/stepca step ca init --deployment-type standalone --name \"NominaConnect CA\" --dns \"$(hostname -f),localhost\" --address \":9000\" --provisioner admin --password-file /var/lib/stepca/password.txt --acme || true; fi && cat > /etc/systemd/system/step-ca.service <<'EOS'\n[Unit]\nDescription=Smallstep CA\nAfter=network.target\n[Service]\nType=simple\nUser=root\nEnvironment=STEPPATH=/var/lib/stepca\nExecStart=/usr/bin/step-ca --password-file /var/lib/stepca/password.txt /var/lib/stepca/config/ca.json\nRestart=always\nRestartSec=5\n[Install]\nWantedBy=multi-user.target\nEOS\nsystemctl daemon-reload && systemctl enable --now step-ca"
     ],
     timeoutMs: 30_000
   }
