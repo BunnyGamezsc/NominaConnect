@@ -185,9 +185,19 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
       ? (project.config.managedInventory.services ?? []).map((s) => s.exposure?.hostname).filter(Boolean)
       : [];
 
+    const inspectionContext = {
+      providerReferences,
+      connectionSecretReference: project.config.connectionSecretReferences?.[managedItem.id],
+      ip: providerRef.ip ?? (managedItem.service === "caddy-internal-ca" ? project.state.providerReferences?.[project.config.managedInventory.platform.reverseProxy?.id]?.ip : undefined),
+      zone: project.config.baseLocalDomain
+    };
+
     try {
       const inspection = await withBoundedRetry(
-        () => inspectPlatformService(adapter, managedItem, providerReferences),
+        () => {
+          const plugin = getPlatformProvider(managedItem.service);
+          return plugin.inspect(adapter, managedItem, inspectionContext);
+        },
         retryOptions
       );
       if (inspection === undefined) {
@@ -207,7 +217,10 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
       };
 
       const health = await withBoundedRetry(
-        () => getPlatformProvider(managedItem.service).healthCheck(adapter, managedItem),
+        () => {
+          const plugin = getPlatformProvider(managedItem.service);
+          return plugin.healthCheck(adapter, managedItem, inspectionContext);
+        },
         retryOptions
       );
 
@@ -265,8 +278,14 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
     if (proxyAdapter !== undefined && proxyRef !== undefined) {
       try {
         const proxyPlugin = getPlatformProvider(proxyService.service);
+        const proxyInspectionContext = {
+          providerReferences: [hostname],
+          connectionSecretReference: project.config.connectionSecretReferences?.[proxyService.id],
+          ip: proxyRef.ip,
+          zone: project.config.baseLocalDomain
+        };
         const proxyInspection = await withBoundedRetry(
-          () => proxyPlugin.inspect(proxyAdapter, proxyService, { providerReferences: [hostname] }),
+          () => proxyPlugin.inspect(proxyAdapter, proxyService, proxyInspectionContext),
           retryOptions
         );
         const matchedRoutes = proxyInspection?.managed?.filter((r) => r.id === hostname) ?? [];
@@ -296,7 +315,7 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
             };
             const health = proxyAdapter.healthCheckExposure
               ? await withBoundedRetry(
-                  () => proxyAdapter.healthCheckExposure({ hostname, backendIp: newBackend.ip, backendPort: newBackend.port }),
+                  () => proxyAdapter.healthCheckExposure({ hostname, backendIp: newBackend.ip, backendPort: newBackend.port, ip: proxyRef.ip }),
                   retryOptions
                 )
               : { status: "healthy" };
