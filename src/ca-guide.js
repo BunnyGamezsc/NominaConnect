@@ -88,3 +88,36 @@ export function canShowCaTrustGuide(project) {
   if (caService?.service !== "step-ca") return false;
   return project?.state?.providerReferences?.[caService.id] !== undefined;
 }
+
+export function getStepCaExportGuide(project, outputPath) {
+  const domain = project?.config?.baseLocalDomain ?? "bunnyhome.test";
+
+  return `step-ca root certificate exported to ${outputPath}
+
+Copy it to a device (run on the device, not on Proxmox):
+  scp root@<proxmox-host>:${outputPath} .
+
+Install the root on the device:
+
+  macOS:
+    sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain step-ca-root.crt
+    # then restart your browser
+
+  Windows:
+    double-click step-ca-root.crt → Install Certificate → Local Machine → Place in Trusted Root Certification Authorities
+
+  Linux:
+    sudo cp step-ca-root.crt /usr/local/share/ca-certificates/step-ca-root.crt
+    sudo update-ca-certificates
+
+  Firefox (separate trust store on every OS):
+    Settings → Privacy & Security → Certificates → View Certificates → Authorities → Import → step-ca-root.crt → Trust for websites
+
+  iOS: AirDrop/email the file → Install profile → enable in VPN & Device Management → enable Full Trust in Certificate Trust Settings
+  Android: Settings → Security → Install a certificate → CA certificate
+
+Verify from the device:
+  curl https://<exposure>.${domain}
+  # no TLS error and issuer "NominaConnect CA" = trusted
+`;
+}
