@@ -355,6 +355,36 @@ test("publishRoute with caddy-internal-ca uses the internal issuer", async () =>
   assert.deepEqual(policy.issuers, [{ module: "internal" }]);
 });
 
+test("healthCheckExposure reports caddy-internal-ca as trusted but no-CA as untrusted", async () => {
+  const fake = new FakeCaddyAdmin();
+  const adapter = createCaddyAdapter({ httpClient: createHttpClient(fake), secretResolver: () => {} });
+
+  await adapter.publishRoute(stepCaRequest({
+    caStrategy: "caddy-internal-ca",
+    tls: { mode: "caddy-internal-ca", trusted: true }
+  }));
+
+  const trusted = await adapter.healthCheckExposure({
+    hostname: "dns.bunny.home",
+    backendIp: "192.168.4.90",
+    backendPort: 5380,
+    caStrategy: "caddy-internal-ca",
+    ip: "192.168.4.101"
+  });
+  assert.equal(trusted.status, "healthy");
+  assert.equal(trusted.tls, "valid");
+
+  const untrusted = await adapter.healthCheckExposure({
+    hostname: "dns.bunny.home",
+    backendIp: "192.168.4.90",
+    backendPort: 5380,
+    caStrategy: "none",
+    ip: "192.168.4.101"
+  });
+  assert.equal(untrusted.status, "healthy");
+  assert.equal(untrusted.tls, "untrusted");
+});
+
 test("unpublishRoute removes the managed route and its policy while preserving unrelated ones", async () => {
   const fake = new FakeCaddyAdmin();
   const adapter = createCaddyAdapter({ httpClient: createHttpClient(fake), secretResolver: () => {} });

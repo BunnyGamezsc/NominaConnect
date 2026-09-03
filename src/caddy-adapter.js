@@ -199,7 +199,7 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
         return { https: "unreachable", status: "unhealthy" };
       }
       const policy = policies.find((entry) => entry.subjects?.includes(request.hostname));
-      const tls = tlsSummaryFor(policy?.issuers?.[0]);
+      const tls = tlsSummaryFor(policy?.issuers?.[0], request.caStrategy);
       const dial = matched.handle?.[0]?.upstreams?.[0]?.dial ?? matched.upstreams?.[0]?.dial;
       const expectedDial = request.backendIp && request.backendPort ? `${request.backendIp}:${request.backendPort}` : undefined;
       if (expectedDial !== undefined && dial !== undefined && dial !== expectedDial) {
@@ -510,13 +510,14 @@ function buildManagedRoute(hostname, backendIp, backendPort, backendTls = false)
 const REDIRECT_SUFFIX = "-auto-http";
 
 // Plain-HTTP hits for an exposure are redirected to HTTPS instead of served.
-// The route matches only cleartext requests (protocol matcher) so it never
-// shadows the TLS route; @id carries the suffix so inspection/adoption treat
-// it as implementation detail rather than a second managed resource.
+// The route lives on srv_http (:80) only, so scheme separation comes from the
+// :80/:443 server split and it never shadows the TLS route; @id carries the
+// suffix so inspection/adoption treat it as implementation detail rather than
+// a second managed resource.
 function buildRedirectRoute(hostname) {
   return {
     "@id": `${hostname}${REDIRECT_SUFFIX}`,
-    match: [{ host: [hostname], protocol: "http://" }],
+    match: [{ host: [hostname] }],
     handle: [{
       handler: "static_response",
       status_code: 308,
@@ -548,9 +549,12 @@ function issuerFor(request) {
   return { module: "internal" };
 }
 
-function tlsSummaryFor(issuer) {
+function tlsSummaryFor(issuer, caStrategy) {
   if (issuer?.module === "acme") {
     return { issuer: "acme", trusted: true, ...(issuer.ca ? { ca: issuer.ca } : {}) };
+  }
+  if (issuer?.module === "internal" && caStrategy === "caddy-internal-ca") {
+    return { issuer: "caddy-internal-ca", trusted: true };
   }
   return { issuer: "internal", trusted: false };
 }
@@ -578,6 +582,10 @@ function toManagedResource(route, policies = []) {
   const locator = { host, configPath: `/config/apps/http/servers/${TLS_SERVER}/routes/${host}` };
   const dial = route.handle?.[0]?.upstreams?.[0]?.dial;
   const policy = policies.find((entry) => entry.subjects?.includes(host));
+  // Inspection deliberately reports the internal issuer as untrusted: the
+  // published payload ({ module: "internal" }) cannot distinguish
+  // caddy-internal-ca from no-CA, and inspection feeds adoption (ADR-0005),
+  // so guessing trusted here would propagate a wrong value into nomina.yaml.
   const tls = tlsSummaryFor(policy?.issuers?.[0]);
   const [backendIp, backendPortRaw] = typeof dial === "string" && dial.includes(":") ? dial.split(":") : [undefined, undefined];
   const backendPort = backendPortRaw !== undefined ? Number(backendPortRaw) : undefined;

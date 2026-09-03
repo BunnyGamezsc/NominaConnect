@@ -41,7 +41,8 @@ export async function publishManagedExposure({
     throw new Error(`${proxyLabel} provider adapter is unavailable.`);
   }
 
-  const { name, hostname, backendIp, backendPort } = options;  const dnsRef = project.state.providerReferences[dnsService.id];
+  const { name, hostname, backendIp, backendPort } = options;
+  const dnsRef = project.state.providerReferences[dnsService.id];
   const proxyRef = project.state.providerReferences[proxyService.id];
   const publishRequest = {
     managedItemId: dnsService.id,
@@ -61,12 +62,11 @@ export async function publishManagedExposure({
     tlsOptions = { mode: "caddy-internal-ca", issuer: "caddy-internal-ca", trusted: true };
   } else if (caStrategy === "step-ca") {
     const caRef = project.state.providerReferences[caService?.id];
-    const caHostname = caService.deployment?.hostname ?? "step-ca";
     tlsOptions = {
       mode: "step-ca",
       issuer: "step-ca",
       ...(caRef?.ip ? { caIp: caRef.ip } : {}),
-      caHost: `${caHostname}.${project.config.baseLocalDomain}`,
+      caHost: stepCaCaHost(project),
       trusted: true
     };
   } else {
@@ -165,6 +165,7 @@ export async function publishManagedExposure({
       hostname,
       backendIp,
       backendPort,
+      caStrategy,
       ip: proxyRef?.ip,
       endpoint: proxyRef?.ip ? `http://${proxyRef.ip}:2019` : undefined
     }),
@@ -216,6 +217,12 @@ export async function publishManagedExposure({
       ...(caService ? { certificateAuthority: hostname } : {})
     }
   };
+}
+
+export function stepCaCaHost(project) {
+  const caService = project.config.managedInventory.platform.certificateAuthority;
+  const hostname = caService?.deployment?.hostname ?? "step-ca";
+  return `${hostname}.${project.config.baseLocalDomain}`;
 }
 
 function collectManagedDnsReferences(project, hostname) {

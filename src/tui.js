@@ -454,9 +454,6 @@ export async function runInteractiveApp(adapters) {
       if (answerPort && answerPort.trim() !== "") {
         backendPortRaw = answerPort.trim();
       }
-    } else if (adapters.prompts?.select) {
-      backendIp = svc.exposure.backend.ip;
-      backendPortRaw = String(svc.exposure.backend.port);
     }
     const backendPort = Number(backendPortRaw);
     if (!Number.isInteger(backendPort) || backendPort <= 0) {

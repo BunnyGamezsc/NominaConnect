@@ -115,7 +115,7 @@ test("publishRoute adds an HTTP->HTTPS redirect route when httpRedirect is enabl
 
   assert.notEqual(tlsRoute, undefined, "TLS route must still exist");
   assert.notEqual(redirectRoute, undefined, "redirect route must be created");
-  assert.deepEqual(redirectRoute.match, [{ host: ["dns.bunny.internal"], protocol: "http://" }]);
+  assert.deepEqual(redirectRoute.match, [{ host: ["dns.bunny.internal"] }]);
   assert.equal(redirectRoute.handle[0].handler, "static_response");
   assert.equal(String(redirectRoute.handle[0].status_code), "308");
   assert.match(redirectRoute.handle[0].headers.Location[0], /^https:\/\/\{http\.request\.host\}/);

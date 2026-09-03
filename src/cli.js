@@ -6,7 +6,7 @@ import {
   updatePlatformDeployment,
   upsertManagedExposure
 } from "./config.js";
-import { publishManagedExposure } from "./exposure.js";
+import { publishManagedExposure, stepCaCaHost } from "./exposure.js";
 import { getPlatformProvider } from "./providers.js";
 import { provisionPlatformService, resolveServiceDeployment } from "./provisioning.js";
 import { ensureConnectionSecret, updateConnectionSecret } from "./secrets.js";
@@ -1165,12 +1165,6 @@ async function recheckService(serviceName, rawOptions, adapters) {
   };
 }
 
-function stepCaCaHost(project) {
-  const caService = project.config.managedInventory.platform.certificateAuthority;
-  const hostname = caService?.deployment?.hostname ?? "step-ca";
-  return `${hostname}.${project.config.baseLocalDomain}`;
-}
-
 async function ensureCaddyTrustsStepCa(project, adapters) {
   const { proxmox } = adapters;
   const caService = project.config.managedInventory.platform.certificateAuthority;
@@ -1226,6 +1220,25 @@ function parseDomainChangeOptions(rawOptions) {
   const optionNames = new Map([["--project-dir", "projectDir"], ["--domain", "domain"]]);
   parseFlagOptions(rawOptions, optionNames, options);
   return options;
+}
+
+async function republishExposures(workingProject, services, providerAdapters) {
+  for (const service of services) {
+    if (service.exposure === undefined) {
+      continue;
+    }
+    await publishManagedExposure({
+      project: workingProject,
+      options: {
+        name: service.name,
+        hostname: service.exposure.hostname,
+        backendIp: service.exposure.backend.ip,
+        backendPort: Number(service.exposure.backend.port),
+        backendTls: service.exposure.backend.tls === true
+      },
+      providerAdapters
+    });
+  }
 }
 
 async function changeBaseDomain(options, adapters) {
@@ -1320,22 +1333,7 @@ async function changeBaseDomain(options, adapters) {
     await ensureCaddyTrustsStepCa(workingProject, adapters);
   }
 
-  for (const service of renamedServices) {
-    if (service.exposure === undefined) {
-      continue;
-    }
-      await publishManagedExposure({
-        project: workingProject,
-        options: {
-          name: service.name,
-          hostname: service.exposure.hostname,
-          backendIp: service.exposure.backend.ip,
-          backendPort: Number(service.exposure.backend.port),
-          backendTls: service.exposure.backend.tls === true
-        },
-        providerAdapters
-      });
-  }
+  await republishExposures(workingProject, renamedServices, providerAdapters);
 
   persistCaddyLiveConfig(proxmox, proxyRef?.vmid);
 
@@ -1390,19 +1388,7 @@ async function handleCaddyCommand(argumentsList, adapters) {
   const exposures = (updatedConfig.managedInventory.services ?? []).filter(
     (service) => service.exposure !== undefined
   );
-  for (const service of exposures) {
-    await publishManagedExposure({
-      project: workingProject,
-      options: {
-        name: service.name,
-        hostname: service.exposure.hostname,
-        backendIp: service.exposure.backend.ip,
-        backendPort: Number(service.exposure.backend.port),
-        backendTls: service.exposure.backend.tls === true
-      },
-      providerAdapters
-    });
-  }
+  await republishExposures(workingProject, exposures, providerAdapters);
 
   persistCaddyLiveConfig(proxmox, project.state.providerReferences[proxyService.id]?.vmid);
 
@@ -1410,6 +1396,16 @@ async function handleCaddyCommand(argumentsList, adapters) {
     stdout: `HTTP→HTTPS auto-redirect ${enabled ? "enabled" : "disabled"} for ${exposures.length} exposure(s) on Caddy.\n`,
     httpRedirect: enabled
   };
+}
+
+function resolveDeletionTarget(path, { secretStorePath, statePath, projectDir }) {
+  if (path.startsWith(secretStorePath)) {
+    return secretStorePath;
+  }
+  if (path === statePath) {
+    return joinPath(projectDir, ".nomina");
+  }
+  return path;
 }
 
 function parseUninstallOptions(rawOptions) {
@@ -1490,7 +1486,7 @@ async function uninstallEverything(options, adapters) {
   const removedPaths = [];
   for (const path of [configPath, statePath, secretStorePath]) {
     if (filesystem.exists(path)) {
-      filesystem.deletePath(path.startsWith(secretStorePath) ? secretStorePath : path === statePath ? joinPath(projectDir, ".nomina") : path);
+      filesystem.deletePath(resolveDeletionTarget(path, { secretStorePath, statePath, projectDir }));
       if (!removedPaths.some((existing) => existing === path)) {
         removedPaths.push(path);
       }
