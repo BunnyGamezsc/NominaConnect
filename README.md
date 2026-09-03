@@ -32,6 +32,42 @@ That opens the interactive menu. Choose **Initialize a new project** on first
 run, then **Provision Technitium DNS**, **Provision Caddy reverse proxy**, and
 **Publish a web exposure** as you bring the platform online.
 
+## Exposing services (HTTP vs HTTPS backends)
+
+Every exposure is published as **HTTPS to the client** (via Caddy + your CA).
+The question is what the **backend** itself speaks — and NominaConnect needs to
+know, because dialing a TLS-only service in plaintext produces garbage
+responses or infinite redirect loops.
+
+| Backend type | Examples | `--backend-tls`? |
+| --- | --- | --- |
+| Plain HTTP | Node/Python apps, Technitium UI (`:5380`), most self-hosted web apps | ❌ leave it off |
+| TLS-only appliance | Proxmox UI (`:8006`), OPNsense, Synology DSM, routers | ✅ switch it on |
+
+**Rule of thumb:** if you would normally visit the backend with `https://`
+(and click through a self-signed warning), turn `--backend-tls` on.
+
+```bash
+# Plain HTTP backend (default):
+nomina exposure publish --name photos --hostname photos.bunny.internal \
+  --backend-ip 192.168.4.10 --backend-port 3000 --project-dir /root
+
+# HTTPS-only backend:
+nomina exposure publish --name pve --hostname pve.bunny.internal \
+  --backend-ip 192.168.4.1 --backend-port 8006 --backend-tls --project-dir /root
+```
+
+With `--backend-tls`, Caddy dials the backend over TLS with
+`insecure_skip_verify` — that only relaxes the **Caddy → backend** hop against
+the appliance's self-signed certificate. The **client → Caddy** hop stays fully
+trusted via step-ca.
+
+The interactive TUI asks "Does the backend serve HTTPS/TLS itself?" during
+publish, and again when editing an exposure (pre-filled with the current
+value). The flag is stored in `nomina.yaml` (`exposure.backend.tls`) and
+survives domain changes, redirect toggles, and edits. Changed your mind?
+Re-publish the same exposure with/without the flag to flip it.
+
 ## Experimental Real Adapters (v1.1)
 
 **Status: Beta/Experimental**

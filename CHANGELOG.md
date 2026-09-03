@@ -1,5 +1,36 @@
 # Changelog
 
+## [2.0.0] - 2026-09-03
+
+Stable release: everything since v1.4.3 (TLS backends, dual-server HTTP→HTTPS redirect topology, TUI backend-TLS editing) plus the review fixes below.
+
+### Fixed
+- **HTTP→HTTPS redirect route silently never fired** — `buildRedirectRoute` re-introduced the `protocol` matcher the v1.4.4 fix removed, which Caddy 2.11.x never matches. Matcher dropped (`srv_http` is `:80`-only, so it was redundant) and legacy routes are stripped of it on migration.
+- **`caddy-internal-ca` exposures reported as untrusted** — health output now threads the CA strategy through to the TLS summary, so a working internal-CA exposure reports `valid` while a genuinely CA-less one still reports `untrusted`.
+- **Duplicated exposure re-publish loop** (`changeBaseDomain`, `caddy redirect`) extracted into one helper so `backendTls` preservation cannot drift; **step-ca hostname construction** de-duplicated into a single shared helper.
+- **Clarity**: nuclear-uninstall deletion targets unpacked from a nested ternary into a named helper; no-op branch removed from the TUI edit-exposure handler; merged-line formatting artifact split.
+
+## [1.4.7] - 2026-08-23 (Dev/Pre-release)
+
+### Added
+- **Edit an exposure can flip the backend TLS setting** — the TUI re-asks "Does the backend serve HTTPS/TLS itself?" pre-filled with the stored value.
+- **README**: new "Exposing services" section documenting when `--backend-tls` should be on vs off.
+
+## [1.4.6] - 2026-08-23 (Dev/Pre-release)
+
+### Added
+- **TLS backends** (`--backend-tls`): publish HTTPS-only services (Proxmox `:8006`, OPNsense, Synology). Persisted as `exposure.backend.tls`; Caddy dials the backend over TLS with skip-verify on the internal hop only.
+
+### Fixed
+- **HTTP→HTTPS redirect silently never fired on Caddy 2.11.4** (`protocol` matcher never matches) → dual-server topology (`srv_https` :443 / `srv_http` :80) with automatic legacy `srv0` migration.
+- **Duplicate-ID error during srv0 migration** → `srv0` deleted before its routes are recreated.
+
+## [1.4.4] - 2026-08-23 (Dev/Pre-release)
+
+### Fixed
+- **HTTP→HTTPS redirect silently never worked on Caddy 2.11.4** — the `protocol` request matcher is silently never matched by that build, so HTTPS requests matched no route and Caddy's JSON-mode default answered an empty `200` (and with redirects off, plain HTTP proxied cleartext). Routes now live on **two dedicated servers** — `srv_https` (:443, TLS routes) and `srv_http` (:80, 308 redirects) — eliminating protocol matchers entirely.
+- **Automatic legacy migration**: `publishRoute` migrates old single-server configs (`srv0`) into the new servers — host routes → `srv_https`, hostless catch-alls → `srv_http`, stale scheme pins stripped, then `srv0` removed. Existing containers upgrade in place on the next publish; no manual wipe needed.
+
 ## [1.4.3] - 2026-08-23
 
 Stable release: v1.4.2 fixes plus nuclear uninstall. Includes everything since v1.3.15 (HTTP→HTTPS auto-redirect, exposure health retry, Technitium-based LXC DNS, `nomina --version`).

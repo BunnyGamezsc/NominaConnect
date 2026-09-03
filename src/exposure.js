@@ -62,12 +62,11 @@ export async function publishManagedExposure({
     tlsOptions = { mode: "caddy-internal-ca", issuer: "caddy-internal-ca", trusted: true };
   } else if (caStrategy === "step-ca") {
     const caRef = project.state.providerReferences[caService?.id];
-    const caHostname = caService.deployment?.hostname ?? "step-ca";
     tlsOptions = {
       mode: "step-ca",
       issuer: "step-ca",
       ...(caRef?.ip ? { caIp: caRef.ip } : {}),
-      caHost: `${caHostname}.${project.config.baseLocalDomain}`,
+      caHost: stepCaCaHost(project),
       trusted: true
     };
   } else {
@@ -79,6 +78,7 @@ export async function publishManagedExposure({
     hostname,
     backendIp,
     backendPort,
+    backendTls: options.backendTls === true,
     protocol: "https",
     caStrategy,
     tls: tlsOptions,
@@ -165,6 +165,7 @@ export async function publishManagedExposure({
       hostname,
       backendIp,
       backendPort,
+      caStrategy,
       ip: proxyRef?.ip,
       endpoint: proxyRef?.ip ? `http://${proxyRef.ip}:2019` : undefined
     }),
@@ -184,7 +185,11 @@ export async function publishManagedExposure({
     name,
     exposure: {
       hostname,
-      backend: { ip: backendIp, port: backendPort },
+      backend: {
+        ip: backendIp,
+        port: backendPort,
+        ...(options.backendTls === true ? { tls: true } : {})
+      },
       protocol: "https",
       certificateAuthority: caStrategy,
       tls: {
@@ -212,6 +217,12 @@ export async function publishManagedExposure({
       ...(caService ? { certificateAuthority: hostname } : {})
     }
   };
+}
+
+export function stepCaCaHost(project) {
+  const caService = project.config.managedInventory.platform.certificateAuthority;
+  const hostname = caService?.deployment?.hostname ?? "step-ca";
+  return `${hostname}.${project.config.baseLocalDomain}`;
 }
 
 function collectManagedDnsReferences(project, hostname) {

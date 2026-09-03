@@ -454,18 +454,25 @@ export async function runInteractiveApp(adapters) {
       if (answerPort && answerPort.trim() !== "") {
         backendPortRaw = answerPort.trim();
       }
-    } else if (adapters.prompts?.select) {
-      backendIp = svc.exposure.backend.ip;
-      backendPortRaw = String(svc.exposure.backend.port);
     }
     const backendPort = Number(backendPortRaw);
     if (!Number.isInteger(backendPort) || backendPort <= 0) {
       throw new Error(`Invalid backend port: ${backendPortRaw}.`);
     }
-    const result = await adapters.runCommand(
-      ["exposure", "publish", "--name", svc.name, "--hostname", svc.exposure.hostname, "--backend-ip", backendIp, "--backend-port", String(backendPort)],
-      adapters
-    );
+    // Ask with the stored value as default so edits can flip the TLS setting.
+    let backendTls = svc.exposure.backend.tls === true;
+    if (adapters.prompts !== undefined) {
+      backendTls = await confirmPrompt(
+        adapters.prompts,
+        "Does the backend serve HTTPS/TLS itself? (e.g. Proxmox :8006, OPNsense)",
+        backendTls
+      );
+    }
+    const publishArgs = ["exposure", "publish", "--name", svc.name, "--hostname", svc.exposure.hostname, "--backend-ip", backendIp, "--backend-port", String(backendPort)];
+    if (backendTls) {
+      publishArgs.push("--backend-tls");
+    }
+    const result = await adapters.runCommand(publishArgs, adapters);
     clack.outro("Exposure updated.");
     if (adapters.tracking) {
       adapters.tracking.run(adapters);
@@ -808,8 +815,14 @@ export async function promptExposureOptions(project, existingOptions, prompts) {
     ?? await askRequired(prompts, "Backend IP", validateIp);
   const backendPort = existingOptions.backendPort
     ?? Number(await askPrompt(prompts, "Backend port", "8080"));
+  const backendTls = existingOptions.backendTls
+    ?? await confirmPrompt(
+      prompts,
+      "Does the backend serve HTTPS/TLS itself? (e.g. Proxmox :8006, OPNsense)",
+      false
+    );
 
-  return { ...existingOptions, name, hostname, backendIp, backendPort };
+  return { ...existingOptions, name, hostname, backendIp, backendPort, backendTls };
 }
 
 async function askPrompt(prompts, question, fallback = undefined) {

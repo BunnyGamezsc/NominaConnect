@@ -344,7 +344,7 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
             };
             const health = proxyAdapter.healthCheckExposure
               ? await withBoundedRetry(
-                  () => proxyAdapter.healthCheckExposure({ hostname, backendIp: newBackend.ip, backendPort: newBackend.port, ip: proxyRef.ip }),
+                  () => proxyAdapter.healthCheckExposure({ hostname, backendIp: newBackend.ip, backendPort: newBackend.port, caStrategy: service.exposure.certificateAuthority, ip: proxyRef.ip }),
                   retryOptions
                 )
               : { status: "healthy" };

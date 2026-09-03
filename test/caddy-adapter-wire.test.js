@@ -187,7 +187,11 @@ const INSTALLER_CADDYFILE_CONFIG = {
   apps: {
     http: {
       servers: {
-        srv0: {
+        srv_https: {
+          listen: [":443"],
+          routes: []
+        },
+        srv_http: {
           listen: [":80"],
           routes: [{ handle: [{ body: "OK", handler: "static_response", status_code: 200 }] }]
         }
@@ -202,12 +206,12 @@ test("publishRoute bootstraps an empty Caddy config with a valid route and step-
 
   await adapter.publishRoute(stepCaRequest());
 
-  const routes = fake.get("apps/http/servers/srv0/routes");
+  const routes = fake.get("apps/http/servers/srv_https/routes");
   assert.equal(Array.isArray(routes), true, "routes must remain an array");
   const published = routes.find((route) => route["@id"] === "dns.bunny.home");
   assert.notEqual(published, undefined);
   assert.equal("tls" in published, false, "route must not carry a tls field (unknown field for Caddy Route)");
-  assert.deepEqual(published.match, [{ host: ["dns.bunny.home"], protocol: "https://" }]);
+  assert.deepEqual(published.match, [{ host: ["dns.bunny.home"] }]);
   assert.deepEqual(published.handle[0].upstreams[0].dial, "192.168.4.90:5380");
 
   const policies = fake.get("apps/tls/automation/policies");
@@ -247,18 +251,17 @@ test("publishRoute falls back to the CA IP for the ACME directory URL when no ho
   ]);
 });
 
-test("publishRoute inserts the managed route before the installer catch-all so it is reachable", async () => {
+test("publishRoute keeps the installer catch-all in srv_http and lands managed routes in srv_https", async () => {
   const fake = new FakeCaddyAdmin(INSTALLER_CADDYFILE_CONFIG);
   const adapter = createCaddyAdapter({ httpClient: createHttpClient(fake), secretResolver: () => {} });
 
   await adapter.publishRoute(stepCaRequest());
 
-  const routes = fake.get("apps/http/servers/srv0/routes");
-  const catchAllIndex = routes.findIndex((route) => route.match === undefined);
-  const managedIndex = routes.findIndex((route) => route["@id"] === "dns.bunny.home");
-  assert.notEqual(catchAllIndex, -1, "installer catch-all route must be preserved");
-  assert.notEqual(managedIndex, -1);
-  assert.ok(managedIndex < catchAllIndex, "host route must precede the hostless catch-all");
+  const httpsRoutes = fake.get("apps/http/servers/srv_https/routes");
+  const managedIndex = httpsRoutes.findIndex((route) => route["@id"] === "dns.bunny.home");
+  assert.notEqual(managedIndex, -1, "managed route must live in the :443 server");
+  assert.equal(fake.get("apps/http/servers/srv_http/routes").length >= 1, true,
+    "installer catch-all must remain untouched in srv_http");
 });
 
 test("publishRoute is idempotent and preserves unrelated routes and policies on re-publish", async () => {
@@ -267,7 +270,7 @@ test("publishRoute is idempotent and preserves unrelated routes and policies on 
     apps: {
       http: {
         servers: {
-          srv0: {
+          srv_https: {
             listen: [":80", ":443"],
             routes: [
               {
@@ -293,7 +296,7 @@ test("publishRoute is idempotent and preserves unrelated routes and policies on 
   await adapter.publishRoute(stepCaRequest());
   await adapter.publishRoute(stepCaRequest());
 
-  const routes = fake.get("apps/http/servers/srv0/routes");
+  const routes = fake.get("apps/http/servers/srv_https/routes");
   assert.equal(routes.filter((route) => route["@id"] === "dns.bunny.home").length, 1, "duplicate routes must not be appended");
   assert.equal(routes.filter((route) => route["@id"] === "photos.bunnyhome.test").length, 1);
 
@@ -318,7 +321,7 @@ test("publishRoute republishes an updated backend by replacing the managed route
   await adapter.publishRoute(stepCaRequest());
   await adapter.publishRoute(stepCaRequest({ backendIp: "192.168.4.91", backendPort: 5380 }));
 
-  const routes = fake.get("apps/http/servers/srv0/routes");
+  const routes = fake.get("apps/http/servers/srv_https/routes");
   const published = routes.find((route) => route["@id"] === "dns.bunny.home");
   assert.equal(routes.length, 1);
   assert.deepEqual(published.handle[0].upstreams[0].dial, "192.168.4.91:5380");
@@ -352,6 +355,36 @@ test("publishRoute with caddy-internal-ca uses the internal issuer", async () =>
   assert.deepEqual(policy.issuers, [{ module: "internal" }]);
 });
 
+test("healthCheckExposure reports caddy-internal-ca as trusted but no-CA as untrusted", async () => {
+  const fake = new FakeCaddyAdmin();
+  const adapter = createCaddyAdapter({ httpClient: createHttpClient(fake), secretResolver: () => {} });
+
+  await adapter.publishRoute(stepCaRequest({
+    caStrategy: "caddy-internal-ca",
+    tls: { mode: "caddy-internal-ca", trusted: true }
+  }));
+
+  const trusted = await adapter.healthCheckExposure({
+    hostname: "dns.bunny.home",
+    backendIp: "192.168.4.90",
+    backendPort: 5380,
+    caStrategy: "caddy-internal-ca",
+    ip: "192.168.4.101"
+  });
+  assert.equal(trusted.status, "healthy");
+  assert.equal(trusted.tls, "valid");
+
+  const untrusted = await adapter.healthCheckExposure({
+    hostname: "dns.bunny.home",
+    backendIp: "192.168.4.90",
+    backendPort: 5380,
+    caStrategy: "none",
+    ip: "192.168.4.101"
+  });
+  assert.equal(untrusted.status, "healthy");
+  assert.equal(untrusted.tls, "untrusted");
+});
+
 test("unpublishRoute removes the managed route and its policy while preserving unrelated ones", async () => {
   const fake = new FakeCaddyAdmin();
   const adapter = createCaddyAdapter({ httpClient: createHttpClient(fake), secretResolver: () => {} });
@@ -361,7 +394,7 @@ test("unpublishRoute removes the managed route and its policy while preserving u
 
   await adapter.unpublishRoute({ hostname: "dns.bunny.home", ip: "192.168.4.101" });
 
-  const routes = fake.get("apps/http/servers/srv0/routes");
+  const routes = fake.get("apps/http/servers/srv_https/routes");
   assert.equal(routes.some((route) => route["@id"] === "dns.bunny.home"), false);
   assert.equal(routes.some((route) => route["@id"] === "photos.bunnyhome.test"), true);
 
