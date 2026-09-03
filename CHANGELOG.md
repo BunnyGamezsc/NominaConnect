@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.0.0] - 2026-09-03
+
+Stable release: everything since v1.4.3 (TLS backends, dual-server HTTP→HTTPS redirect topology, TUI backend-TLS editing) plus the review fixes below.
+
+### Fixed
+- **HTTP→HTTPS redirect route silently never fired** — `buildRedirectRoute` re-introduced the `protocol` matcher the v1.4.4 fix removed, which Caddy 2.11.x never matches. Matcher dropped (`srv_http` is `:80`-only, so it was redundant) and legacy routes are stripped of it on migration.
+- **`caddy-internal-ca` exposures reported as untrusted** — health output now threads the CA strategy through to the TLS summary, so a working internal-CA exposure reports `valid` while a genuinely CA-less one still reports `untrusted`.
+- **Duplicated exposure re-publish loop** (`changeBaseDomain`, `caddy redirect`) extracted into one helper so `backendTls` preservation cannot drift; **step-ca hostname construction** de-duplicated into a single shared helper.
+- **Clarity**: nuclear-uninstall deletion targets unpacked from a nested ternary into a named helper; no-op branch removed from the TUI edit-exposure handler; merged-line formatting artifact split.
+
 ## [1.4.7] - 2026-08-23 (Dev/Pre-release)
 
 ### Added
