@@ -4,6 +4,9 @@ export function getStepCaTrustGuide(project) {
   const caIp = caRef?.ip ?? caService?.deployment?.ip ?? "<CA-IP>";
   const caVmid = caRef?.vmid ?? "<vmid>";
   const domain = project?.config?.baseLocalDomain ?? "bunnyhome.test";
+  const proxyLabel = project?.config?.managedInventory?.platform?.reverseProxy?.service === "traefik"
+    ? "Traefik"
+    : "Caddy";
 
   const fetchCmd = `curl -k https://\${CA_IP}:9000/roots.pem -o step-ca-root.crt`;
   const pctCmd = `pct exec ${caVmid} -- cat /var/lib/stepca/certs/root_ca.crt > step-ca-root.crt`;
@@ -13,8 +16,8 @@ export function getStepCaTrustGuide(project) {
 ===============================
 
 What happens:
-- When step-ca is provisioned, Caddy asks step-ca for a cert for each new exposure.
-- Example: photos.${domain} → Caddy → ACME https://${caIp}:9000/acme/acme/directory → trusted cert.
+- When step-ca is provisioned, ${proxyLabel} asks step-ca for a cert for each new exposure.
+- Example: photos.${domain} → ${proxyLabel} → ACME https://${caIp}:9000/acme/acme/directory → trusted cert.
 - Without trusting the CA, browsers show "untrusted" but still HTTPS (never HTTP).
 
 You MUST trust the step-ca root CA on every device that will open https://${domain} sites.

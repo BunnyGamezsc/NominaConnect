@@ -6,7 +6,7 @@ import {
   updatePlatformDeployment,
   upsertManagedExposure
 } from "./config.js";
-import { publishManagedExposure, stepCaCaHost } from "./exposure.js";
+import { proxyEndpointFor, publishManagedExposure, stepCaCaHost } from "./exposure.js";
 import { getPlatformProvider } from "./providers.js";
 import { provisionPlatformService, resolveServiceDeployment } from "./provisioning.js";
 import { ensureConnectionSecret, updateConnectionSecret } from "./secrets.js";
@@ -821,8 +821,17 @@ async function upgradeService(serviceName, rawOptions, adapters) {
   const providerReferences = platformKey === "dns"
     ? [project.config.baseLocalDomain]
     : [];
-  const inspection = await plugin.inspect(adapter, managedItem, { providerReferences, connectionSecretReference });
-  const health = await plugin.healthCheck(adapter, managedItem, { connectionSecretReference });
+  // Post-upgrade inspection and health must reach the provider in its own LXC,
+  // not whatever happens to answer on the Proxmox host's loopback.
+  const upgradeContext = {
+    providerReferences,
+    connectionSecretReference,
+    ip: providerRef.ip,
+    vmid,
+    zone: project.config.baseLocalDomain
+  };
+  const inspection = await plugin.inspect(adapter, managedItem, upgradeContext);
+  const health = await plugin.healthCheck(adapter, managedItem, upgradeContext);
 
   const snapshotText = snapshotResult ? `Snapshot ${snapshotResult.snapshotName ?? snapshotResult.name} created. ` : "";
   const healthLabel = health.status === "healthy" ? "healthy" : "unhealthy";
@@ -919,7 +928,13 @@ async function removeService(serviceName, rawOptions, adapters) {
       }
       const proxyService = project.config.managedInventory.platform.reverseProxy;
       if (proxyService && providerAdapters[proxyService.service]?.unpublishRoute) {
-        await providerAdapters[proxyService.service].unpublishRoute({ hostname });
+        const proxyRef = project.state.providerReferences[proxyService.id];
+        await providerAdapters[proxyService.service].unpublishRoute({
+          hostname,
+          ip: proxyRef?.ip,
+          vmid: proxyRef?.vmid,
+          endpoint: proxyEndpointFor(proxyService.service, proxyRef?.ip)
+        });
       }
       if (proxyService?.service === "caddy") {
         persistCaddyLiveConfig(proxmox, project.state.providerReferences[proxyService.id]?.vmid);
@@ -1165,11 +1180,14 @@ async function recheckService(serviceName, rawOptions, adapters) {
   };
 }
 
+// Traefik is deliberately not handled here: its step-ca wiring is a static
+// configuration change that has to land before a router names the resolver, so
+// the Traefik adapter does it inside publishRoute through its own exec seam.
 async function ensureCaddyTrustsStepCa(project, adapters) {
   const { proxmox } = adapters;
   const caService = project.config.managedInventory.platform.certificateAuthority;
   const proxyService = project.config.managedInventory.platform.reverseProxy;
-  if (proxmox?.pctExec === undefined || caService?.service !== "step-ca" || proxyService === undefined) {
+  if (proxmox?.pctExec === undefined || caService?.service !== "step-ca" || proxyService?.service !== "caddy") {
     return;
   }
   const caRef = project.state.providerReferences[caService.id];
@@ -1298,7 +1316,8 @@ async function changeBaseDomain(options, adapters) {
       await proxyAdapter.unpublishRoute({
         hostname: oldHost,
         ip: proxyRef?.ip,
-        endpoint: proxyRef?.ip ? `http://${proxyRef.ip}:2019` : undefined
+        vmid: proxyRef?.vmid,
+        endpoint: proxyEndpointFor(proxyService.service, proxyRef?.ip)
       });
     } catch (error) {
       warnings.push(`Could not clean up old record/route for ${oldHost}: ${error.message}`);
@@ -1335,7 +1354,9 @@ async function changeBaseDomain(options, adapters) {
 
   await republishExposures(workingProject, renamedServices, providerAdapters);
 
-  persistCaddyLiveConfig(proxmox, proxyRef?.vmid);
+  if (proxyService.service === "caddy") {
+    persistCaddyLiveConfig(proxmox, proxyRef?.vmid);
+  }
 
   writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(workingProject.config));
 
@@ -1539,10 +1560,17 @@ async function publishExposure(options, adapters) {
 
   const actionLabel = result.isUpdate ? "updated" : "published";
   const healthLabel = result.health.status === "healthy" ? "healthy" : "unhealthy";
+  const warnings = [
+    ...(result.warnings ?? []),
+    ...(result.health.reverseProxy?.reason !== undefined ? [result.health.reverseProxy.reason] : []),
+    ...(result.health.certificateAuthority?.reason !== undefined ? [result.health.certificateAuthority.reason] : [])
+  ];
+  const warningLines = warnings.map((warning) => `Warning: ${warning}\n`).join("");
 
   return {
-    stdout: `Exposure ${actionLabel} for ${resolvedOptions.hostname} via HTTPS at ${resolvedOptions.backendIp}:${resolvedOptions.backendPort}. Health: ${healthLabel}.\n`,
+    stdout: `Exposure ${actionLabel} for ${resolvedOptions.hostname} via HTTPS at ${resolvedOptions.backendIp}:${resolvedOptions.backendPort}. Health: ${healthLabel}.\n${warningLines}`,
     health: result.health,
+    warnings,
     dnsInspection: result.dnsInspection,
     proxyInspection: result.proxyInspection,
     ...(result.caInspection !== undefined ? { caInspection: result.caInspection } : {}),

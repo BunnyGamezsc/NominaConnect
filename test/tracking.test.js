@@ -1072,6 +1072,64 @@ test("runAdoptionPass inspects and adopts Traefik exposed route changes", async 
   assert.deepEqual(result.changes[0].after.backend, { ip: "10.0.0.88", port: 8080 });
 });
 
+test("adopting a Traefik route change verifies trust inside the managed LXC", async () => {
+  const project = {
+    config: {
+      managedInventory: {
+        platform: {
+          dns: null,
+          reverseProxy: {
+            id: "nc_traefik_test",
+            service: "traefik",
+            deployment: { ip: "10.0.0.54", hostname: "traefik" }
+          },
+          certificateAuthority: { id: "nc_ca_test", service: "step-ca" },
+          vpn: null
+        },
+        services: [
+          {
+            id: "nc_svc_app",
+            name: "app",
+            exposure: {
+              hostname: "app.bunnyhome.test",
+              backend: { ip: "10.0.0.20", port: 3000 },
+              protocol: "https",
+              certificateAuthority: "step-ca"
+            }
+          }
+        ]
+      },
+      baseLocalDomain: "bunnyhome.test"
+    },
+    state: {
+      providerReferences: {
+        nc_traefik_test: { vmid: 121, ip: "10.0.0.54" },
+        nc_ca_test: { vmid: 122, ip: "10.0.0.55" }
+      }
+    }
+  };
+
+  const healthRequests = [];
+  const traefik = createTraefikAdapter({
+    resources: [{ id: "app.bunnyhome.test", backendIp: "10.0.0.88", backendPort: 8080 }],
+    exposureHealth: (request) => {
+      healthRequests.push(request);
+      return { https: "reachable", tls: "valid", issuer: "step-ca", status: "healthy" };
+    }
+  });
+
+  await runAdoptionPass({
+    project,
+    providerAdapters: { traefik },
+    retryOptions: { sleep: () => Promise.resolve() }
+  });
+
+  // Certificate trust is verified inside the Traefik LXC, so tracking has to
+  // hand the health check the managed LXC id, not only its address.
+  assert.equal(healthRequests[0].vmid, 121);
+  assert.equal(healthRequests[0].caStrategy, "step-ca");
+});
+
 test("runAdoptionPass inspects and adopts step-ca deployment changes with verified health", async () => {
   const project = {
     config: {

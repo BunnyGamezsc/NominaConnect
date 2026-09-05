@@ -14,7 +14,8 @@ const filesystem = {
   mkdir: (path) => fs.mkdirSync(path, { recursive: true }),
   writeFile: fs.writeFileSync,
   rename: fs.renameSync,
-  chmod: fs.chmodSync
+  chmod: fs.chmodSync,
+  deletePath: (path) => fs.rmSync(path, { recursive: true, force: true })
 };
 
 const productionAdapters = createProductionAdapters();

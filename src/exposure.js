@@ -2,6 +2,16 @@ import { randomUUID } from "node:crypto";
 import { withHealthyRetry } from "./adoption.js";
 import { getPlatformProvider } from "./providers.js";
 
+// Caddy is driven through its Admin API on :2019; Traefik is observed through
+// its dashboard/API on :8080. Callers that build a proxy request must go
+// through this so a Traefik project never gets pointed at Caddy's port.
+export function proxyEndpointFor(proxyServiceName, ip) {
+  if (ip === undefined) {
+    return undefined;
+  }
+  return proxyServiceName === "traefik" ? `http://${ip}:8080` : `http://${ip}:2019`;
+}
+
 export async function publishManagedExposure({
   project,
   options,
@@ -82,14 +92,20 @@ export async function publishManagedExposure({
     protocol: "https",
     caStrategy,
     tls: tlsOptions,
+    zone: project.config.baseLocalDomain,
     httpRedirect: proxyService.httpRedirect === true,
     ip: proxyRef?.ip,
-    endpoint: proxyRef?.ip ? `http://${proxyRef.ip}:2019` : undefined,
+    vmid: proxyRef?.vmid,
+    endpoint: proxyEndpointFor(proxyService.service, proxyRef?.ip),
     connectionSecretReference: project.config.connectionSecretReferences[proxyService.id]
   };
 
   await technitiumAdapter.publishRecord(publishRequest);
-  await proxyAdapter.publishRoute(routeRequest);
+  const publishedRoute = await proxyAdapter.publishRoute(routeRequest);
+  // A proxy that could not complete the trusted-certificate wiring still
+  // publishes the exposure over HTTPS; the reason it stayed untrusted is
+  // reported rather than swallowed.
+  const warnings = [...(publishedRoute?.warnings ?? [])];
 
   const dnsPlugin = getPlatformProvider("technitium");
   const proxyPlugin = getPlatformProvider(proxyService.service);
@@ -103,7 +119,8 @@ export async function publishManagedExposure({
   const proxyInspection = await proxyPlugin.inspect(proxyAdapter, proxyService, {
     providerReferences: collectManagedProxyReferences(project, hostname),
     ip: proxyRef?.ip,
-    endpoint: proxyRef?.ip ? `http://${proxyRef.ip}:2019` : undefined,
+    vmid: proxyRef?.vmid,
+    endpoint: proxyEndpointFor(proxyService.service, proxyRef?.ip),
     connectionSecretReference: project.config.connectionSecretReferences[proxyService.id]
   });
 
@@ -116,7 +133,7 @@ export async function publishManagedExposure({
       const caRef = project.state.providerReferences[caService.id];
       const caIp = caRef?.ip ?? proxyRef?.ip;
       const caEndpoint = caIp
-        ? (caService.service === "step-ca" ? `https://${caIp}:9000` : `http://${caIp}:2019`)
+        ? (caService.service === "step-ca" ? `https://${caIp}:9000` : proxyEndpointFor(caService.service, caIp))
         : undefined;
       caInspection = await caPlugin.inspect(caAdapter, caService, {
         providerReferences: collectManagedCaReferences(project, hostname),
@@ -167,7 +184,8 @@ export async function publishManagedExposure({
       backendPort,
       caStrategy,
       ip: proxyRef?.ip,
-      endpoint: proxyRef?.ip ? `http://${proxyRef.ip}:2019` : undefined
+      vmid: proxyRef?.vmid,
+      endpoint: proxyEndpointFor(proxyService.service, proxyRef?.ip)
     }),
     healthRetryOptions
   )
@@ -175,6 +193,15 @@ export async function publishManagedExposure({
   const healthy = dnsExposureHealth.status === "healthy"
     && proxyExposureHealth.status === "healthy"
     && (caExposureHealth === undefined || caExposureHealth.status === "healthy");
+
+  // A CA-backed project only records trusted TLS when the proxy actually
+  // presents a trusted certificate. Persisting the intent while the exposure
+  // is serving an untrusted one would claim a trust nothing verified.
+  const observedTls = proxyExposureHealth?.tls;
+  const trusted = tlsOptions.trusted
+    && observedTls !== "untrusted"
+    && observedTls !== "missing"
+    && observedTls !== "unknown";
 
   const existingService = project.config.managedInventory.services.find(
     (service) => service.exposure?.hostname === hostname
@@ -194,7 +221,7 @@ export async function publishManagedExposure({
       certificateAuthority: caStrategy,
       tls: {
         mode: tlsOptions.mode,
-        trusted: tlsOptions.trusted
+        trusted
       }
     }
   };
@@ -202,6 +229,7 @@ export async function publishManagedExposure({
   return {
     managedService,
     isUpdate: existingService !== undefined,
+    warnings,
     dnsInspection,
     proxyInspection,
     ...(caInspection !== undefined ? { caInspection } : {}),

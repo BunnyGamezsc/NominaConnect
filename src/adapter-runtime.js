@@ -7,6 +7,7 @@ import path from "node:path";
 import { createCaddyAdapter } from "./caddy-adapter.js";
 import { createStepCaAdapter } from "./step-ca-adapter.js";
 import { createTechnitiumAdapter } from "./technitium-adapter.js";
+import { createTraefikAdapter } from "./traefik-adapter.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -225,7 +226,13 @@ export function createProductionAdapters(options = {}) {
   const providerAdapters = Object.freeze({
     technitium: createTechnitiumAdapter({ httpClient, secretResolver }),
     caddy: caddyAdapter,
-    traefik: createProviderAdapter("traefik", secretResolver),
+    // Traefik writes dynamic fragments inside its own LXC, so it needs the
+    // same pct exec channel the Proxmox adapter uses (ADR-0032).
+    traefik: createTraefikAdapter({
+      httpClient,
+      secretResolver,
+      exec: (vmid, command) => proxmox.pctExec(vmid, command)
+    }),
     "step-ca": createStepCaAdapter({ httpClient, secretResolver }),
     "caddy-internal-ca": caddyInternalCaAdapter,
     tailscale: createProviderAdapter("tailscale", secretResolver),

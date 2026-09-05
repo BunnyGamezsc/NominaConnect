@@ -1,5 +1,59 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Real Traefik reverse-proxy adapter** (#16). `nomina service add traefik`
+  provisions a Traefik v3 LXC with a **watched dynamic configuration directory**
+  (`/etc/traefik/dynamic`) and reports real process/endpoint health from
+  Traefik's API.
+  - `nomina exposure publish` writes exactly one fragment per exposure
+    (`nomina-<hostname>.yml`), staged outside the watched directory and moved
+    into place so Traefik never loads a partial file. Unrelated fragments are
+    never read, rewritten, or deleted.
+  - Exposures are always HTTPS. Without a configured CA, Traefik serves its own
+    generated self-signed certificate; there is no HTTP fallback. A router that
+    has lost its TLS block is reported unhealthy rather than treated as working.
+  - Direct edits to a managed fragment are inspected through Traefik's API and
+    adopted. Removal is refused when a fragment no longer matches its managed
+    fingerprint.
+  - The dashboard/API (`:8080`) is used for observation only; every
+    configuration change goes through the watched directory.
+  - `nomina service upgrade traefik` resolves the newest Traefik v3 release,
+    replaces the binary, and restarts the service.
+- **step-ca trust for Traefik exposures** (#18). A Traefik project that selects
+  step-ca now gets genuinely trusted certificates.
+  - Publishing installs the step-ca root into the Traefik LXC trust store and
+    adds a managed `certificatesResolvers` block to `/etc/traefik/traefik.yml`
+    (ACME against `https://step-ca.<domain>:9000/acme/acme/directory`,
+    TLS-ALPN-01, `certificatesDuration: 24` to match step-ca's 24-hour
+    certificates). A certificate resolver can only live in Traefik's static
+    configuration, so the block is spliced between markers: entryPoints,
+    logging, and anything else in that file are preserved, and a
+    `certificatesResolvers` key NominaConnect did not write is never replaced.
+  - The managed fragment names the resolver, so the router asks step-ca for a
+    certificate instead of Traefik's generated one. Traefik is restarted only
+    when the root certificate or the static configuration actually changed.
+  - Exposure health verifies the outcome rather than the intent: step-ca must
+    have issued for the hostname, and the certificate Traefik presents must
+    validate against the root installed in its own LXC. `nomina.yaml` records
+    `tls.trusted: true` only when that verification passed.
+  - Any CA failure — unreachable step-ca, an operator-owned resolver, a
+    certificate that has not been issued yet — is a verification warning
+    printed by `nomina exposure publish`. The exposure stays on HTTPS with
+    Traefik's own certificate and no unrelated Traefik configuration changes.
+
+### Fixed
+- **Proxy endpoints were hard-coded to Caddy's admin port** — exposure publish,
+  removal, and domain change now derive the endpoint from the selected reverse
+  proxy (`:2019` for Caddy, `:8080` for Traefik).
+- **`nomina service remove <exposure>` dropped the proxy's address**, so route
+  teardown fell back to the Proxmox host's loopback instead of the proxy LXC.
+- **Post-upgrade inspection and health used loopback** rather than the upgraded
+  service's own address, so a healthy upgrade could report as unhealthy.
+- **`nomina domain change` ran Caddy's config-persistence step on Traefik
+  projects**; it is now Caddy-only.
+
 ## [2.0.0] - 2026-09-03
 
 Stable release: everything since v1.4.3 (TLS backends, dual-server HTTP→HTTPS redirect topology, TUI backend-TLS editing) plus the review fixes below.
