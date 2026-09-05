@@ -124,6 +124,9 @@ export async function provisionPlatformService({
   const providerContext = {
     connectionSecretReference: project.config.connectionSecretReferences[managedItem.id],
     ip: options.ip,
+    // Adapters that configure a provider through files inside its own LXC
+    // (Traefik's watched dynamic directory) need the created LXC id.
+    vmid: created.vmid,
     zone: project.config.baseLocalDomain
   };
   const setupPlan = await plugin.setup(providerAdapter, managedItem, providerContext);

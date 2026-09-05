@@ -57,10 +57,11 @@ nomina exposure publish --name pve --hostname pve.bunny.internal \
   --backend-ip 192.168.4.1 --backend-port 8006 --backend-tls --project-dir /root
 ```
 
-With `--backend-tls`, Caddy dials the backend over TLS with
-`insecure_skip_verify` — that only relaxes the **Caddy → backend** hop against
-the appliance's self-signed certificate. The **client → Caddy** hop stays fully
-trusted via step-ca.
+With `--backend-tls`, the reverse proxy dials the backend over TLS with
+verification relaxed (`insecure_skip_verify` on Caddy, `insecureSkipVerify` on
+a Traefik `serversTransport` scoped to that one service) — that only relaxes the
+**proxy → backend** hop against the appliance's self-signed certificate. The
+**client → proxy** hop stays fully trusted via step-ca.
 
 The interactive TUI asks "Does the backend serve HTTPS/TLS itself?" during
 publish, and again when editing an exposure (pre-filled with the current
@@ -68,38 +69,33 @@ value). The flag is stored in `nomina.yaml` (`exposure.backend.tls`) and
 survives domain changes, redirect toggles, and edits. Changed your mind?
 Re-publish the same exposure with/without the flag to flip it.
 
-## Experimental Real Adapters (v1.1)
+## Real Provider Adapters
 
-**Status: Beta/Experimental**
+**Status: Beta**
 
-NominaConnect 1.1 introduces the first real provider adapter for Technitium DNS.
-This replaces the previous test-only adapters with actual Proxmox LXC provisioning
-and live Technitium API integration.
+The installed `nomina` binary composes real adapters by default: commands create
+actual Proxmox LXCs and talk to the providers' own control surfaces.
 
 **Currently Supported:**
-- ✅ Technitium DNS (real LXC creation + API operations)
-- ⏳ Caddy reverse proxy (coming soon)
-- ⏳ Traefik reverse proxy (coming soon)
-- ⏳ step-ca certificate authority (coming soon)
-- ⏳ Caddy Internal CA (coming soon)
+- ✅ Technitium DNS — real LXC + live Technitium API (`:5380`)
+- ✅ Caddy reverse proxy — real LXC + Caddy Admin API (`:2019`)
+- ✅ Traefik reverse proxy — real LXC + watched dynamic file directory
+- ✅ step-ca certificate authority (Caddy and Traefik exposures)
+- ✅ Caddy Internal CA
 - ⏳ Tailscale VPN (coming soon)
 - ⏳ NetBird VPN (coming soon)
 
 **What This Means:**
-- The Technitium adapter now creates real Debian LXCs on your Proxmox host
-- DNS records are managed through the live Technitium API (port 5380)
 - Provider credentials are stored securely in root-owned local files
-- All operations include timeout, secret redaction, and structured error handling
+- All operations include timeouts, secret redaction, and structured errors
+- Direct edits made in a provider's own UI or config files are inspected and
+  adopted rather than overwritten
 
 **Known Limitations:**
-- Only Technitium is fully implemented as a real adapter
-- Other providers still use test/generic adapters
-- Production use of the Technitium adapter is experimental
+- Without a certificate authority, Caddy and Traefik exposures serve their own
+  self-signed certificate — HTTPS, but untrusted until you select step-ca
+- The VPN providers still use the generic adapter
 - Backup and disaster recovery procedures are still being refined
-
-**Roadmap:**
-Future releases will add real adapters for the remaining providers (Caddy, Traefik,
-step-ca, etc.) to complete the production adapter implementation.
 
 You can also run subcommands directly — they use the same guided prompts when
 flags are omitted:

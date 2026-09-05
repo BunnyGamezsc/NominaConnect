@@ -4,7 +4,7 @@ function providerRequest(name, managedItem, context = {}, extra = {}) {
     managedItemId: managedItem.id,
     ...extra
   };
-  for (const key of ["connectionSecretReference", "ip", "endpoint", "zone"]) {
+  for (const key of ["connectionSecretReference", "ip", "endpoint", "zone", "vmid"]) {
     if (context[key] !== undefined) {
       request[key] = context[key];
     }

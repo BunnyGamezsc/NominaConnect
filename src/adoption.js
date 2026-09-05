@@ -301,6 +301,7 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
   const proxyService = project.config.managedInventory.platform.reverseProxy;
   const proxyRef = proxyService ? project.state.providerReferences[proxyService.id] : undefined;
   const proxyAdapter = proxyService ? providerAdapters[proxyService.service] : undefined;
+  const proxyLabel = proxyService?.service === "traefik" ? "Traefik" : "Caddy";
 
   for (const service of collectExposedServices(project.config.managedInventory)) {
     const hostname = service.exposure.hostname;
@@ -322,7 +323,7 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
           warnings.push({
             serviceName: service.name ?? hostname,
             platformKey: "reverseProxy",
-            message: `Ambiguous Caddy route for ${hostname} (${matchedRoutes.length} matches); managed route was not adopted.`
+            message: `Ambiguous ${proxyLabel} route for ${hostname} (${matchedRoutes.length} matches); managed route was not adopted.`
           });
           continue;
         }
@@ -344,7 +345,9 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
             };
             const health = proxyAdapter.healthCheckExposure
               ? await withBoundedRetry(
-                  () => proxyAdapter.healthCheckExposure({ hostname, backendIp: newBackend.ip, backendPort: newBackend.port, caStrategy: service.exposure.certificateAuthority, ip: proxyRef.ip }),
+                  // vmid travels with the request so a proxy that verifies
+                  // certificates inside its LXC can still do so from tracking.
+                  () => proxyAdapter.healthCheckExposure({ hostname, backendIp: newBackend.ip, backendPort: newBackend.port, caStrategy: service.exposure.certificateAuthority, ip: proxyRef.ip, vmid: proxyRef.vmid }),
                   retryOptions
                 )
               : { status: "healthy" };
