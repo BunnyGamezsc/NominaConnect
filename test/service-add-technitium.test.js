@@ -343,7 +343,10 @@ test("nomina service add technitium reports unhealthy health checks", async () =
         technitium: createTechnitiumAdapter({
           health: { process: "stopped", endpoint: "unreachable" }
         })
-      }
+      },
+      // The health check now settles on the status, so a permanently unhealthy
+      // provider exhausts every attempt; skip the real backoff waits.
+      retryOptions: { baseDelayMs: 0, sleep: async () => {} }
     }
   );
 
@@ -391,4 +394,39 @@ test("nomina service add technitium rejects a second provisioning attempt", asyn
     ),
     /already provisioned/i
   );
+});
+
+// Live Proxmox run (2026-09-06): step-ca reported "unhealthy" at provision time
+// while its unit was in fact up — the CA answers /health only a beat after
+// systemd starts it. Provisioning wrapped the health check in withBoundedRetry,
+// which only retries a *thrown* error; adapters return an unhealthy result
+// instead of throwing, so the first probe was final. Settle like exposure does.
+test("nomina service add settles a health check that is not ready on the first probe", async () => {
+  const filesystem = new FakeFilesystem();
+  seedProject(filesystem);
+  const proxmox = createProxmoxAdapter();
+
+  let probes = 0;
+  const adapter = createTechnitiumAdapter();
+  adapter.healthCheck = () => {
+    probes += 1;
+    return probes === 1
+      ? { process: "running", endpoint: "unreachable" }
+      : { process: "running", endpoint: "reachable" };
+  };
+
+  const result = await runCli(
+    ["service", "add", "technitium", "--project-dir", "/projects/bunnyhome", "--ip", "10.0.0.53"],
+    {
+      filesystem,
+      runtime: proxmoxRootRuntime(),
+      proxmox,
+      providerAdapters: { technitium: adapter },
+      retryOptions: { baseDelayMs: 0, sleep: async () => {} }
+    }
+  );
+
+  assert.ok(probes > 1, "health check should be retried until it settles");
+  assert.equal(result.health.status, "healthy");
+  assert.match(result.stdout, /Health: healthy/);
 });

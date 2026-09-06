@@ -10,7 +10,7 @@ import { proxyEndpointFor, publishManagedExposure, stepCaCaHost } from "./exposu
 import { getPlatformProvider } from "./providers.js";
 import { provisionPlatformService, resolveServiceDeployment } from "./provisioning.js";
 import { ensureConnectionSecret, updateConnectionSecret } from "./secrets.js";
-import { withBoundedRetry } from "./adoption.js";
+import { withBoundedRetry, withHealthyRetry } from "./adoption.js";
 import {
   runTrackingJob,
   formatPendingNotices,
@@ -35,6 +35,13 @@ import {
   promptSecretServiceName,
   confirmPrompt
 } from "./tui.js";
+
+// Display names that simple capitalization gets wrong.
+const SERVICE_DISPLAY_LABELS = Object.freeze({ netbird: "NetBird" });
+
+function serviceDisplayLabel(name) {
+  return SERVICE_DISPLAY_LABELS[name] ?? `${name.charAt(0).toUpperCase()}${name.slice(1)}`;
+}
 
 export async function runCli(argumentsList, adapters) {
   if (argumentsList.length === 0) {
@@ -288,8 +295,8 @@ async function changeConnectionSecret(options, adapters) {
   if (!reference) {
     throw new Error(`No connection secret reference for ${label ?? serviceId}.`);
   }
-  const displayLabel = label ? label.charAt(0).toUpperCase() + label.slice(1) : serviceId;
-  await updateConnectionSecret(adapters, displayLabel, reference);
+  const displayLabel = label ? serviceDisplayLabel(label) : serviceId;
+  await updateConnectionSecret(adapters, displayLabel, reference, options);
   return { stdout: `Connection secret for ${displayLabel} updated.\n` };
 }
 
@@ -356,7 +363,7 @@ async function addTechnitiumService(options, adapters) {
     throw new Error("Proxmox adapter is unavailable.");
   }
 
-  await ensureConnectionSecret(adapters, "Technitium", project.config.connectionSecretReferences[dnsService.id]);
+  await ensureConnectionSecret(adapters, "Technitium", project.config.connectionSecretReferences[dnsService.id], options);
 
   const result = await provisionPlatformService({
     project,
@@ -365,7 +372,8 @@ async function addTechnitiumService(options, adapters) {
     managedItem: dnsService,
     options: resolvedOptions,
     proxmox,
-    providerAdapter
+    providerAdapter,
+    retryOptions: adapters.retryOptions
   });
 
   const deployment = {
@@ -441,7 +449,7 @@ async function addReverseProxyService(serviceName, serviceLabel, promptOptions, 
     throw new Error("Proxmox adapter is unavailable.");
   }
 
-  await ensureConnectionSecret(adapters, serviceLabel, project.config.connectionSecretReferences[proxyService.id]);
+  await ensureConnectionSecret(adapters, serviceLabel, project.config.connectionSecretReferences[proxyService.id], options);
 
   const result = await provisionPlatformService({
     project,
@@ -450,7 +458,8 @@ async function addReverseProxyService(serviceName, serviceLabel, promptOptions, 
     managedItem: proxyService,
     options: resolvedOptions,
     proxmox,
-    providerAdapter
+    providerAdapter,
+    retryOptions: adapters.retryOptions
   });
 
   const deployment = {
@@ -540,7 +549,7 @@ async function addStepCaService(options, adapters) {
     throw new Error("Proxmox adapter is unavailable.");
   }
 
-  await ensureConnectionSecret(adapters, "step-ca", project.config.connectionSecretReferences[caService.id]);
+  await ensureConnectionSecret(adapters, "step-ca", project.config.connectionSecretReferences[caService.id], options);
 
   const result = await provisionPlatformService({
     project,
@@ -549,7 +558,8 @@ async function addStepCaService(options, adapters) {
     managedItem: caService,
     options: resolvedOptions,
     proxmox,
-    providerAdapter
+    providerAdapter,
+    retryOptions: adapters.retryOptions
   });
 
   const deployment = {
@@ -621,7 +631,7 @@ async function addCaddyInternalCaService(options, adapters) {
   }
 
   const plugin = getPlatformProvider("caddy-internal-ca");
-  await ensureConnectionSecret(adapters, "Caddy Internal CA", project.config.connectionSecretReferences[caService.id]);
+  await ensureConnectionSecret(adapters, "Caddy Internal CA", project.config.connectionSecretReferences[caService.id], options);
   const setupPlan = await plugin.setup(providerAdapter, caService, {
     connectionSecretReference: project.config.connectionSecretReferences[caService.id]
   });
@@ -657,7 +667,7 @@ async function addCaddyInternalCaService(options, adapters) {
   };
 }
 
-async function addVpnService(serviceName, serviceLabel, promptOptions, options, adapters) {
+async function addVpnService(serviceName, serviceLabel, promptOptions, options, adapters, secretLabel = serviceLabel) {
   const { filesystem, runtime, proxmox, providerAdapters = {} } = adapters;
   assertProxmoxShell(runtime);
 
@@ -686,7 +696,7 @@ async function addVpnService(serviceName, serviceLabel, promptOptions, options, 
     throw new Error("Proxmox adapter is unavailable.");
   }
 
-  await ensureConnectionSecret(adapters, serviceLabel, project.config.connectionSecretReferences[vpnService.id]);
+  await ensureConnectionSecret(adapters, secretLabel, project.config.connectionSecretReferences[vpnService.id], options);
 
   const result = await provisionPlatformService({
     project,
@@ -695,7 +705,8 @@ async function addVpnService(serviceName, serviceLabel, promptOptions, options, 
     managedItem: vpnService,
     options: resolvedOptions,
     proxmox,
-    providerAdapter
+    providerAdapter,
+    retryOptions: adapters.retryOptions
   });
 
   const deployment = {
@@ -721,17 +732,29 @@ async function addVpnService(serviceName, serviceLabel, promptOptions, options, 
   writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
   filesystem.chmod(project.statePath, 0o600);
 
+  const formatted = formatPlatformProvisionResult({
+    serviceLabel,
+    ip: resolvedOptions.ip,
+    hostname: result.lxcSpec.hostname,
+    providerReference: result.providerReference,
+    warnings: result.warnings,
+    health: result.health,
+    inspectedCount: result.inspection.unmanaged.length,
+    inspectedLabel: "unmanaged VPN resource(s) preserved"
+  });
+  // The address that actually matters for a VPN is the one on the private
+  // network, so report it when the client told us what it is.
+  const enrolled = [...result.inspection.managed, ...result.inspection.unmanaged]
+    .find((resource) => resource?.self === true);
+  const vpnAddress = (enrolled?.tailscaleIps ?? enrolled?.netbirdIps ?? [])[0];
+  const enrolledName = enrolled?.locator?.dnsName ?? enrolled?.locator?.fqdn ?? enrolled?.hostname ?? enrolled?.id;
+  const enrollmentLine = enrolled === undefined
+    ? ""
+    : `Enrolled as ${enrolledName}${vpnAddress === undefined ? "" : ` (${vpnAddress})`}.\n`;
+
   return {
-    ...formatPlatformProvisionResult({
-      serviceLabel,
-      ip: resolvedOptions.ip,
-      hostname: result.lxcSpec.hostname,
-      providerReference: result.providerReference,
-      warnings: result.warnings,
-      health: result.health,
-      inspectedCount: result.inspection.unmanaged.length,
-      inspectedLabel: "unmanaged VPN resource(s) preserved"
-    }),
+    ...formatted,
+    stdout: `${formatted.stdout}${enrollmentLine}`,
     inspection: result.inspection,
     lxcSpec: result.lxcSpec,
     providerReference: result.providerReference
@@ -739,11 +762,29 @@ async function addVpnService(serviceName, serviceLabel, promptOptions, options, 
 }
 
 async function addTailscaleService(options, adapters) {
-  return addVpnService("tailscale", "Tailscale", promptTailscaleOptions, options, adapters);
+  // Naming the credential in the prompt matters: Tailscale enrollment needs a
+  // tailnet auth key from the admin console, not an account password.
+  return addVpnService(
+    "tailscale",
+    "Tailscale",
+    promptTailscaleOptions,
+    options,
+    adapters,
+    "Tailscale (tailnet auth key)"
+  );
 }
 
 async function addNetBirdService(options, adapters) {
-  return addVpnService("netbird", "NetBird", promptNetBirdOptions, options, adapters);
+  // Naming the credential in the prompt matters: NetBird enrollment needs a
+  // setup key from the dashboard, not an account password.
+  return addVpnService(
+    "netbird",
+    "NetBird",
+    promptNetBirdOptions,
+    options,
+    adapters,
+    "NetBird (setup key)"
+  );
 }
 
 async function upgradeService(serviceName, rawOptions, adapters) {
@@ -807,8 +848,9 @@ async function upgradeService(serviceName, rawOptions, adapters) {
   const connectionSecretReference = project.config.connectionSecretReferences[managedItem.id];
   await ensureConnectionSecret(
     adapters,
-    resolvedServiceName.charAt(0).toUpperCase() + resolvedServiceName.slice(1),
-    connectionSecretReference
+    serviceDisplayLabel(resolvedServiceName),
+    connectionSecretReference,
+    options
   );
   const upgradePlan = await plugin.upgrade(adapter, managedItem, { connectionSecretReference });
   const commands = upgradePlan.lxcCommands ?? upgradePlan.operations ?? [];
@@ -831,12 +873,17 @@ async function upgradeService(serviceName, rawOptions, adapters) {
     zone: project.config.baseLocalDomain
   };
   const inspection = await plugin.inspect(adapter, managedItem, upgradeContext);
-  const health = await plugin.healthCheck(adapter, managedItem, upgradeContext);
+  // An upgrade restarts the provider, so the probe lands squarely in its
+  // startup window; a single unretried check reports a false "unhealthy".
+  const health = await withHealthyRetry(
+    () => plugin.healthCheck(adapter, managedItem, upgradeContext),
+    { maxAttempts: 7, baseDelayMs: 2000, backoffFactor: 1.5, ...(adapters.retryOptions ?? {}) }
+  );
 
   const snapshotText = snapshotResult ? `Snapshot ${snapshotResult.snapshotName ?? snapshotResult.name} created. ` : "";
   const healthLabel = health.status === "healthy" ? "healthy" : "unhealthy";
   const hostname = managedItem.deployment?.hostname ?? resolvedServiceName;
-  const serviceLabel = resolvedServiceName.charAt(0).toUpperCase() + resolvedServiceName.slice(1);
+  const serviceLabel = serviceDisplayLabel(resolvedServiceName);
 
   return {
     stdout: `${snapshotText}${serviceLabel} upgraded on ${hostname} (vmid ${vmid}). Health: ${healthLabel}.\n`,
@@ -1132,23 +1179,29 @@ async function recheckService(serviceName, rawOptions, adapters) {
   }
   const connectionSecretReference = project.config.connectionSecretReferences[managedItem.id];
   // Ensure secret exists (for Technitium etc.)
-  await ensureConnectionSecret(adapters, resolvedServiceName.charAt(0).toUpperCase() + resolvedServiceName.slice(1), connectionSecretReference);
+  await ensureConnectionSecret(adapters, serviceDisplayLabel(resolvedServiceName), connectionSecretReference);
   const providerContext = {
     connectionSecretReference,
     ip,
+    // Adapters that reach their provider through its own LXC (Tailscale's CLI)
+    // cannot inspect anything without the container id.
+    vmid,
     zone: project.config.baseLocalDomain
   };
   const plugin = getPlatformProvider(managedItem.service);
-  const health = await withBoundedRetry(
+  // Same settling window as provisioning: an adapter reports "not ready yet" as
+  // an unhealthy result, not a thrown error, so retrying on the status is what
+  // keeps recheck from failing a provider that is merely still starting.
+  const health = await withHealthyRetry(
     () => plugin.healthCheck(providerAdapter, managedItem, providerContext),
-    { maxRetries: 6, baseDelayMs: 2000, backoffFactor: 1.5 }
+    { maxAttempts: 7, baseDelayMs: 2000, backoffFactor: 1.5, ...(adapters.retryOptions ?? {}) }
   );
   if (health.status !== "healthy") {
     throw new Error(`LXC ${vmid} at ${ip} is not healthy (process=${health.process}, endpoint=${health.endpoint}). Check 'pct exec ${vmid} -- systemctl status' and try again.`);
   }
   const inspection = await withBoundedRetry(
     () => plugin.inspect(providerAdapter, managedItem, { ...providerContext, providerReferences: platformKey === "dns" ? [project.config.baseLocalDomain] : [] }),
-    { maxRetries: 6, baseDelayMs: 2000, backoffFactor: 1.5 }
+    { maxRetries: 6, baseDelayMs: 2000, backoffFactor: 1.5, ...(adapters.retryOptions ?? {}) }
   );
   const deployment = {
     ip,
@@ -1160,11 +1213,18 @@ async function recheckService(serviceName, rawOptions, adapters) {
   };
   // Prefer actual lxcSpec-like deployment if inspection provides it, but keep our constructed one
   const updatedConfig = updatePlatformDeployment(project.config, platformKey, deployment);
+  const identity = [...(inspection?.managed ?? []), ...(inspection?.unmanaged ?? [])]
+    .find((resource) => resource?.self === true);
   const updatedState = {
     ...project.state,
     providerReferences: {
       ...project.state.providerReferences,
-      [managedItem.id]: { vmid, ip }
+      [managedItem.id]: {
+        vmid,
+        ip,
+        ...(identity?.locator === undefined ? {} : { locator: identity.locator }),
+        ...(identity?.fingerprint === undefined ? {} : { fingerprint: identity.fingerprint })
+      }
     }
   };
   writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
@@ -1654,7 +1714,8 @@ function parseServiceAddOptions(rawOptions) {
     ["--nameserver", "nameserver"],
     ["--cpus", "cpus"],
     ["--memory", "memoryMb"],
-    ["--disk", "diskGb"]
+    ["--disk", "diskGb"],
+    ["--secret", "secret"]
   ]);
   parseFlagOptions(rawOptions, optionNames, options);
   if (options.cpus !== undefined) options.cpus = Number(options.cpus);
@@ -1685,7 +1746,8 @@ function parseSecretChangeOptions(rawOptions) {
   const options = {};
   const optionNames = new Map([
     ["--project-dir", "projectDir"],
-    ["--service", "service"]
+    ["--service", "service"],
+    ["--secret", "secret"]
   ]);
   parseFlagOptions(rawOptions, optionNames, options);
   return options;
@@ -1732,7 +1794,8 @@ function parseServiceUpgradeOptions(rawOptions) {
     ["--project-dir", "projectDir"],
     ["--snapshot", "snapshot"],
     ["--no-snapshot", "noSnapshot"],
-    ["--snapshot-name", "snapshotName"]
+    ["--snapshot-name", "snapshotName"],
+    ["--secret", "secret"]
   ]);
   const booleanFlags = new Set(["--snapshot", "--no-snapshot"]);
   parseFlagOptions(rawOptions, optionNames, options, booleanFlags);

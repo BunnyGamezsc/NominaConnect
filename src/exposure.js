@@ -242,7 +242,27 @@ export async function publishManagedExposure({
     integrationReferences: {
       dns: hostname,
       reverseProxy: hostname,
-      ...(caService ? { certificateAuthority: hostname } : {})
+      ...(caService ? { certificateAuthority: hostname } : {}),
+      // The provider-native locator and fingerprint observed right after
+      // publishing. Background tracking compares against these to notice a
+      // direct edit in Technitium or the proxy (ADR-0002).
+      integrations: {
+        ...integrationIdentity("dns", dnsInspection, hostname),
+        ...integrationIdentity("reverseProxy", proxyInspection, hostname)
+      }
+    }
+  };
+}
+
+function integrationIdentity(integration, inspection, hostname) {
+  const matches = (inspection?.managed ?? []).filter((resource) => resource.id === hostname);
+  if (matches.length !== 1 || matches[0].locator === undefined) {
+    return {};
+  }
+  return {
+    [integration]: {
+      locator: matches[0].locator,
+      ...(matches[0].fingerprint === undefined ? {} : { fingerprint: matches[0].fingerprint })
     }
   };
 }

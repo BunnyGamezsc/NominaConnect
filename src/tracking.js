@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { runAdoptionPass } from "./adoption.js";
 import { loadProject, serializeProjectConfiguration } from "./config.js";
-import { adoptPlatformDeployment, adoptServiceExposure } from "./adoption.js";
+import { adoptPlatformDeployment, adoptServiceExposure, applyProviderReferenceChange } from "./adoption.js";
 
 let writeQueue = Promise.resolve();
 
@@ -31,16 +31,22 @@ export async function runTrackingJob({ filesystem, projectDir, providerAdapters 
       }
 
       let updatedConfig = currentProject.config;
+      let updatedProviderReferences = currentProject.state.providerReferences ?? {};
       for (const change of adoptionResult.changes) {
         if (change.kind === "platform-deployed" || change.kind === "platform-changed") {
           updatedConfig = adoptPlatformDeployment(updatedConfig, change.platformKey, change.after);
         } else if (change.kind === "exposure-changed" || change.kind === "service-changed") {
           updatedConfig = adoptServiceExposure(updatedConfig, change.serviceId, change.after?.exposure ?? change.after);
+        } else if (change.kind === "provider-reference-changed") {
+          // Provider references are local state, never project configuration:
+          // a provider-native locator belongs outside nomina.yaml (ADR-0003).
+          updatedProviderReferences = applyProviderReferenceChange(updatedProviderReferences, change);
         }
       }
 
       const updatedState = {
         ...currentProject.state,
+        providerReferences: updatedProviderReferences,
         tracking: {
           ...currentProject.state.tracking,
           notices: [
@@ -115,6 +121,15 @@ export function formatChangeSummary(change) {
   if (change.kind === "exposure-changed") {
     const fields = Object.keys(change.changes || {});
     return `${change.serviceName} exposure ${fields.join(", ")} changed.`;
+  }
+  if (change.kind === "provider-reference-changed") {
+    const target = change.integration === undefined
+      ? change.serviceName
+      : `${change.serviceName} (${change.integration})`;
+    if (change.before === undefined) {
+      return `Provider reference for ${target} recorded.`;
+    }
+    return `${target} changed in its provider; the managed provider reference was adopted.`;
   }
   if (change.kind === "upgrade-available") {
     return `An upgrade is available for ${change.serviceName} (${change.after}). Run 'nomina service upgrade ${change.serviceName}' to upgrade.`;

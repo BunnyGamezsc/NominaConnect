@@ -1,6 +1,6 @@
 {
   "name": "nominaconnect",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
   "bin": {
@@ -9,9 +9,12 @@
   "scripts": {
     "test": "node --test",
     "typecheck": "tsc --noEmit",
-    "build:native": "bun build --compile --outfile dist/nomina bin/nomina.js",
+    "build:native": "bun build --compile --target=bun-linux-x64-baseline --outfile dist/nomina-linux-x64 bin/nomina.js",
+    "build:native:arm64": "bun build --compile --target=bun-linux-arm64 --outfile dist/nomina-linux-arm64 bin/nomina.js",
+    "build:native:local": "bun build --compile --outfile dist/nomina bin/nomina.js",
     "build:node": "cp bin/nomina.js dist/nomina.js && chmod +x dist/nomina.js",
-    "build:all": "bun run build:native && bun run build:node"
+    "build:all": "bun run build:native && bun run build:native:arm64 && bun run build:node",
+    "test:acceptance": "node --test acceptance/live-proxmox.acceptance.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

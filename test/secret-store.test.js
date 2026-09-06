@@ -244,3 +244,83 @@ test("nomina service add technitium rejects an unstored connection secret withou
     /No connection secret is stored for Technitium/i
   );
 });
+
+test("nomina service add technitium accepts --secret flag non-interactively", async () => {
+  const filesystem = new FakeFilesystem();
+  seedProject(filesystem);
+  const secretStore = createMemorySecretStore();
+
+  const result = await runCli(
+    [
+      "service", "add", "technitium",
+      "--project-dir", "/projects/bunnyhome",
+      "--ip", "10.0.0.53",
+      "--secret", "headless-flag-secret"
+    ],
+    {
+      filesystem,
+      runtime: proxmoxRootRuntime(),
+      proxmox: createProxmoxAdapter(),
+      providerAdapters: { technitium: createTechnitiumAdapter() },
+      secretStore
+    }
+  );
+
+  assert.match(result.stdout, /Technitium provisioned/i);
+  assert.equal(secretStore.get("nominaconnect/provider/nc_dns_test"), "headless-flag-secret");
+});
+
+test("nomina service add technitium accepts NOMINA_SECRET env var non-interactively", async () => {
+  const filesystem = new FakeFilesystem();
+  seedProject(filesystem);
+  const secretStore = createMemorySecretStore();
+  const oldEnv = process.env.NOMINA_SECRET;
+  process.env.NOMINA_SECRET = "env-var-secret";
+
+  try {
+    const result = await runCli(
+      ["service", "add", "technitium", "--project-dir", "/projects/bunnyhome", "--ip", "10.0.0.53"],
+      {
+        filesystem,
+        runtime: proxmoxRootRuntime(),
+        proxmox: createProxmoxAdapter(),
+        providerAdapters: { technitium: createTechnitiumAdapter() },
+        secretStore
+      }
+    );
+
+    assert.match(result.stdout, /Technitium provisioned/i);
+    assert.equal(secretStore.get("nominaconnect/provider/nc_dns_test"), "env-var-secret");
+  } finally {
+    if (oldEnv === undefined) {
+      delete process.env.NOMINA_SECRET;
+    } else {
+      process.env.NOMINA_SECRET = oldEnv;
+    }
+  }
+});
+
+test("nomina secret change accepts --secret flag non-interactively", async () => {
+  const filesystem = new FakeFilesystem();
+  seedProject(filesystem);
+  const secretStore = createMemorySecretStore({
+    "nominaconnect/provider/nc_dns_test": "initial-secret"
+  });
+
+  const result = await runCli(
+    [
+      "secret", "change",
+      "--project-dir", "/projects/bunnyhome",
+      "--service", "nc_dns_test",
+      "--secret", "updated-headless-secret"
+    ],
+    {
+      filesystem,
+      runtime: proxmoxRootRuntime(),
+      secretStore
+    }
+  );
+
+  assert.match(result.stdout, /Connection secret for .* updated/i);
+  assert.equal(secretStore.get("nominaconnect/provider/nc_dns_test"), "updated-headless-secret");
+});

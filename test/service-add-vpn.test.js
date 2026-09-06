@@ -358,7 +358,10 @@ test("nomina service add tailscale reports unhealthy health checks", async () =>
         tailscale: createTailscaleAdapter({
           health: { process: "stopped", endpoint: "unreachable" }
         })
-      }
+      },
+      // The health check settles on the status, so a permanently unhealthy
+      // provider exhausts every attempt; skip the real backoff waits.
+      retryOptions: { baseDelayMs: 0, sleep: async () => {} }
     }
   );
 

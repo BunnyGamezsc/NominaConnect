@@ -82,8 +82,8 @@ actual Proxmox LXCs and talk to the providers' own control surfaces.
 - ✅ Traefik reverse proxy — real LXC + watched dynamic file directory
 - ✅ step-ca certificate authority (Caddy and Traefik exposures)
 - ✅ Caddy Internal CA
-- ⏳ Tailscale VPN (coming soon)
-- ⏳ NetBird VPN (coming soon)
+- ✅ Tailscale VPN — real LXC + `tailscale` client enrolled with a tailnet auth key
+- ✅ NetBird VPN — real LXC + `netbird` client enrolled with a setup key
 
 **What This Means:**
 - Provider credentials are stored securely in root-owned local files
@@ -92,9 +92,17 @@ actual Proxmox LXCs and talk to the providers' own control surfaces.
   adopted rather than overwritten
 
 **Known Limitations:**
+- VPN enrollment needs a credential you create up front: a Tailscale auth key
+  (`https://login.tailscale.com/admin/settings/keys` → Generate auth key —
+  one-use is fine) or a NetBird setup key. The installer prompts for it, and
+  NominaConnect never writes it to `nomina.yaml`, state, or command output.
 - Without a certificate authority, Caddy and Traefik exposures serve their own
   self-signed certificate — HTTPS, but untrusted until you select step-ca
-- The VPN providers still use the generic adapter
+- A VPN LXC needs the host's TUN device; NominaConnect adds it with
+  `pct set <vmid> --dev0 /dev/net/tun` on Proxmox 8.2 and later, and tells you
+  what to add by hand on older hosts
+- NetBird enrolls against NetBird Cloud; a self-hosted management server is not
+  selectable yet
 - Backup and disaster recovery procedures are still being refined
 
 You can also run subcommands directly — they use the same guided prompts when
@@ -118,6 +126,8 @@ You do not pass a project path.
 - [MVP spec](docs/specs/nominaconnect-proxmox-cli-mvp.md) — full product requirements.
 - [Real Adapters Spec](docs/specs/real-provider-adapters.md) — production adapter implementation plan.
 - [Manual reference path](docs/manual/dns-proxy-tls.md) — validation workflow for DNS + proxy + TLS.
+- [Live Proxmox acceptance](docs/live-proxmox-acceptance.md) — running the disposable-host acceptance suite.
+- [Proxmox test run](docs/proxmox-test-run.md) — worked first-run walkthrough against a disposable host.
 - [Domain language](CONTEXT.md) — ubiquitous terms used across the project.
 - [ADRs](docs/adr/) — recorded implementation decisions.
 - [Changelog](CHANGELOG.md) — version history and changes.
@@ -130,10 +140,29 @@ You do not pass a project path.
 - The interactive TUI is the default; flags exist for automation and tests.
 - Generated provider configuration is inspectable; NominaConnect adopts observable changes.
 
+## Testing
+
+```bash
+npm test              # unit, contract, and adapter conformance suites
+npm run test:acceptance   # disposable live-Proxmox acceptance run (opt-in)
+```
+
+`npm test` includes the adapter conformance suite, which drives every provider
+in the initial platform catalog — Technitium, Caddy, Traefik, step-ca, Caddy
+Internal CA, Tailscale, NetBird — through the same production adapter set the
+installed binary wires, against controlled command and HTTP fixtures. A
+provider cannot join the catalog with only partial real behaviour and still
+pass. The faster fake-adapter tests remain alongside it as unit coverage.
+
+The acceptance run is opt-in and never runs by accident; see
+[docs/live-proxmox-acceptance.md](docs/live-proxmox-acceptance.md).
+
 ## Repository map
 
 - `bin/nomina.js` — entry point; wires the TUI and Proxmox adapters.
 - `src/cli.js` — command handlers shared by the menu and subcommands.
 - `src/tui.js` — menus and guided prompts.
 - `src/prompts.js` — production prompt adapter (`@clack/prompts`).
+- `test/fixtures/provider-environments.js` — the disposable stand-in for a Proxmox host and the provider catalog.
+- `acceptance/live-proxmox.acceptance.mjs` — opt-in acceptance run against a real disposable Proxmox host.
 - `examples/homelab.yaml` — illustrative legacy system definition format.

@@ -5,6 +5,14 @@ import { findProjectDirectory, loadProject } from "./config.js";
 import { TECHNITIUM_DEPLOYMENT, CADDY_DEPLOYMENT, TRAEFIK_DEPLOYMENT, STEP_CA_DEPLOYMENT, TAILSCALE_DEPLOYMENT, NETBIRD_DEPLOYMENT, defaultGatewayFor } from "./provisioning.js";
 import { formatPendingNotices } from "./tracking.js";
 
+// The managed Technitium resolver a service LXC will default its nameserver
+// to once DNS is provisioned (mirrors resolveServiceDeployment). Shown in
+// setup summaries so the operator sees the effective default, not the
+// gateway fallback.
+function managedTechnitiumIp(project) {
+  return project?.state?.providerReferences?.[project?.config?.managedInventory?.platform?.dns?.id]?.ip;
+}
+
 export function getProjectContext(filesystem, cwd = ".") {
   const projectDirectory = findProjectDirectory(filesystem, cwd);
   if (projectDirectory === undefined) {
@@ -749,7 +757,7 @@ export async function promptReverseProxyOptions(project, existingOptions, prompt
     `Bridge: ${existingOptions.bridge ?? project.config.proxmox.defaultBridge}`,
     `Storage: ${existingOptions.storage ?? project.config.proxmox.defaultStorage}`,
     `Gateway: ${existingOptions.gateway ?? defaultGatewayFor(ip)}`,
-    `Nameserver: ${existingOptions.nameserver ?? existingOptions.gateway ?? defaultGatewayFor(ip)}`
+    `Nameserver: ${existingOptions.nameserver ?? managedTechnitiumIp(project) ?? existingOptions.gateway ?? defaultGatewayFor(ip)}`
   ].join("\n"));
 
   return {

@@ -10,8 +10,8 @@ test("technitium install plan installs curl before downloading the installer", a
   const plan = await adapter.setup({});
 
   assert.deepEqual(plan.lxcCommands.slice(0, 2), [
-    { binary: "/usr/bin/apt-get", args: ["update"] },
-    { binary: "/usr/bin/apt-get", args: ["install", "--yes", "curl", "ca-certificates"] }
+    { binary: "/usr/bin/apt-get", args: ["update"], timeoutMs: 180_000 },
+    { binary: "/usr/bin/apt-get", args: ["install", "--yes", "curl", "ca-certificates"], timeoutMs: 180_000 }
   ]);
   assert.equal(plan.lxcCommands[2].binary, "/usr/bin/curl");
   assert.equal(plan.lxcCommands[3].binary, "/bin/bash");

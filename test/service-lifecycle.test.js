@@ -432,7 +432,10 @@ test("nomina service upgrade reports unhealthy health outcome", async () => {
       filesystem,
       runtime: proxmoxRootRuntime(),
       proxmox,
-      providerAdapters: { technitium }
+      providerAdapters: { technitium },
+      // The post-upgrade check settles on the status, so a permanently
+      // unhealthy provider exhausts every attempt; skip the backoff waits.
+      retryOptions: { baseDelayMs: 0, sleep: async () => {} }
     }
   );
 
@@ -687,4 +690,38 @@ test("nomina service rejects unknown subcommand", async () => {
     }),
     /add\|upgrade\|remove\|destroy/i
   );
+});
+
+
+// An upgrade restarts the provider, so the health probe lands in its startup
+// window. This used to be a single unretried check and reported a false
+// "unhealthy" for a service that came up a beat later.
+test("nomina service upgrade settles a health check that is not ready on the first probe", async () => {
+  const filesystem = new FakeFilesystem();
+  seedProvisionedProject(filesystem);
+  const proxmox = createProxmoxAdapter();
+
+  let probes = 0;
+  const technitium = createTechnitiumAdapter();
+  technitium.healthCheck = () => {
+    probes += 1;
+    return probes === 1
+      ? { process: "running", endpoint: "unreachable" }
+      : { process: "running", endpoint: "reachable" };
+  };
+
+  const result = await runCli(
+    ["service", "upgrade", "technitium", "--project-dir", "/projects/bunnyhome", "--no-snapshot"],
+    {
+      filesystem,
+      runtime: proxmoxRootRuntime(),
+      proxmox,
+      providerAdapters: { technitium },
+      retryOptions: { baseDelayMs: 0, sleep: async () => {} }
+    }
+  );
+
+  assert.ok(probes > 1, "post-upgrade health check should be retried until it settles");
+  assert.equal(result.health.status, "healthy");
+  assert.match(result.stdout, /Health: healthy/);
 });

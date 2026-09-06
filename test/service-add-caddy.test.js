@@ -212,7 +212,10 @@ test("nomina service add caddy reports unhealthy health checks", async () => {
         caddy: createCaddyAdapter({
           health: { process: "stopped", endpoint: "unreachable" }
         })
-      }
+      },
+      // The health check settles on the status, so a permanently unhealthy
+      // provider exhausts every attempt; skip the real backoff waits.
+      retryOptions: { baseDelayMs: 0, sleep: async () => {} }
     }
   );
 

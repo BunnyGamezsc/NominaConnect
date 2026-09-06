@@ -1,8 +1,145 @@
 # Changelog
 
-## [Unreleased]
+## [2.1.0] - 2026-09-06
 
 ### Added
+- **Adapter conformance across the catalog** (#21). One suite now drives every
+  provider in the initial platform catalog — Technitium, Caddy, Traefik,
+  step-ca, Caddy Internal CA, Tailscale, NetBird — through the *production*
+  adapter set the installed binary wires, not through fakes that only implement
+  the contract's shape.
+  - `test/fixtures/provider-environments.js` is a disposable stand-in for a
+    Proxmox host and the whole catalog: Technitium refuses an unauthenticated
+    call, Caddy serves its live admin config tree, Traefik reports only what its
+    file provider loaded, and the VPN clients answer over `pct exec`. Every
+    provider can be taken offline, drifted, duplicated or emptied.
+  - Each provider is held to setup, inspect, adopt, health-check and explicit
+    upgrade: install commands use a fixed binary and argument array, inspection
+    separates managed from unmanaged and mutates nothing, adoption records a
+    provider-native locator and fingerprint, an ambiguous match is refused with
+    a warning, a missing resource is preserved rather than rewritten, a stopped
+    provider is never reported healthy, and nothing short of
+    `nomina service upgrade` installs software.
+  - A provider added to the catalog without a conformance entry now fails the
+    suite.
+  - The existing fake-adapter tests are kept as fast unit coverage rather than
+    replaced.
+- **Disposable live-Proxmox acceptance run** (#21). `npm run test:acceptance`
+  runs the same public commands against a real, disposable Proxmox host and
+  verifies real LXC lifecycle, IP preflight, a serving HTTPS exposure with no
+  HTTP fallback, preserved unmanaged configuration, and VPN enrollment with a
+  redacted credential. It is opt-in, refuses to run without an explicit
+  disposable-host acknowledgement, and destroys only vmids it read back out of
+  its own project state. See `docs/live-proxmox-acceptance.md`.
+- **Provider-native adoption in background tracking** (#22). A peer renamed in
+  the Tailscale or NetBird console, a route rewritten directly in Caddy or
+  Traefik, and a record edited by hand in Technitium are now adopted by the
+  background tracking pass instead of only by a manual
+  `nomina service recheck`.
+  - Tracking resolves the stored provider-native locator first, then a resource
+    the adapter flags as its own, then the managed id, and calls
+    `adapter.adopt()` through the same plugin contract the foreground uses.
+  - The adopted locator and fingerprint are persisted into
+    `project.state.providerReferences` under the configuration write queue.
+    Exposed services record one identity per integration alongside the
+    hostnames publish already stored; an LXC's `vmid`/`ip` reference is left
+    intact.
+  - Missing, ambiguous, and conflicting matches produce verification warnings
+    and preserve the managed configuration rather than guessing. Nothing is
+    written to any provider, and no NominaConnect ID reaches provider
+    configuration (ADR-0003, ADR-0039).
+  - Adoptions are verified by the affected service's health check and reported
+    on the next CLI command through `nomina changes`.
+
+### Fixed
+- Background tracking reported a phantom backend change on every pass for every
+  exposed service: a port read back from `nomina.yaml` is a string while a
+  proxy reports a number, so the two never compared equal. Ports are now
+  compared numerically, and a pass with nothing to adopt writes nothing.
+- **step-ca was never reachable over validated TLS.** step-ca serves its own API
+  with a certificate issued by its own root, but the adapter used a validating
+  HTTPS client with no trust anchor, so every call to the CA failed certificate
+  verification and was reported as `unreachable` — health, inspection and the
+  ACME directory probe alike. The adapter now bootstraps trust the way
+  `step ca bootstrap` does: it fetches `/roots.pem` once over an unvalidated
+  connection, caches it per endpoint, and pins every subsequent request to that
+  root. Only that one bootstrap request skips verification.
+- **step-ca had no certificate SAN for the address it is reached at.**
+  `step ca init` requested names for the hostname, `localhost` and
+  `step-ca.<zone>`, but NominaConnect connects to the CA by IP, so validation
+  against the correct root still failed hostname verification. The CA's own IP
+  is now included in its SANs.
+- **A provider that was still starting was reported unhealthy.** Provisioning
+  and `nomina service recheck` wrapped the health probe in a retry that only
+  retries a *thrown* error, but adapters report "not ready yet" as an unhealthy
+  result — so the first probe was final, and `service recheck` failed outright.
+  `nomina service upgrade` probed once with no retry at all, immediately after
+  restarting the service it was checking. All three now settle on the health
+  status itself, the way exposure publishing already did.
+
+### Added
+- **Real NetBird VPN adapter** (#20). `nomina service add netbird` provisions a
+  NetBird LXC and enrolls it in your NetBird network for real.
+  - The setup key is resolved from the root-owned secret store and piped into
+    the LXC over standard input, written to a `0600` file under `/run`, and
+    handed to `netbird up --setup-key-file=`. It never appears in an argument
+    array, the Proxmox host's process list, `nomina.yaml`, local state, a change
+    notice, or an error message, and the file is deleted as soon as enrollment
+    finishes — including when the key is refused. A stored value that is not a
+    setup key is rejected before it reaches the management server.
+  - LXC prerequisites are checked before anything is installed, using the same
+    TUN device check as Tailscale (ADR-0038): NominaConnect adds the device from
+    the Proxmox host and re-checks, and otherwise fails with the exact `pct`
+    commands rather than leaving a half-installed client behind.
+  - The client is installed only from NetBird's own signed Debian repository,
+    and enrolled with `--disable-dns` so the LXC keeps the managed Technitium
+    resolver instead of NetBird's.
+  - A refused, reused, or expired setup key is reported as a failed enrollment
+    with the fix, not as an opaque command failure. An already-enrolled peer is
+    never re-registered.
+  - Inspection reads `netbird status --json`: the enrolled peer is identified by
+    its WireGuard public key (which survives a rename in the dashboard) and
+    recorded in local state with a fingerprint, while every other peer on the
+    network is reported as unmanaged and left alone. An ambiguous match is a
+    verification warning rather than an adoption. A client that has never logged
+    in reports its daemon state from the plain-text output older versions
+    produce instead of failing.
+  - Health distinguishes a running `netbird` daemon from a working VPN: a peer
+    whose session expired, or that has lost its management server, reports
+    unhealthy even though its process is up.
+  - `nomina service upgrade netbird` upgrades the client package and restarts it
+    without touching enrollment; background tracking inspects the same real
+    client and records a verification warning when it stops answering.
+
+- **Real Tailscale VPN adapter** (#19). `nomina service add tailscale`
+  provisions a Tailscale LXC and enrolls it in your tailnet for real.
+  - The tailnet auth key is resolved from the root-owned secret store and piped
+    into the LXC over standard input, written to a `0600` file under `/run`, and
+    handed to `tailscale up --auth-key=file:`. It never appears in an argument
+    array, the Proxmox host's process list, `nomina.yaml`, local state, a change
+    notice, or an error message, and the file is deleted as soon as enrollment
+    finishes — including when the key is refused. A stored value that is not a
+    tailnet auth key is rejected before it reaches the client.
+  - LXC prerequisites are checked before anything is installed. An unprivileged
+    container has no `/dev/net/tun`, so NominaConnect adds it from the Proxmox
+    host (`pct set <vmid> --dev0 /dev/net/tun`, `keyctl=1,nesting=1`, reboot) and
+    re-checks. If the host cannot provide it, setup fails with the exact
+    commands — and the Proxmox 7 `lxc.mount.entry` lines — instead of leaving a
+    half-installed client behind.
+  - A refused, reused, or expired auth key is reported as a failed enrollment
+    with the fix, not as an opaque command failure. An already-enrolled client
+    is never re-registered.
+  - Inspection reads `tailscale status --json`: the enrolled node is identified
+    by its provider-native node ID (which survives a rename in the admin
+    console) and recorded in local state with a fingerprint, while every other
+    tailnet peer is reported as unmanaged and left alone. An ambiguous match is
+    a verification warning rather than an adoption.
+  - Health distinguishes a running `tailscaled` from a working VPN: a node whose
+    key expired reports unhealthy even though its process is up.
+  - `nomina service upgrade tailscale` upgrades the client package and restarts
+    it without touching enrollment; background tracking inspects the same real
+    client and records a verification warning when it stops answering.
+
 - **Real Traefik reverse-proxy adapter** (#16). `nomina service add traefik`
   provisions a Traefik v3 LXC with a **watched dynamic configuration directory**
   (`/etc/traefik/dynamic`) and reports real process/endpoint health from
@@ -43,7 +180,19 @@
     printed by `nomina exposure publish`. The exposure stays on HTTPS with
     Traefik's own certificate and no unrelated Traefik configuration changes.
 
+### Changed
+- The command boundary can pass a resolved connection secret to a command over
+  standard input, so credentials never need to travel in an argument array.
+- Background tracking passes the managed LXC id and a VPN's provider-native
+  locator to adapters, so a provider that is inspected through its own container
+  can be tracked as well as provisioned.
+- The VPN LXC prerequisite check (ADR-0038) is one shared implementation used by
+  both VPN adapters, so a client that cannot get a TUN device always fails the
+  same way with the same remediation.
+
 ### Fixed
+- **NetBird was displayed as "Netbird"** in upgrade, recheck, and secret prompts,
+  because service labels were produced by capitalizing the catalog name.
 - **Proxy endpoints were hard-coded to Caddy's admin port** — exposure publish,
   removal, and domain change now derive the endpoint from the selected reverse
   proxy (`:2019` for Caddy, `:8080` for Traefik).

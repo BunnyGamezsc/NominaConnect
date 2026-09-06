@@ -15,11 +15,11 @@ const CADDY_PERSISTENCE_DROPIN = [
 ].join("\n");
 
 const CADDY_INSTALL = Object.freeze([
-  { binary: "/usr/bin/apt-get", args: ["update"] },
-  { binary: "/usr/bin/apt-get", args: ["install", "--yes", "debian-keyring", "debian-archive-keyring", "apt-transport-https", "curl"] },
-  { binary: "/usr/bin/curl", args: ["-1sLf", "https://dl.cloudsmith.io/public/caddy/stable/gpg.key", "-o", "/usr/share/keyrings/caddy-stable-archive-keyring.gpg"] },
-  { binary: "/bin/bash", args: ["-c", "curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt | tee /etc/apt/sources.list.d/caddy-stable.list"] },
-  { binary: "/usr/bin/apt-get", args: ["update"] },
+  { binary: "/usr/bin/apt-get", args: ["update"], timeoutMs: 180_000 },
+  { binary: "/usr/bin/apt-get", args: ["install", "--yes", "debian-keyring", "debian-archive-keyring", "apt-transport-https", "curl", "gnupg"], timeoutMs: 180_000 },
+  { binary: "/bin/bash", args: ["-c", "curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg"], timeoutMs: 180_000 },
+  { binary: "/bin/bash", args: ["-c", "curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt | tee /etc/apt/sources.list.d/caddy-stable.list"], timeoutMs: 60_000 },
+  { binary: "/usr/bin/apt-get", args: ["update"], timeoutMs: 180_000 },
   { binary: "/usr/bin/apt-get", args: ["install", "--yes", "caddy"], timeoutMs: 180_000 },
   {
     binary: "/bin/bash",
@@ -53,10 +53,10 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
       return {
         ...plan,
         lxcCommands: [
-          { binary: "/usr/bin/apt-get", args: ["install", "--only-upgrade", "--yes", "caddy"] },
+          { binary: "/usr/bin/apt-get", args: ["install", "--only-upgrade", "--yes", "caddy"], timeoutMs: 180_000 },
           // Pre-existing installs lack the persistence drop-in; without it a
           // restart wipes all published routes/TLS policies.
-          { binary: "/bin/bash", args: ["-c", `${CADDY_PERSISTENCE_DROPIN}\nsystemctl restart caddy`] }
+          { binary: "/bin/bash", args: ["-c", `${CADDY_PERSISTENCE_DROPIN}\nsystemctl restart caddy`], timeoutMs: 60_000 }
         ]
       };
     },

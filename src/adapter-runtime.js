@@ -5,7 +5,9 @@ import https from "node:https";
 import path from "node:path";
 
 import { createCaddyAdapter } from "./caddy-adapter.js";
+import { createNetBirdAdapter } from "./netbird-adapter.js";
 import { createStepCaAdapter } from "./step-ca-adapter.js";
+import { createTailscaleAdapter } from "./tailscale-adapter.js";
 import { createTechnitiumAdapter } from "./technitium-adapter.js";
 import { createTraefikAdapter } from "./traefik-adapter.js";
 
@@ -31,7 +33,11 @@ export function createCommandRunner(options = {}) {
       const normalized = normalizeCommand(command, defaultTimeoutMs);
       const result = redactResult(
         execute
-          ? await execute({ binary: normalized.binary, args: normalized.args })
+          ? await execute({
+              binary: normalized.binary,
+              args: normalized.args,
+              ...(normalized.stdin === undefined ? {} : { stdin: normalized.stdin })
+            })
           : await executeCommand({ spawn, ...normalized }),
         normalized.redactions
       );
@@ -148,7 +154,7 @@ export function createHttpClient(options = {}) {
       // admin endpoint rejects with 403.
       try {
         const result = await requestViaNodeModules(
-          { url: request.url, method: request.method, headers: request.headers, body: request.body },
+          { url: request.url, method: request.method, headers: request.headers, body: request.body, tls: request.tls },
           timeoutMs
         );
         return { status: result.status, body: redactValue(result.body, redactions) };
@@ -165,11 +171,15 @@ export function createHttpClient(options = {}) {
   });
 }
 
-function requestViaNodeModules({ url, method = "GET", headers = {}, body }, timeoutMs) {
+// `tls` carries per-request trust material for providers that serve their API
+// under their own private root (step-ca). Passing an explicit `ca` keeps the
+// request fully validated against that root rather than disabling verification.
+function requestViaNodeModules({ url, method = "GET", headers = {}, body, tls }, timeoutMs) {
   return new Promise((resolve, reject) => {
     const target = new URL(url);
     const transport = target.protocol === "https:" ? https : http;
-    const request = transport.request(target, { method, headers }, (response) => {
+    const requestOptions = { method, headers, ...(target.protocol === "https:" && tls !== undefined ? tls : {}) };
+    const request = transport.request(target, requestOptions, (response) => {
       const chunks = [];
       response.on("data", (chunk) => chunks.push(chunk));
       response.on("end", () => {
@@ -224,7 +234,11 @@ export function createProductionAdapters(options = {}) {
     async healthCheckExposure(request) { return caddyAdapter.healthCheckExposure(request); }
   });
   const providerAdapters = Object.freeze({
-    technitium: createTechnitiumAdapter({ httpClient, secretResolver }),
+    technitium: createTechnitiumAdapter({
+      httpClient,
+      secretResolver,
+      enableNesting: (vmid) => proxmox.enableNesting(vmid)
+    }),
     caddy: caddyAdapter,
     // Traefik writes dynamic fragments inside its own LXC, so it needs the
     // same pct exec channel the Proxmox adapter uses (ADR-0032).
@@ -235,8 +249,22 @@ export function createProductionAdapters(options = {}) {
     }),
     "step-ca": createStepCaAdapter({ httpClient, secretResolver }),
     "caddy-internal-ca": caddyInternalCaAdapter,
-    tailscale: createProviderAdapter("tailscale", secretResolver),
-    netbird: createProviderAdapter("netbird", secretResolver)
+    // Tailscale is driven entirely through its CLI inside the service LXC, and
+    // it needs the Proxmox host to hand the container a TUN device before the
+    // client can come up at all.
+    tailscale: createTailscaleAdapter({
+      secretResolver,
+      exec: (vmid, command) => proxmox.pctExec(vmid, command),
+      enableTunDevice: (vmid) => proxmox.enableTunDevice(vmid)
+    }),
+    // NetBird is driven entirely through its CLI inside the service LXC, and
+    // like Tailscale it needs the Proxmox host to hand the container a TUN
+    // device before the client can come up at all.
+    netbird: createNetBirdAdapter({
+      secretResolver,
+      exec: (vmid, command) => proxmox.pctExec(vmid, command),
+      enableTunDevice: (vmid) => proxmox.enableTunDevice(vmid)
+    })
   });
   return Object.freeze({ proxmox, providerAdapters, secretStore });
 }
@@ -318,7 +346,8 @@ function createProxmoxAdapter(commandRunner) {
         binary: "/usr/sbin/pct",
         args: ["exec", String(vmid), "--", normalized.binary, ...normalized.args],
         timeoutMs: normalized.timeoutMs,
-        redactions: normalized.redactions
+        redactions: normalized.redactions,
+        ...(normalized.stdin === undefined ? {} : { stdin: normalized.stdin })
       });
     },
     async supportsSnapshots() {
@@ -327,6 +356,23 @@ function createProxmoxAdapter(commandRunner) {
     async createSnapshot(vmid, snapshotName) {
       await commandRunner.run({ binary: "/usr/sbin/pct", args: ["snapshot", String(vmid), snapshotName] });
       return { vmid, snapshotName };
+    },
+    // Unprivileged LXCs get no TUN device by default, which every VPN client
+    // needs. Proxmox 8.2+ exposes it as a device passthrough; keyctl/nesting
+    // let the client's systemd unit start inside the container.
+    async enableTunDevice(vmid) {
+      await commandRunner.run({ binary: "/usr/sbin/pct", args: ["set", String(vmid), "--dev0", "/dev/net/tun"] });
+      await commandRunner.run({ binary: "/usr/sbin/pct", args: ["set", String(vmid), "--features", "keyctl=1,nesting=1"] });
+      await commandRunner.run({ binary: "/usr/sbin/pct", args: ["reboot", String(vmid)], timeoutMs: 180_000 });
+      return { vmid, device: "/dev/net/tun" };
+    },
+    // Sandboxed systemd units (Technitium confines itself with PrivateTmp,
+    // ProtectSystem=strict, ...) need userns inside the container. Without
+    // nesting the unit fails with status=226/NAMESPACE on first boot.
+    async enableNesting(vmid) {
+      await commandRunner.run({ binary: "/usr/sbin/pct", args: ["set", String(vmid), "--features", "nesting=1"] });
+      await commandRunner.run({ binary: "/usr/sbin/pct", args: ["reboot", String(vmid)], timeoutMs: 180_000 });
+      return { vmid };
     },
     async stopLxc(vmid) {
       return commandRunner.run({ binary: "/usr/sbin/pct", args: ["stop", String(vmid)] });
@@ -379,7 +425,7 @@ function normalizeCommand(command, defaultTimeoutMs) {
   if (command === null || typeof command !== "object" || Array.isArray(command)) {
     throw new Error("Commands must be an object with a fixed binary and argument array.");
   }
-  const { binary, args, timeoutMs = defaultTimeoutMs, redactions = [] } = command;
+  const { binary, args, timeoutMs = defaultTimeoutMs, redactions = [], stdin = undefined } = command;
   if (typeof binary !== "string" || binary.length === 0 || binary.includes("\0")) {
     throw new Error("Command binary must be a non-empty string.");
   }
@@ -389,10 +435,16 @@ function normalizeCommand(command, defaultTimeoutMs) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new Error("Command timeout must be a positive number.");
   }
-  return { binary, args: [...args], timeoutMs, redactions: [...redactions] };
+  if (stdin !== undefined && typeof stdin !== "string") {
+    throw new Error("Command standard input must be a string.");
+  }
+  // Standard input is the only channel that carries a resolved connection
+  // secret into a command: an argument array would expose it to the host
+  // process list (ADR-0019).
+  return { binary, args: [...args], timeoutMs, redactions: [...redactions], ...(stdin === undefined ? {} : { stdin }) };
 }
 
-function executeCommand({ spawn, binary, args, timeoutMs }) {
+function executeCommand({ spawn, binary, args, timeoutMs, stdin = undefined }) {
   return new Promise((resolve, reject) => {
     const child = spawn(binary, args, { shell: false, windowsHide: true });
     let stdout = "";
@@ -412,6 +464,12 @@ function executeCommand({ spawn, binary, args, timeoutMs }) {
       clearTimeout(timer);
       resolve({ exitCode: exitCode ?? 1, stdout, stderr, timedOut });
     });
+    if (stdin !== undefined) {
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(stdin);
+    } else {
+      child.stdin?.end();
+    }
   });
 }
 

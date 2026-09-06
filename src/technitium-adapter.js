@@ -3,18 +3,27 @@ import { createHash } from "node:crypto";
 const TECHNITIUM_PORT = 5380;
 const TECHNITIUM_USER = "admin";
 const TECHNITIUM_INSTALL = Object.freeze([
-  { binary: "/usr/bin/apt-get", args: ["update"] },
-  { binary: "/usr/bin/apt-get", args: ["install", "--yes", "curl", "ca-certificates"] },
+  { binary: "/usr/bin/apt-get", args: ["update"], timeoutMs: 180_000 },
+  { binary: "/usr/bin/apt-get", args: ["install", "--yes", "curl", "ca-certificates"], timeoutMs: 180_000 },
   {
     binary: "/usr/bin/curl",
-    args: ["-fsSL", "-o", "/tmp/technitium-install.sh", "https://download.technitium.com/dns/install.sh"]
+    args: ["-fsSL", "-o", "/tmp/technitium-install.sh", "https://download.technitium.com/dns/install.sh"],
+    timeoutMs: 180_000
   },
   { binary: "/bin/bash", args: ["/tmp/technitium-install.sh"], timeoutMs: 180_000 }
 ]);
 
-export function createTechnitiumAdapter({ httpClient, secretResolver }) {
+// `enableNesting` is optional: it is only needed when setup has a vmid to
+// grant nesting to, and callers that only build install plans omit it.
+export function createTechnitiumAdapter({ httpClient, secretResolver, enableNesting = undefined }) {
   return Object.freeze({
     async setup(plan) {
+      // Technitium's unit confines itself (PrivateTmp, ProtectSystem=strict,
+      // ProtectHostname, ...), which needs userns inside the container. Grant
+      // nesting before installing, or dns.service fails with 226/NAMESPACE.
+      if (plan?.vmid !== undefined && typeof enableNesting === "function") {
+        await enableNesting(plan.vmid);
+      }
       return { ...plan, lxcCommands: TECHNITIUM_INSTALL };
     },
     async upgrade(plan) {

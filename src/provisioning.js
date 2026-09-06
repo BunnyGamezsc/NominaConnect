@@ -1,4 +1,4 @@
-import { withBoundedRetry } from "./adoption.js";
+import { withBoundedRetry, withHealthyRetry } from "./adoption.js";
 import { getPlatformProvider } from "./providers.js";
 
 export const TECHNITIUM_DEPLOYMENT = Object.freeze({
@@ -111,7 +111,8 @@ export async function provisionPlatformService({
   managedItem,
   options,
   proxmox,
-  providerAdapter
+  providerAdapter,
+  retryOptions = {}
 }) {
   const warnings = await runIpPreflight(proxmox, options.ip);
   const lxcSpec = resolveServiceDeployment(project, serviceName, options);
@@ -142,7 +143,7 @@ export async function provisionPlatformService({
         managedItemId: managedItem.id,
         ...providerContext
       }),
-      { maxRetries: 8, baseDelayMs: 3000, backoffFactor: 1.5 }
+      { maxRetries: 8, baseDelayMs: 3000, backoffFactor: 1.5, ...retryOptions }
     );
   }
 
@@ -151,12 +152,23 @@ export async function provisionPlatformService({
     : [];
   const inspection = await withBoundedRetry(
     () => plugin.inspect(providerAdapter, managedItem, { ...providerContext, providerReferences }),
-    { maxRetries: 8, baseDelayMs: 3000, backoffFactor: 1.5 }
+    { maxRetries: 8, baseDelayMs: 3000, backoffFactor: 1.5, ...retryOptions }
   );
-  const health = await withBoundedRetry(
+  // A just-installed provider answers its API a beat after systemd reports the
+  // unit active, and adapters report that as an unhealthy *result* rather than
+  // throwing — so withBoundedRetry, which only retries thrown errors, would
+  // make the first probe final. Settle on the health status itself.
+  const health = await withHealthyRetry(
     () => plugin.healthCheck(providerAdapter, managedItem, providerContext),
-    { maxRetries: 6, baseDelayMs: 2000, backoffFactor: 1.5 }
+    { maxAttempts: 7, baseDelayMs: 2000, backoffFactor: 1.5, ...retryOptions }
   );
+
+  // An adapter that can identify the resource it just created (a VPN node in
+  // its tailnet) flags it during inspection. Its provider-native locator and
+  // fingerprint belong in local state, never in provider configuration
+  // (ADR-0003).
+  const identity = [...(inspection.managed ?? []), ...(inspection.unmanaged ?? [])]
+    .find((resource) => resource?.self === true);
 
   return {
     created,
@@ -164,6 +176,11 @@ export async function provisionPlatformService({
     warnings,
     inspection,
     health,
-    providerReference: { vmid: created.vmid, ip: options.ip }
+    providerReference: {
+      vmid: created.vmid,
+      ip: options.ip,
+      ...(identity?.locator === undefined ? {} : { locator: identity.locator }),
+      ...(identity?.fingerprint === undefined ? {} : { fingerprint: identity.fingerprint })
+    }
   };
 }

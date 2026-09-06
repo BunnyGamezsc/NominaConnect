@@ -86,7 +86,9 @@ Live verification at this stage caught a split DNS illusion: Technitium inside t
 
 Closed and production ready: 2 init, 3 Technitium LXC, 4 Caddy plus Technitium publish, 11 safe lifecycle, 9 plus 10 tracking Caddy and Technitium plus extended catalog, 14 Technitium plus Proxmox, 15 Caddy exposures, 17 step-ca trust for Caddy.
 
-Open and not yet production real: 12 real provider adapters parent, 13 adapter boundary, 19 Tailscale, 20 NetBird, 21 adapter conformance suite. If a review touches VPN paths, it is still fake adapters and tests. Do not approve them as production behavior.
+Open and not yet production real: 12 real provider adapters parent, 13 adapter boundary, 21 adapter conformance suite.
+
+The VPN providers landed after this note was first written. Tailscale (19) is a real adapter in `src/tailscale-adapter.js` and NetBird (20) is a real adapter in `src/netbird-adapter.js`. Both check the LXC's TUN device through the shared `src/vpn-lxc.js` prerequisite (ADR-0038), enroll the client with a credential passed over standard input, and inspect the client's own status document for health and adoption. Review them against `test/tailscale-adapter-wire.test.js`, `test/service-add-tailscale-cli.test.js`, `test/netbird-adapter-wire.test.js`, and `test/service-add-netbird-cli.test.js`, not against this paragraph.
 
 Traefik landed after this note was first written: 16 (real exposures through the watched dynamic directory) and 18 (step-ca trust: root distribution into the Traefik LXC, a managed `certificatesResolvers` block spliced into `traefik.yml`, and issuance plus handshake verification per exposure). Review those against `src/traefik-adapter.js`, `test/traefik-adapter-wire.test.js`, and `test/traefik-exposure-cli.test.js`, not against this paragraph.
 

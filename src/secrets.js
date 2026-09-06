@@ -1,4 +1,4 @@
-export async function ensureConnectionSecret(adapters, label, reference) {
+export async function ensureConnectionSecret(adapters, label, reference, options = {}) {
   const { secretStore, prompts } = adapters;
   if (reference === undefined || secretStore === undefined) {
     return;
@@ -6,10 +6,18 @@ export async function ensureConnectionSecret(adapters, label, reference) {
   if (secretStore.has(reference)) {
     return;
   }
+  const directSecret = typeof options === "string" ? options : options?.secret;
+  const envKey = `NOMINA_SECRET_${label.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
+  const envSecret = process.env[envKey] ?? process.env.NOMINA_SECRET;
+  const secretValue = directSecret ?? envSecret;
+  if (secretValue !== undefined && String(secretValue).trim() !== "") {
+    secretStore.store(reference, String(secretValue).trim());
+    return;
+  }
   secretStore.store(reference, await promptSecretValue(prompts, label));
 }
 
-export async function updateConnectionSecret(adapters, label, reference) {
+export async function updateConnectionSecret(adapters, label, reference, options = {}) {
   const { secretStore, prompts } = adapters;
   if (reference === undefined) {
     throw new Error(`No connection secret reference for ${label}.`);
@@ -17,7 +25,13 @@ export async function updateConnectionSecret(adapters, label, reference) {
   if (secretStore === undefined) {
     throw new Error("Secret store is unavailable. Run nomina as root on the Proxmox host.");
   }
-  const newValue = await promptSecretValue(prompts, label);
+  const directSecret = typeof options === "string" ? options : options?.secret;
+  const envKey = `NOMINA_SECRET_${label.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
+  const envSecret = process.env[envKey] ?? process.env.NOMINA_SECRET;
+  const secretValue = directSecret ?? envSecret;
+  const newValue = (secretValue !== undefined && String(secretValue).trim() !== "")
+    ? String(secretValue).trim()
+    : await promptSecretValue(prompts, label);
   secretStore.store(reference, newValue);
 }
 
