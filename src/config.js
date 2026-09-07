@@ -1,21 +1,4 @@
-function readScalarBlock(lines, startIndex) {
-  const valueLine = lines[startIndex]?.trim();
-  if (valueLine === undefined || valueLine.startsWith("#")) {
-    return { value: undefined, nextIndex: startIndex + 1 };
-  }
-  const match = valueLine.match(/^(\w+):\s*(.*)$/);
-  if (match === null) {
-    return { value: undefined, nextIndex: startIndex + 1 };
-  }
-  const [, , rawValue] = match;
-  if (rawValue === "") {
-    return readNestedBlock(lines, startIndex + 1);
-  }
-  if (rawValue === "null") {
-    return { value: null, nextIndex: startIndex + 1 };
-  }
-  return { value: parseScalar(rawValue), nextIndex: startIndex + 1 };
-}
+import path from "node:path";
 
 function readNestedBlock(lines, startIndex, parentIndent = -1) {
   const value = {};
@@ -150,8 +133,9 @@ export function parseProjectConfiguration(content) {
     if (line === "services:") {
       const servicesIndent = lines[index].match(/^(\s*)/)?.[1].length ?? 0;
       index += 1;
-      config.managedInventory.services = readServiceList(lines, index, servicesIndent);
-      index = skipServiceList(lines, index, servicesIndent);
+      const services = readServiceList(lines, index, servicesIndent);
+      config.managedInventory.services = services.value;
+      index = services.nextIndex;
       continue;
     }
     index += 1;
@@ -174,7 +158,7 @@ function readServiceList(lines, startIndex, parentIndent) {
       break;
     }
     if (line.trim() === "[]") {
-      return [];
+      return { value: [], nextIndex: index + 1 };
     }
     if (!line.trim().startsWith("-")) {
       break;
@@ -218,42 +202,7 @@ function readServiceList(lines, startIndex, parentIndent) {
     }
     services.push(item);
   }
-  return services;
-}
-
-function skipServiceList(lines, startIndex, parentIndent) {
-  let index = startIndex;
-  while (index < lines.length) {
-    const line = lines[index];
-    if (line === undefined || line.trim() === "" || line.trim().startsWith("#")) {
-      index += 1;
-      continue;
-    }
-    const indent = line.match(/^(\s*)/)?.[1].length ?? 0;
-    if (indent <= parentIndent && line.trim() !== "") {
-      break;
-    }
-    if (line.trim() === "[]") {
-      return index + 1;
-    }
-    if (!line.trim().startsWith("-")) {
-      break;
-    }
-    index += 1;
-    while (index < lines.length) {
-      const nestedLine = lines[index];
-      if (nestedLine === undefined || nestedLine.trim() === "" || nestedLine.trim().startsWith("#")) {
-        index += 1;
-        continue;
-      }
-      const nestedIndent = nestedLine.match(/^(\s*)/)?.[1].length ?? 0;
-      if (nestedIndent <= indent) {
-        break;
-      }
-      index += 1;
-    }
-  }
-  return index;
+  return { value: services, nextIndex: index };
 }
 
 export function upsertManagedExposure(config, managedService) {
@@ -270,12 +219,12 @@ export function upsertManagedExposure(config, managedService) {
 }
 
 export function findProjectDirectory(filesystem, startDirectory = ".") {
-  let current = normalizeDirectory(startDirectory);
+  let current = startDirectory;
   while (true) {
-    if (filesystem.exists(joinPath(current, "nomina.yaml"))) {
+    if (filesystem.exists(path.posix.join(current, "nomina.yaml"))) {
       return current;
     }
-    const parent = parentDirectory(current);
+    const parent = path.posix.dirname(current);
     if (parent === current) {
       return undefined;
     }
@@ -288,11 +237,11 @@ export function loadProject(filesystem, projectDirectory) {
   if (resolvedDirectory === undefined) {
     throw new Error("No NominaConnect project found. Run nomina init from the folder where you want your homelab config.");
   }
-  const configPath = joinPath(resolvedDirectory, "nomina.yaml");
+  const configPath = path.posix.join(resolvedDirectory, "nomina.yaml");
   if (!filesystem.exists(configPath)) {
     throw new Error("No NominaConnect project found. Run nomina init from the folder where you want your homelab config.");
   }
-  const statePath = joinPath(resolvedDirectory, ".nomina/state.json");
+  const statePath = path.posix.join(resolvedDirectory, ".nomina/state.json");
   if (!filesystem.exists(statePath)) {
     throw new Error("No NominaConnect project found. Run nomina init from the folder where you want your homelab config.");
   }
@@ -420,27 +369,4 @@ function appendPlatformService(lines, field, service) {
 
 function yamlScalar(value) {
   return /^[A-Za-z0-9._-]+$/.test(String(value)) ? String(value) : JSON.stringify(value);
-}
-
-function joinPath(...parts) {
-  return parts.join("/").replaceAll(/\/{2,}/g, "/");
-}
-
-function normalizeDirectory(directory) {
-  if (directory === ".") {
-    return ".";
-  }
-  return directory.replace(/\/+$/, "") || "/";
-}
-
-function parentDirectory(directory) {
-  const normalized = normalizeDirectory(directory);
-  if (normalized === ".") {
-    return ".";
-  }
-  const index = normalized.lastIndexOf("/");
-  if (index <= 0) {
-    return "/";
-  }
-  return normalized.slice(0, index);
 }

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { INITIAL_PLATFORM_CATALOG, certificateAuthorityIsCompatible, hasCatalogOption } from "./catalog.js";
 import {
   loadProject,
@@ -1479,14 +1480,14 @@ async function handleCaddyCommand(argumentsList, adapters) {
   };
 }
 
-function resolveDeletionTarget(path, { secretStorePath, statePath, projectDir }) {
-  if (path.startsWith(secretStorePath)) {
+function resolveDeletionTarget(target, { secretStorePath, statePath, projectDir }) {
+  if (target.startsWith(secretStorePath)) {
     return secretStorePath;
   }
-  if (path === statePath) {
-    return joinPath(projectDir, ".nomina");
+  if (target === statePath) {
+    return path.posix.join(projectDir, ".nomina");
   }
-  return path;
+  return target;
 }
 
 function parseUninstallOptions(rawOptions) {
@@ -1508,8 +1509,8 @@ async function uninstallEverything(options, adapters) {
   assertProxmoxShell(adapters.runtime);
 
   const projectDir = options.projectDir ?? adapters.cwd ?? ".";
-  const configPath = joinPath(projectDir, "nomina.yaml");
-  const statePath = joinPath(projectDir, ".nomina", "state.json");
+  const configPath = path.posix.join(projectDir, "nomina.yaml");
+  const statePath = path.posix.join(projectDir, ".nomina", "state.json");
   const secretStorePath = "/var/lib/nominaconnect";
 
   // Only LXC vmids recorded in NominaConnect's own state are ever touched:
@@ -1643,7 +1644,7 @@ async function initializeProject(options, adapters) {
   assertProxmoxShell(runtime);
 
   const projectDirectory = options.projectDir ?? adapters.cwd ?? ".";
-  const configPath = joinPath(projectDirectory, "nomina.yaml");
+  const configPath = path.posix.join(projectDirectory, "nomina.yaml");
   if (filesystem.exists(configPath)) {
     throw new Error(`A NominaConnect project already exists at ${configPath}.`);
   }
@@ -1651,7 +1652,7 @@ async function initializeProject(options, adapters) {
   const answers = await promptInitOptions(options, adapters.prompts);
   validateAnswers(answers);
 
-  const stateDirectory = joinPath(projectDirectory, ".nomina");
+  const stateDirectory = path.posix.join(projectDirectory, ".nomina");
   filesystem.mkdir(projectDirectory);
   filesystem.mkdir(stateDirectory);
   filesystem.chmod(stateDirectory, 0o700);
@@ -1664,8 +1665,8 @@ async function initializeProject(options, adapters) {
     providerReferences: {},
     tracking: { notices: [] }
   };
-  writeAtomically(filesystem, joinPath(stateDirectory, "state.json"), `${JSON.stringify(state, null, 2)}\n`);
-  filesystem.chmod(joinPath(stateDirectory, "state.json"), 0o600);
+  writeAtomically(filesystem, path.posix.join(stateDirectory, "state.json"), `${JSON.stringify(state, null, 2)}\n`);
+  filesystem.chmod(path.posix.join(stateDirectory, "state.json"), 0o600);
   writeAtomically(
     filesystem,
     configPath,
@@ -1686,72 +1687,85 @@ async function initializeProject(options, adapters) {
     managedInventory,
     setupPlan,
     configPath,
-    statePath: joinPath(stateDirectory, "state.json")
+    statePath: path.posix.join(stateDirectory, "state.json")
   };
 }
 
-function parseInitOptions(rawOptions) {
-  const options = {};
-  const optionNames = new Map([
-    ["--project-dir", "projectDir"], ["--node", "node"], ["--bridge", "bridge"],
-    ["--storage", "storage"], ["--domain", "domain"], ["--dns", "dns"],
-    ["--reverse-proxy", "reverseProxy"], ["--ca", "certificateAuthority"], ["--vpn", "vpn"]
-  ]);
-  parseFlagOptions(rawOptions, optionNames, options);
-  return options;
+// Every command takes --project-dir; the rest is a flag table. `numbers`
+// coerces after parsing, `after` covers the one flag that maps onto another.
+function optionParser({ flags, booleans = [], numbers = [], after = undefined }) {
+  const optionNames = new Map([["--project-dir", "projectDir"], ...flags]);
+  const booleanFlags = new Set(booleans);
+  return (rawOptions) => {
+    const options = {};
+    parseFlagOptions(rawOptions, optionNames, options, booleanFlags);
+    for (const key of numbers) {
+      if (options[key] !== undefined) {
+        options[key] = Number(options[key]);
+      }
+    }
+    after?.(options);
+    return options;
+  };
 }
 
-function parseServiceAddOptions(rawOptions) {
-  const options = {};
-  const optionNames = new Map([
-    ["--project-dir", "projectDir"],
-    ["--ip", "ip"],
-    ["--bridge", "bridge"],
-    ["--storage", "storage"],
-    ["--hostname", "hostname"],
-    ["--template", "template"],
-    ["--gateway", "gateway"],
-    ["--nameserver", "nameserver"],
-    ["--cpus", "cpus"],
-    ["--memory", "memoryMb"],
-    ["--disk", "diskGb"],
-    ["--secret", "secret"]
-  ]);
-  parseFlagOptions(rawOptions, optionNames, options);
-  if (options.cpus !== undefined) options.cpus = Number(options.cpus);
-  if (options.memoryMb !== undefined) options.memoryMb = Number(options.memoryMb);
-  if (options.diskGb !== undefined) options.diskGb = Number(options.diskGb);
-  return options;
-}
+const parseInitOptions = optionParser({
+  flags: [
+    ["--node", "node"], ["--bridge", "bridge"], ["--storage", "storage"],
+    ["--domain", "domain"], ["--dns", "dns"], ["--reverse-proxy", "reverseProxy"],
+    ["--ca", "certificateAuthority"], ["--vpn", "vpn"]
+  ]
+});
 
-function parseExposurePublishOptions(rawOptions) {
-  const options = {};
-  const optionNames = new Map([
-    ["--project-dir", "projectDir"],
-    ["--name", "name"],
-    ["--hostname", "hostname"],
-    ["--backend-ip", "backendIp"],
-    ["--backend-port", "backendPort"],
-    ["--backend-tls", "backendTls"]
-  ]);
-  const booleanFlags = new Set(["--backend-tls"]);
-  parseFlagOptions(rawOptions, optionNames, options, booleanFlags);
-  if (options.backendPort !== undefined) {
-    options.backendPort = Number(options.backendPort);
+const parseServiceAddOptions = optionParser({
+  flags: [
+    ["--ip", "ip"], ["--bridge", "bridge"], ["--storage", "storage"],
+    ["--hostname", "hostname"], ["--template", "template"], ["--gateway", "gateway"],
+    ["--nameserver", "nameserver"], ["--cpus", "cpus"], ["--memory", "memoryMb"],
+    ["--disk", "diskGb"], ["--secret", "secret"]
+  ],
+  numbers: ["cpus", "memoryMb", "diskGb"]
+});
+
+const parseExposurePublishOptions = optionParser({
+  flags: [
+    ["--name", "name"], ["--hostname", "hostname"], ["--backend-ip", "backendIp"],
+    ["--backend-port", "backendPort"], ["--backend-tls", "backendTls"]
+  ],
+  booleans: ["--backend-tls"],
+  numbers: ["backendPort"]
+});
+
+const parseSecretChangeOptions = optionParser({
+  flags: [["--service", "service"], ["--secret", "secret"]]
+});
+
+const parseServiceUpgradeOptions = optionParser({
+  flags: [
+    ["--snapshot", "snapshot"], ["--no-snapshot", "noSnapshot"],
+    ["--snapshot-name", "snapshotName"], ["--secret", "secret"]
+  ],
+  booleans: ["--snapshot", "--no-snapshot"],
+  after: (options) => {
+    if (options.noSnapshot) {
+      options.snapshot = false;
+    }
   }
-  return options;
-}
+});
 
-function parseSecretChangeOptions(rawOptions) {
-  const options = {};
-  const optionNames = new Map([
-    ["--project-dir", "projectDir"],
-    ["--service", "service"],
-    ["--secret", "secret"]
-  ]);
-  parseFlagOptions(rawOptions, optionNames, options);
-  return options;
-}
+const parseServiceRemoveOptions = optionParser({
+  flags: [["--force", "force"]],
+  booleans: ["--force"]
+});
+
+const parseServiceDestroyOptions = optionParser({
+  flags: [["--confirm", "confirm"], ["--yes", "yes"], ["-y", "yes"]],
+  booleans: ["--confirm", "--yes", "-y"]
+});
+
+const parseServiceRecheckOptions = optionParser({
+  flags: [["--ip", "ip"]]
+});
 
 function validateExposureOptions(options) {
   for (const field of ["name", "hostname", "backendIp", "backendPort"]) {
@@ -1786,57 +1800,6 @@ function formatPlatformProvisionResult({
     warnings,
     health
   };
-}
-
-function parseServiceUpgradeOptions(rawOptions) {
-  const options = {};
-  const optionNames = new Map([
-    ["--project-dir", "projectDir"],
-    ["--snapshot", "snapshot"],
-    ["--no-snapshot", "noSnapshot"],
-    ["--snapshot-name", "snapshotName"],
-    ["--secret", "secret"]
-  ]);
-  const booleanFlags = new Set(["--snapshot", "--no-snapshot"]);
-  parseFlagOptions(rawOptions, optionNames, options, booleanFlags);
-  if (options.noSnapshot) {
-    options.snapshot = false;
-  }
-  return options;
-}
-
-function parseServiceRemoveOptions(rawOptions) {
-  const options = {};
-  const optionNames = new Map([
-    ["--project-dir", "projectDir"],
-    ["--force", "force"]
-  ]);
-  const booleanFlags = new Set(["--force"]);
-  parseFlagOptions(rawOptions, optionNames, options, booleanFlags);
-  return options;
-}
-
-function parseServiceDestroyOptions(rawOptions) {
-  const options = {};
-  const optionNames = new Map([
-    ["--project-dir", "projectDir"],
-    ["--confirm", "confirm"],
-    ["--yes", "yes"],
-    ["-y", "yes"]
-  ]);
-  const booleanFlags = new Set(["--confirm", "--yes", "-y"]);
-  parseFlagOptions(rawOptions, optionNames, options, booleanFlags);
-  return options;
-}
-
-function parseServiceRecheckOptions(rawOptions) {
-  const options = {};
-  const optionNames = new Map([
-    ["--project-dir", "projectDir"],
-    ["--ip", "ip"]
-  ]);
-  parseFlagOptions(rawOptions, optionNames, options);
-  return options;
 }
 
 function parseFlagOptions(rawOptions, optionNames, options, booleanFlags = new Set()) {
@@ -1952,8 +1915,5 @@ function writeAtomically(filesystem, destination, content) {
   filesystem.rename(temporaryPath, destination);
 }
 
-function joinPath(...parts) {
-  return parts.join("/").replaceAll(/\/{2,}/g, "/");
-}
 
 export { INITIAL_PLATFORM_CATALOG, getPlatformProvider };

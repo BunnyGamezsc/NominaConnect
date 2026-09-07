@@ -1,5 +1,37 @@
 # Changelog
 
+## [2.1.1] - 2026-09-07
+
+### Changed
+- **Complexity audit pass.** ~315 lines of source removed with no change in
+  behaviour; the full suite (464 tests) and `tsc --noEmit` pass unchanged.
+  - Dead code deleted: `createProviderAdapter` and `resolveConfiguredSecret`
+    (unreachable since the real provider adapters landed), `readScalarBlock`,
+    and `skipServiceList` — `readServiceList` now reports where it stopped
+    instead of a second function re-walking the same lines.
+  - Repetition collapsed into tables: the eight `parse*Options` functions are
+    one `optionParser({flags, booleans, numbers, after})` spec each,
+    `buildMenuOptions` and `promptServiceName` are ordered entry tables with a
+    `when` predicate rather than twenty and seven near-identical `if` blocks,
+    and Caddy's `apiGet`/`apiPut`/`apiPost`/`apiDelete` share one `apiCall`.
+  - `canProvisionCaddy`, `canProvisionTraefik`, `canProvisionStepCa`,
+    `canProvisionCaddyInternalCa`, `canProvisionTailscale` and
+    `canProvisionNetbird` are gone; call
+    `canProvisionReverseProxy(project, name)`,
+    `canProvisionCertificateAuthority(project, name)` or
+    `canProvisionVpn(project, name)` directly.
+  - `caddyInternalCaAdapter` spreads the Caddy adapter instead of hand-writing
+    nine delegating methods, and the single-caller `enqueueWrite` promise chain
+    in background tracking is gone.
+  - Hand-rolled path joining and parent-directory walking replaced with
+    `node:path`'s `posix.join` and `posix.dirname`.
+
+### Removed
+- `dist/` is no longer tracked in git. The 60 MB local build and the copied
+  `dist/nomina.js` were never fetched by either installer — the native
+  installer's fallback reads `dist/nomina-linux-*`, which has always been
+  ignored — so binaries ship as release assets only.
+
 ## [2.1.0] - 2026-09-06
 
 ### Added

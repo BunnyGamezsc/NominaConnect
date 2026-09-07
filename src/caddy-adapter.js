@@ -414,82 +414,49 @@ async function managedFingerprintFor(httpClient, endpoint, hostname) {
   return fingerprintFor(locator, { route, tls: policy });
 }
 
-async function apiGet(httpClient, endpoint, path) {
+// One request path for the Admin API. A transport failure is marked
+// `unreachable` so callers can tell "Caddy is down" from "Caddy said no";
+// DELETE tolerates 404 because unpublishing an absent route is a no-op.
+async function apiCall(httpClient, endpoint, method, path, body = undefined) {
   const url = `${endpoint.replace(/\/$/, "")}${path}`;
   let result;
   try {
-    result = await httpClient.request({ method: "GET", url, headers: {}, redactions: [] });
+    result = await httpClient.request({
+      method,
+      url,
+      headers: body === undefined ? {} : { "Content-Type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      redactions: []
+    });
   } catch (error) {
     error.unreachable = true;
     throw error;
   }
-  if (result.status >= 400) {
-    const bodyText = String(result.body ?? "");
-    if (result.status === 404) {
+  if (result.status >= 400 && !(method === "DELETE" && result.status === 404)) {
+    if (method === "GET" && result.status === 404) {
       throw new Error(`Caddy Admin API ${path} not found (404).`);
     }
-    throw new Error(`Caddy Admin API ${path} failed with status ${result.status}: ${bodyText}`);
+    const verb = method === "GET" ? "" : `${method} `;
+    throw new Error(`Caddy Admin API ${verb}${path} failed with status ${result.status}: ${String(result.body ?? "")}`);
   }
-  if (result.body === undefined || result.body === "" || result.body === "null") {
+  if (method === "DELETE" || result.body === undefined || result.body === "" || result.body === "null") {
     return null;
   }
   try {
     return JSON.parse(result.body);
   } catch {
-    throw new Error(`Caddy returned a malformed response from ${path}.`);
+    // Only GET promises a document; the write verbs may answer in plain text.
+    if (method === "GET") {
+      throw new Error(`Caddy returned a malformed response from ${path}.`);
+    }
+    return result.body;
   }
 }
 
-async function apiPut(httpClient, endpoint, path, body) {
-  const url = `${endpoint.replace(/\/$/, "")}${path}`;
-  let result;
-  try {
-    result = await httpClient.request({ method: "PUT", url, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), redactions: [] });
-  } catch (error) {
-    error.unreachable = true;
-    throw error;
-  }
-  if (result.status >= 400) {
-    throw new Error(`Caddy Admin API PUT ${path} failed with status ${result.status}: ${result.body}`);
-  }
-  if (result.body && result.body !== "null") {
-    try { return JSON.parse(result.body); } catch { return result.body; }
-  }
-  return null;
-}
-
-async function apiPost(httpClient, endpoint, path, body) {
-  const url = `${endpoint.replace(/\/$/, "")}${path}`;
-  let result;
-  try {
-    result = await httpClient.request({ method: "POST", url, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), redactions: [] });
-  } catch (error) {
-    error.unreachable = true;
-    throw error;
-  }
-  if (result.status >= 400) {
-    throw new Error(`Caddy Admin API POST ${path} failed with status ${result.status}: ${result.body}`);
-  }
-  if (result.body && result.body !== "null") {
-    try { return JSON.parse(result.body); } catch { return result.body; }
-  }
-  return null;
-}
-
-async function apiDelete(httpClient, endpoint, path) {
-  const url = `${endpoint.replace(/\/$/, "")}${path}`;
-  let result;
-  try {
-    result = await httpClient.request({ method: "DELETE", url, headers: {}, redactions: [] });
-  } catch (error) {
-    error.unreachable = true;
-    throw error;
-  }
-  if (result.status >= 400 && result.status !== 404) {
-    throw new Error(`Caddy Admin API DELETE ${path} failed with status ${result.status}: ${result.body}`);
-  }
-  return null;
-}
+const apiGet = (httpClient, endpoint, path) => apiCall(httpClient, endpoint, "GET", path);
+const apiPut = (httpClient, endpoint, path, body) => apiCall(httpClient, endpoint, "PUT", path, body);
+const apiPost = (httpClient, endpoint, path, body) => apiCall(httpClient, endpoint, "POST", path, body);
+const apiDelete = (httpClient, endpoint, path) => apiCall(httpClient, endpoint, "DELETE", path);
 
 function buildManagedRoute(hostname, backendIp, backendPort, backendTls = false) {
   return {

@@ -45,13 +45,7 @@ export function canProvisionReverseProxy(project, serviceName) {
   return project.state.providerReferences[proxyService.id] === undefined;
 }
 
-export function canProvisionCaddy(project) {
-  return canProvisionReverseProxy(project, "caddy");
-}
 
-export function canProvisionTraefik(project) {
-  return canProvisionReverseProxy(project, "traefik");
-}
 
 export function canProvisionCertificateAuthority(project, serviceName) {
   const dnsService = project?.config.managedInventory.platform.dns;
@@ -69,13 +63,7 @@ export function canProvisionCertificateAuthority(project, serviceName) {
   return project.state.providerReferences[caService.id] === undefined;
 }
 
-export function canProvisionStepCa(project) {
-  return canProvisionCertificateAuthority(project, "step-ca");
-}
 
-export function canProvisionCaddyInternalCa(project) {
-  return canProvisionCertificateAuthority(project, "caddy-internal-ca");
-}
 
 export function canProvisionVpn(project, serviceName) {
   const vpnService = project?.config.managedInventory.platform.vpn;
@@ -85,13 +73,7 @@ export function canProvisionVpn(project, serviceName) {
   return project.state.providerReferences[vpnService.id] === undefined;
 }
 
-export function canProvisionTailscale(project) {
-  return canProvisionVpn(project, "tailscale");
-}
 
-export function canProvisionNetbird(project) {
-  return canProvisionVpn(project, "netbird");
-}
 
 export function canUpdateConnectionSecret(project) {
   if (!project?.config?.connectionSecretReferences || !project?.state?.providerReferences) {
@@ -160,155 +142,61 @@ export function hasProvisionedOrRetainedServices(project) {
   return activeCount > 0 || retainedCount > 0;
 }
 
+// One row per menu entry, in display order. `when` decides whether the entry
+// is offered for the loaded project; `label` may be a function when the entry
+// renames itself with state.
+const MENU_ENTRIES = Object.freeze([
+  { value: "provision-technitium", label: "Provision Technitium DNS", hint: "create the DNS LXC", when: canProvisionTechnitium },
+  { value: "provision-caddy", label: "Provision Caddy reverse proxy", hint: "create the proxy LXC", when: (project) => canProvisionReverseProxy(project, "caddy") },
+  { value: "provision-traefik", label: "Provision Traefik reverse proxy", hint: "create the proxy LXC", when: (project) => canProvisionReverseProxy(project, "traefik") },
+  { value: "provision-step-ca", label: "Provision step-ca certificate authority", hint: "create the step-ca LXC", when: (project) => canProvisionCertificateAuthority(project, "step-ca") },
+  { value: "provision-caddy-internal-ca", label: "Configure Caddy Internal CA", hint: "configure internal certificates in Caddy", when: (project) => canProvisionCertificateAuthority(project, "caddy-internal-ca") },
+  { value: "provision-tailscale", label: "Provision Tailscale VPN", hint: "create the Tailscale LXC", when: (project) => canProvisionVpn(project, "tailscale") },
+  { value: "provision-netbird", label: "Provision NetBird VPN", hint: "create the NetBird LXC", when: (project) => canProvisionVpn(project, "netbird") },
+  { value: "publish-exposure", label: "Publish a web exposure", hint: "connect DNS and HTTPS routing", when: canPublishExposure },
+  { value: "edit-exposure", label: "Edit an exposure", hint: "update backend IP or port", when: canEditExposure },
+  { value: "remove-exposure", label: "Remove an exposure", hint: "disconnect DNS and HTTPS routing", when: canRemoveExposure },
+  { value: "change-domain", label: "Change the local domain", hint: "migrate exposures to a new TLD", when: hasExposures },
+  {
+    value: "toggle-http-redirect",
+    label: (project) => project.config.managedInventory.platform.reverseProxy.httpRedirect === true
+      ? "Turn OFF HTTP→HTTPS auto-redirect"
+      : "Turn ON HTTP→HTTPS auto-redirect",
+    hint: "redirect plain :80 hits to HTTPS (308)",
+    when: canToggleHttpRedirect
+  },
+  { value: "view-ca-guide", label: "View step-ca trust guide", hint: "install CA root on devices", when: canShowCaTrustGuide },
+  { value: "export-ca-cert", label: "Export step-ca root certificate", hint: "save cert + scp/install steps", when: canShowCaTrustGuide },
+  { value: "upgrade-service", label: "Upgrade a managed service", hint: "explicit service upgrade with snapshot", when: hasProvisionedServices },
+  { value: "remove-service", label: "Remove a managed service", hint: "disconnect integrations and retain data", when: hasProvisionedServices },
+  { value: "destroy-service", label: "Destroy a service LXC", hint: "permanently delete LXC container and data", when: hasProvisionedOrRetainedServices },
+  { value: "update-secret", label: "Update connection secret", hint: "change stored provider password", when: canUpdateConnectionSecret },
+  { value: "recheck-service", label: "Recheck provisioning", hint: "adopt existing LXC if healthy", when: canRecheckProvisioning },
+  {
+    value: "view-changes",
+    label: "View changes",
+    hint: (project) => `${pendingNoticeCount(project)} pending change(s)`,
+    when: (project) => pendingNoticeCount(project) > 0
+  },
+  { value: "nuclear-uninstall", label: "Nuclear uninstall", hint: "destroy ALL managed LXC(s), config, and secrets", when: () => true }
+]);
+
+function pendingNoticeCount(project) {
+  return (project.state?.tracking?.notices ?? []).length;
+}
+
+function resolve(field, project) {
+  return typeof field === "function" ? field(project) : field;
+}
+
 export function buildMenuOptions(project) {
-  const options = [];
-  if (project !== undefined && canProvisionTechnitium(project)) {
-    options.push({
-      value: "provision-technitium",
-      label: "Provision Technitium DNS",
-      hint: "create the DNS LXC"
-    });
-  }
-  if (project !== undefined && canProvisionCaddy(project)) {
-    options.push({
-      value: "provision-caddy",
-      label: "Provision Caddy reverse proxy",
-      hint: "create the proxy LXC"
-    });
-  }
-  if (project !== undefined && canProvisionTraefik(project)) {
-    options.push({
-      value: "provision-traefik",
-      label: "Provision Traefik reverse proxy",
-      hint: "create the proxy LXC"
-    });
-  }
-  if (project !== undefined && canProvisionStepCa(project)) {
-    options.push({
-      value: "provision-step-ca",
-      label: "Provision step-ca certificate authority",
-      hint: "create the step-ca LXC"
-    });
-  }
-  if (project !== undefined && canProvisionCaddyInternalCa(project)) {
-    options.push({
-      value: "provision-caddy-internal-ca",
-      label: "Configure Caddy Internal CA",
-      hint: "configure internal certificates in Caddy"
-    });
-  }
-  if (project !== undefined && canProvisionTailscale(project)) {
-    options.push({
-      value: "provision-tailscale",
-      label: "Provision Tailscale VPN",
-      hint: "create the Tailscale LXC"
-    });
-  }
-  if (project !== undefined && canProvisionNetbird(project)) {
-    options.push({
-      value: "provision-netbird",
-      label: "Provision NetBird VPN",
-      hint: "create the NetBird LXC"
-    });
-  }
-  if (project !== undefined && canPublishExposure(project)) {
-    options.push({
-      value: "publish-exposure",
-      label: "Publish a web exposure",
-      hint: "connect DNS and HTTPS routing"
-    });
-  }
-  if (project !== undefined && canEditExposure(project)) {
-    options.push({
-      value: "edit-exposure",
-      label: "Edit an exposure",
-      hint: "update backend IP or port"
-    });
-  }
-  if (project !== undefined && canRemoveExposure(project)) {
-    options.push({
-      value: "remove-exposure",
-      label: "Remove an exposure",
-      hint: "disconnect DNS and HTTPS routing"
-    });
-  }
-  if (project !== undefined && hasExposures(project)) {
-    options.push({
-      value: "change-domain",
-      label: "Change the local domain",
-      hint: "migrate exposures to a new TLD"
-    });
-  }
-  if (project !== undefined && canToggleHttpRedirect(project)) {
-    const enabled = project.config.managedInventory.platform.reverseProxy.httpRedirect === true;
-    options.push({
-      value: "toggle-http-redirect",
-      label: enabled ? "Turn OFF HTTP→HTTPS auto-redirect" : "Turn ON HTTP→HTTPS auto-redirect",
-      hint: "redirect plain :80 hits to HTTPS (308)"
-    });
-  }
-  if (project !== undefined && canShowCaTrustGuide(project)) {
-    options.push({
-      value: "view-ca-guide",
-      label: "View step-ca trust guide",
-      hint: "install CA root on devices"
-    });
-    options.push({
-      value: "export-ca-cert",
-      label: "Export step-ca root certificate",
-      hint: "save cert + scp/install steps"
-    });
-  }
-  if (project !== undefined && hasProvisionedServices(project)) {
-    options.push({
-      value: "upgrade-service",
-      label: "Upgrade a managed service",
-      hint: "explicit service upgrade with snapshot"
-    });
-    options.push({
-      value: "remove-service",
-      label: "Remove a managed service",
-      hint: "disconnect integrations and retain data"
-    });
-  }
-  if (project !== undefined && hasProvisionedOrRetainedServices(project)) {
-    options.push({
-      value: "destroy-service",
-      label: "Destroy a service LXC",
-      hint: "permanently delete LXC container and data"
-    });
-  }
-  if (project !== undefined && canUpdateConnectionSecret(project)) {
-    options.push({
-      value: "update-secret",
-      label: "Update connection secret",
-      hint: "change stored provider password"
-    });
-  }
-  if (project !== undefined && canRecheckProvisioning(project)) {
-    options.push({
-      value: "recheck-service",
-      label: "Recheck provisioning",
-      hint: "adopt existing LXC if healthy"
-    });
-  }
-  if (project !== undefined) {
-    const notices = project.state?.tracking?.notices ?? [];
-    if (notices.length > 0) {
-      options.push({
-        value: "view-changes",
-        label: "View changes",
-        hint: `${notices.length} pending change(s)`
-      });
-    }
-  }
-  if (project !== undefined) {
-    options.push({
-      value: "nuclear-uninstall",
-      label: "Nuclear uninstall",
-      hint: "destroy ALL managed LXC(s), config, and secrets"
-    });
-  }
+  const options = project === undefined
+    ? []
+    : MENU_ENTRIES.filter((entry) => entry.when(project)).map((entry) => ({
+        value: entry.value,
+        label: resolve(entry.label, project),
+        hint: resolve(entry.hint, project)
+      }));
   options.push({ value: "init", label: "Initialize a new project", hint: "first-time setup" });
   options.push({ value: "exit", label: "Exit", hint: "leave NominaConnect" });
   return options;
@@ -582,42 +470,25 @@ export async function runInteractiveApp(adapters) {
   throw new Error(`Unsupported action: ${action}.`);
 }
 
+// The platform services `service add` can still provision, in prompt order.
+// The hint is the catalog's own description so the two never drift apart.
+const PROVISIONABLE_SERVICES = Object.freeze([
+  { value: "technitium", label: "Technitium DNS", category: "dns", fallback: "DNS service", when: canProvisionTechnitium },
+  { value: "caddy", label: "Caddy reverse proxy", category: "reverseProxy", fallback: "reverse proxy", when: (project) => canProvisionReverseProxy(project, "caddy") },
+  { value: "traefik", label: "Traefik reverse proxy", category: "reverseProxy", fallback: "reverse proxy", when: (project) => canProvisionReverseProxy(project, "traefik") },
+  { value: "step-ca", label: "step-ca certificate authority", category: "certificateAuthority", fallback: "certificate authority", when: (project) => canProvisionCertificateAuthority(project, "step-ca") },
+  { value: "caddy-internal-ca", label: "Caddy Internal CA", category: "certificateAuthority", fallback: "internal certificate authority", when: (project) => canProvisionCertificateAuthority(project, "caddy-internal-ca") },
+  { value: "tailscale", label: "Tailscale VPN", category: "vpn", fallback: "VPN service", when: (project) => canProvisionVpn(project, "tailscale") },
+  { value: "netbird", label: "NetBird VPN", category: "vpn", fallback: "VPN service", when: (project) => canProvisionVpn(project, "netbird") }
+]);
+
 export async function promptServiceName(project, prompts) {
-  const choices = [];
-  if (canProvisionTechnitium(project)) {
-    const description = INITIAL_PLATFORM_CATALOG.dns[0]?.description ?? "DNS service";
-    choices.push({ value: "technitium", label: "Technitium DNS", hint: description });
-  }
-  if (canProvisionCaddy(project)) {
-    const description = INITIAL_PLATFORM_CATALOG.reverseProxy.find((option) => option.name === "caddy")?.description
-      ?? "reverse proxy";
-    choices.push({ value: "caddy", label: "Caddy reverse proxy", hint: description });
-  }
-  if (canProvisionTraefik(project)) {
-    const description = INITIAL_PLATFORM_CATALOG.reverseProxy.find((option) => option.name === "traefik")?.description
-      ?? "reverse proxy";
-    choices.push({ value: "traefik", label: "Traefik reverse proxy", hint: description });
-  }
-  if (canProvisionStepCa(project)) {
-    const description = INITIAL_PLATFORM_CATALOG.certificateAuthority.find((option) => option.name === "step-ca")?.description
-      ?? "certificate authority";
-    choices.push({ value: "step-ca", label: "step-ca certificate authority", hint: description });
-  }
-  if (canProvisionCaddyInternalCa(project)) {
-    const description = INITIAL_PLATFORM_CATALOG.certificateAuthority.find((option) => option.name === "caddy-internal-ca")?.description
-      ?? "internal certificate authority";
-    choices.push({ value: "caddy-internal-ca", label: "Caddy Internal CA", hint: description });
-  }
-  if (canProvisionTailscale(project)) {
-    const description = INITIAL_PLATFORM_CATALOG.vpn.find((option) => option.name === "tailscale")?.description
-      ?? "VPN service";
-    choices.push({ value: "tailscale", label: "Tailscale VPN", hint: description });
-  }
-  if (canProvisionNetbird(project)) {
-    const description = INITIAL_PLATFORM_CATALOG.vpn.find((option) => option.name === "netbird")?.description
-      ?? "VPN service";
-    choices.push({ value: "netbird", label: "NetBird VPN", hint: description });
-  }
+  const choices = PROVISIONABLE_SERVICES.filter((service) => service.when(project)).map((service) => ({
+    value: service.value,
+    label: service.label,
+    hint: INITIAL_PLATFORM_CATALOG[service.category].find((option) => option.name === service.value)?.description
+      ?? service.fallback
+  }));
   if (choices.length === 0) {
     throw new Error("No platform services are waiting to be provisioned.");
   }

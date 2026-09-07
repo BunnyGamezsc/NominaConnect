@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { runCli } from "../src/cli.js";
+import {
+  runCli
+} from "../src/cli.js";
 import {
   buildMenuOptions,
-  canProvisionCaddyInternalCa,
-  canProvisionStepCa,
+  canProvisionCertificateAuthority,
   canPublishExposure,
   runInteractiveApp
 } from "../src/tui.js";
@@ -698,7 +699,7 @@ test("interactive menu offers step-ca and caddy-internal-ca in dependency order"
     }
   };
 
-  assert.equal(canProvisionStepCa(projectStepCa), true);
+  assert.equal(canProvisionCertificateAuthority(projectStepCa, "step-ca"), true);
   assert.equal(canPublishExposure(projectStepCa), false);
   assert.deepEqual(
     buildMenuOptions(projectStepCa).map((option) => option.value),
@@ -723,7 +724,7 @@ test("interactive menu offers step-ca and caddy-internal-ca in dependency order"
     }
   };
 
-  assert.equal(canProvisionCaddyInternalCa(projectCaddyInternalCa), true);
+  assert.equal(canProvisionCertificateAuthority(projectCaddyInternalCa, "caddy-internal-ca"), true);
   assert.equal(canPublishExposure(projectCaddyInternalCa), false);
   assert.deepEqual(
     buildMenuOptions(projectCaddyInternalCa).map((option) => option.value),
@@ -1333,7 +1334,7 @@ test("interactive menu offers step-ca when Traefik is the reverse proxy and CA n
     }
   };
 
-  assert.equal(canProvisionStepCa(projectStepCaTraefik), true);
+  assert.equal(canProvisionCertificateAuthority(projectStepCaTraefik, "step-ca"), true);
   assert.equal(canPublishExposure(projectStepCaTraefik), false);
   assert.deepEqual(
     buildMenuOptions(projectStepCaTraefik).map((option) => option.value),

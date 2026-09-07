@@ -1,13 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { findProjectDirectory } from "../src/config.js";
-import { runCli } from "../src/cli.js";
+import {
+  findProjectDirectory
+} from "../src/config.js";
+import {
+  runCli
+} from "../src/cli.js";
 import {
   buildMenuOptions,
-  canProvisionCaddy,
+  canProvisionReverseProxy,
   canProvisionTechnitium,
-  canProvisionTraefik,
   canPublishExposure,
   runInteractiveApp,
   selectLxcTemplate
@@ -193,7 +196,7 @@ test("buildMenuOptions offers Caddy after Technitium is provisioned", () => {
   };
 
   assert.equal(canProvisionTechnitium(project), false);
-  assert.equal(canProvisionCaddy(project), true);
+  assert.equal(canProvisionReverseProxy(project, "caddy"), true);
   assert.equal(canPublishExposure(project), false);
   assert.deepEqual(
     buildMenuOptions(project).map((option) => option.value),
@@ -565,7 +568,7 @@ test("buildMenuOptions offers Traefik after Technitium is provisioned", () => {
   };
 
   assert.equal(canProvisionTechnitium(project), false);
-  assert.equal(canProvisionTraefik(project), true);
+  assert.equal(canProvisionReverseProxy(project, "traefik"), true);
   assert.equal(canPublishExposure(project), false);
   assert.deepEqual(
     buildMenuOptions(project).map((option) => option.value),

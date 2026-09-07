@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { runCli } from "../src/cli.js";
+import {
+  runCli
+} from "../src/cli.js";
 import {
   runTrackingJob,
   formatPendingNotices,
@@ -22,7 +24,7 @@ import {
 import {
   buildMenuOptions,
   canProvisionTechnitium,
-  canProvisionCaddy,
+  canProvisionReverseProxy,
   runInteractiveApp
 } from "../src/tui.js";
 

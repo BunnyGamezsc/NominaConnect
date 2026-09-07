@@ -213,7 +213,11 @@ export function createProductionAdapters(options = {}) {
   const httpClient = options.httpClient ?? createHttpClient();
   const proxmox = createProxmoxAdapter(commandRunner);
   const caddyAdapter = createCaddyAdapter({ httpClient, secretResolver });
+  // Everything but setup() is plain Caddy: the internal CA is a Caddy feature,
+  // not a separate service.
   const caddyInternalCaAdapter = Object.freeze({
+    ...caddyAdapter,
+    deleteRoute: caddyAdapter.unpublishRoute,
     async setup(plan) {
       if (plan.connectionSecretReference !== undefined) {
         try { secretResolver.resolve(plan.connectionSecretReference); } catch {}
@@ -222,16 +226,7 @@ export function createProductionAdapters(options = {}) {
         return { ...plan, lxcCommands: [{ binary: "/usr/bin/caddy", args: ["trust"] }] };
       }
       return caddyAdapter.setup(plan);
-    },
-    async upgrade(plan) { return caddyAdapter.upgrade(plan); },
-    async configure(request) { return caddyAdapter.configure(request); },
-    async inspect(request) { return caddyAdapter.inspect(request); },
-    async adopt(request) { return caddyAdapter.adopt(request); },
-    async healthCheck(request) { return caddyAdapter.healthCheck(request); },
-    async publishRoute(request) { return caddyAdapter.publishRoute(request); },
-    async unpublishRoute(request) { return caddyAdapter.unpublishRoute(request); },
-    async deleteRoute(request) { return caddyAdapter.unpublishRoute(request); },
-    async healthCheckExposure(request) { return caddyAdapter.healthCheckExposure(request); }
+    }
   });
   const providerAdapters = Object.freeze({
     technitium: createTechnitiumAdapter({
@@ -381,44 +376,6 @@ function createProxmoxAdapter(commandRunner) {
       return commandRunner.run({ binary: "/usr/sbin/pct", args: ["destroy", String(vmid)] });
     }
   });
-}
-
-function createProviderAdapter(provider, secretResolver) {
-  const packageName = provider === "caddy-internal-ca" ? "caddy" : provider;
-  const installCommands = provider === "caddy-internal-ca"
-    ? [{ binary: "/usr/bin/caddy", args: ["trust"] }]
-    : [
-        { binary: "/usr/bin/apt-get", args: ["update"] },
-        { binary: "/usr/bin/apt-get", args: ["install", "--yes", packageName] }
-      ];
-  return Object.freeze({
-    async setup(plan) {
-      resolveConfiguredSecret(secretResolver, plan);
-      return { ...plan, lxcCommands: installCommands };
-    },
-    async upgrade(plan) {
-      resolveConfiguredSecret(secretResolver, plan);
-      return {
-        ...plan,
-        lxcCommands: [{ binary: "/usr/bin/apt-get", args: ["install", "--only-upgrade", "--yes", packageName] }]
-      };
-    },
-    async inspect() {
-      return { resources: [] };
-    },
-    async adopt(request) {
-      return { managedInventoryUpdate: request.managed };
-    },
-    async healthCheck() {
-      return { process: "unknown", endpoint: "unknown" };
-    }
-  });
-}
-
-function resolveConfiguredSecret(secretResolver, plan) {
-  if (plan.connectionSecretReference !== undefined) {
-    secretResolver.resolve(plan.connectionSecretReference);
-  }
 }
 
 function normalizeCommand(command, defaultTimeoutMs) {

@@ -3,11 +3,12 @@ import { runAdoptionPass } from "./adoption.js";
 import { loadProject, serializeProjectConfiguration } from "./config.js";
 import { adoptPlatformDeployment, adoptServiceExposure, applyProviderReferenceChange } from "./adoption.js";
 
-let writeQueue = Promise.resolve();
-
-export function enqueueWrite(operation) {
-  writeQueue = writeQueue.then(operation, operation);
-  return writeQueue;
+function reloadProject(filesystem, projectDir) {
+  try {
+    return loadProject(filesystem, projectDir);
+  } catch {
+    return undefined;
+  }
 }
 
 export async function runTrackingJob({ filesystem, projectDir, providerAdapters = {}, retryOptions = {} }) {
@@ -22,14 +23,10 @@ export async function runTrackingJob({ filesystem, projectDir, providerAdapters 
   const notices = [];
 
   if (adoptionResult.changes.length > 0 || adoptionResult.warnings.length > 0) {
-    await enqueueWrite(() => {
-      let currentProject;
-      try {
-        currentProject = loadProject(filesystem, projectDir);
-      } catch {
-        return;
-      }
-
+    // Re-read rather than reusing the pre-adoption snapshot: the pass itself
+    // can take a while, and the file on disk is the one being updated.
+    const currentProject = reloadProject(filesystem, projectDir);
+    if (currentProject !== undefined) {
       let updatedConfig = currentProject.config;
       let updatedProviderReferences = currentProject.state.providerReferences ?? {};
       for (const change of adoptionResult.changes) {
@@ -81,7 +78,7 @@ export async function runTrackingJob({ filesystem, projectDir, providerAdapters 
         currentProject.statePath,
         `${JSON.stringify(updatedState, null, 2)}\n`
       );
-    });
+    }
   }
 
   return {

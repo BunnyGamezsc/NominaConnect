@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { runCli } from "../src/cli.js";
+import {
+  runCli
+} from "../src/cli.js";
 import {
   buildMenuOptions,
-  canProvisionTailscale,
-  canProvisionNetbird,
+  canProvisionVpn,
   runInteractiveApp
 } from "../src/tui.js";
 
@@ -459,7 +460,7 @@ test("interactive menu offers Tailscale VPN when it needs provisioning", () => {
     }
   };
 
-  assert.equal(canProvisionTailscale(project), true);
+  assert.equal(canProvisionVpn(project, "tailscale"), true);
   const optionValues = buildMenuOptions(project).map((option) => option.value);
   assert.ok(optionValues.includes("provision-tailscale"));
 });
@@ -484,7 +485,7 @@ test("interactive menu offers NetBird VPN when it needs provisioning", () => {
     }
   };
 
-  assert.equal(canProvisionNetbird(project), true);
+  assert.equal(canProvisionVpn(project, "netbird"), true);
   const optionValues = buildMenuOptions(project).map((option) => option.value);
   assert.ok(optionValues.includes("provision-netbird"));
 });
@@ -510,7 +511,7 @@ test("interactive menu hides Tailscale when it is already provisioned", () => {
     }
   };
 
-  assert.equal(canProvisionTailscale(project), false);
+  assert.equal(canProvisionVpn(project, "tailscale"), false);
   const optionValues = buildMenuOptions(project).map((option) => option.value);
   assert.ok(!optionValues.includes("provision-tailscale"));
 });
