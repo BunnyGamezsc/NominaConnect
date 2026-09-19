@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { normalizeRedirectCode, normalizeRedirectTarget, redirectTargetHost } from "./redirect.js";
 
 // Traefik has no Debian package; the release tarball is the supported install
 // path. Pinned so a provisioned LXC is reproducible; `nomina service upgrade
@@ -61,13 +62,14 @@ export function createTraefikAdapter({ httpClient, secretResolver, exec, sleep =
     async inspect(request) {
       tryResolveSecret(secretResolver, request.connectionSecretReference);
       const endpoint = resolveEndpoint(request);
-      const [routers, services] = await Promise.all([
+      const [routers, services, middlewares] = await Promise.all([
         listRouters(httpClient, endpoint),
-        listServices(httpClient, endpoint)
+        listServices(httpClient, endpoint),
+        listMiddlewares(httpClient, endpoint)
       ]);
       const resources = routers
         .filter((router) => !isRedirectRouter(router) && hostForRouter(router) !== undefined)
-        .map((router) => toManagedResource(router, services));
+        .map((router) => toManagedResource(router, services, middlewares));
       return { resources };
     },
     async adopt(request) {
@@ -219,6 +221,10 @@ export function createTraefikAdapter({ httpClient, secretResolver, exec, sleep =
       const hostname = assertPublishableHostname(request.hostname);
       const runInLxc = requireExec(request);
       const endpoint = resolveEndpoint(request);
+      const redirectTo = request.redirectTo !== undefined && request.redirectTo !== ""
+        ? normalizeRedirectTarget(request.redirectTo)
+        : undefined;
+      const redirectCode = normalizeRedirectCode(request.redirectCode);
 
       // The resolver has to exist in the static configuration before a router
       // names it, or Traefik rejects the router outright instead of serving it
@@ -231,7 +237,9 @@ export function createTraefikAdapter({ httpClient, secretResolver, exec, sleep =
         backendPort: request.backendPort,
         backendTls: request.backendTls === true,
         httpRedirect: request.httpRedirect === true,
-        certResolver: trust.resolver
+        certResolver: trust.resolver,
+        redirectTo,
+        redirectCode
       });
       await runInLxc(writeFragmentCommand(hostname, fragment));
 
@@ -239,6 +247,7 @@ export function createTraefikAdapter({ httpClient, secretResolver, exec, sleep =
       const observed = await waitForRouter(httpClient, endpoint, routerName, sleep);
       const locator = locatorFor(hostname);
       const services = observed === undefined ? [] : await listServices(httpClient, endpoint);
+      const middlewares = observed === undefined ? [] : await listMiddlewares(httpClient, endpoint);
       const warnings = [
         ...trust.warnings,
         ...(observed === undefined
@@ -250,9 +259,12 @@ export function createTraefikAdapter({ httpClient, secretResolver, exec, sleep =
         locator,
         fingerprint: fingerprintFor(locator, {
           router: observed ?? undefined,
-          service: observed === undefined ? undefined : serviceForRouter(observed, services)
+          service: observed === undefined ? undefined : serviceForRouter(observed, services),
+          middleware: observed === undefined ? undefined : middlewareForRouter(observed, middlewares)
         }),
-        route: `https://${hostname} -> ${backendUrl(request.backendIp, request.backendPort, request.backendTls === true)}`,
+        route: redirectTo !== undefined
+          ? `https://${hostname} => ${redirectTo} (${redirectCode})`
+          : `https://${hostname} -> ${backendUrl(request.backendIp, request.backendPort, request.backendTls === true)}`,
         ...(trust.resolver === undefined ? {} : { certResolver: trust.resolver }),
         ...(warnings.length > 0 ? { warnings } : {})
       };
@@ -287,10 +299,12 @@ export function createTraefikAdapter({ httpClient, secretResolver, exec, sleep =
       const endpoint = resolveEndpoint(request);
       let routers;
       let services;
+      let middlewares;
       try {
-        [routers, services] = await Promise.all([
+        [routers, services, middlewares] = await Promise.all([
           listRouters(httpClient, endpoint),
-          listServices(httpClient, endpoint)
+          listServices(httpClient, endpoint),
+          listMiddlewares(httpClient, endpoint)
         ]);
       } catch (error) {
         if (isUnreachable(error)) {
@@ -325,12 +339,21 @@ export function createTraefikAdapter({ httpClient, secretResolver, exec, sleep =
       if (router.status !== undefined && router.status !== "enabled") {
         return exposureHealth({ ...base, reason: `Traefik router for ${request.hostname} is ${router.status}.` });
       }
-      const expected = request.backendIp !== undefined && request.backendPort !== undefined
-        ? `${request.backendIp}:${request.backendPort}`
-        : undefined;
-      const observed = serverUrlFor(serviceForRouter(router, services));
-      if (expected !== undefined && observed !== undefined && hostPortOf(observed) !== expected) {
-        return exposureHealth({ ...base, reason: `Traefik router for ${request.hostname} points at ${observed}.` });
+      if (request.redirectTo !== undefined && request.redirectTo !== "") {
+        const expectedTo = normalizeRedirectTarget(request.redirectTo);
+        const expectedCode = normalizeRedirectCode(request.redirectCode);
+        const observedRedirect = parseRedirectMiddleware(middlewareForRouter(router, middlewares));
+        if (observedRedirect === undefined || redirectTargetHost(observedRedirect.to) !== redirectTargetHost(expectedTo) || observedRedirect.to !== expectedTo || observedRedirect.code !== expectedCode) {
+          return exposureHealth({ ...base, reason: `Traefik router for ${request.hostname} does not redirect to ${expectedTo}.` });
+        }
+      } else {
+        const expected = request.backendIp !== undefined && request.backendPort !== undefined
+          ? `${request.backendIp}:${request.backendPort}`
+          : undefined;
+        const observed = serverUrlFor(serviceForRouter(router, services));
+        if (expected !== undefined && observed !== undefined && hostPortOf(observed) !== expected) {
+          return exposureHealth({ ...base, reason: `Traefik router for ${request.hostname} points at ${observed}.` });
+        }
       }
       if (!tls.trusted && tls.expectedTrusted) {
         // The router carries no certificate resolver, so Traefik is answering
@@ -490,8 +513,52 @@ export function routerNameFor(hostname) {
 
 // A managed exposure is one file per hostname, so a publish or removal can
 // never reach configuration that another fragment owns.
-export function buildFragment({ hostname, backendIp, backendPort, backendTls = false, httpRedirect = false, certResolver = undefined }) {
+export function buildFragment({ hostname, backendIp = undefined, backendPort = undefined, backendTls = false, httpRedirect = false, certResolver = undefined, redirectTo = undefined, redirectCode = 308 }) {
   const name = routerNameFor(hostname);
+  const normalizedRedirect = redirectTo !== undefined && redirectTo !== ""
+    ? normalizeRedirectTarget(redirectTo)
+    : undefined;
+  const code = normalizeRedirectCode(redirectCode);
+  // A redirect exposure has no backend: both entry points redirect to the
+  // target via a redirectRegex middleware, and the router points at Traefik's
+  // noop service so no backend IP or port is needed. Traefik picks the status
+  // per request method from `permanent`: GET/HEAD get 301/302, requests with a
+  // body keep their method with 308/307. The stored code therefore selects the
+  // permanent (308-class) vs temporary (307-class) redirect, not the literal
+  // status every client sees.
+  if (normalizedRedirect !== undefined) {
+    const middleware = `${name}-redirect`;
+    const lines = [
+      "# Managed by NominaConnect. Direct edits are inspected and adopted.",
+      `# Exposure: ${hostname} => ${normalizedRedirect} (${code})`,
+      "http:",
+      "  routers:",
+      `    ${name}:`,
+      `      rule: "Host(\`${hostname}\`)"`,
+      "      entryPoints:",
+      "        - websecure",
+      `      service: noop@internal`,
+      ...(certResolver === undefined
+        ? ["      tls: {}"]
+        : ["      tls:", `        certResolver: ${certResolver}`]),
+      "      middlewares:",
+      `        - ${middleware}`,
+      `    ${name}${REDIRECT_SUFFIX}:`,
+      `      rule: "Host(\`${hostname}\`)"`,
+      "      entryPoints:",
+      "        - web",
+      `      service: noop@internal`,
+      "      middlewares:",
+      `        - ${middleware}`,
+      "  middlewares:",
+      `    ${middleware}:`,
+      "      redirectRegex:",
+      '        regex: "^https?://[^/]+/(.*)"',
+      `        replacement: "${normalizedRedirect}/\${1}"`,
+      `        permanent: ${code === 308 ? "true" : "false"}`
+    ];
+    return `${lines.join("\n")}\n`;
+  }
   const lines = [
     "# Managed by NominaConnect. Direct edits are inspected and adopted.",
     `# Exposure: ${hostname}`,
@@ -814,6 +881,38 @@ async function listServices(httpClient, endpoint) {
   return asFileProviderList(payload);
 }
 
+async function listMiddlewares(httpClient, endpoint) {
+  const payload = await apiGet(httpClient, endpoint, "/api/http/middlewares");
+  if (payload === null) {
+    return [];
+  }
+  return asFileProviderList(payload);
+}
+
+function middlewareForRouter(router, middlewares) {
+  const names = Array.isArray(router?.middlewares) ? router.middlewares : [];
+  for (const name of names) {
+    const bare = String(name).includes("@") ? String(name).slice(0, String(name).lastIndexOf("@")) : String(name);
+    const match = (middlewares ?? []).find((m) => bareName(m) === bare);
+    if (match !== undefined) {
+      return match;
+    }
+  }
+  return undefined;
+}
+
+function parseRedirectMiddleware(middleware) {
+  const cfg = middleware?.redirectRegex;
+  if (cfg === undefined || typeof cfg.replacement !== "string") {
+    return undefined;
+  }
+  const to = String(cfg.replacement).replace(/\/\$\{1\}$/, "").replace(/\/\$1$/, "").replace(/\/+$/, "") || String(cfg.replacement);
+  if (!/^https:\/\//.test(to)) {
+    return undefined;
+  }
+  return { to, code: cfg.permanent === false ? 307 : 308 };
+}
+
 function asFileProviderList(payload) {
   if (!Array.isArray(payload)) {
     return [];
@@ -861,10 +960,12 @@ async function waitForRouter(httpClient, endpoint, routerName, sleep) {
 async function observedFingerprint(httpClient, endpoint, hostname) {
   let routers;
   let services;
+  let middlewares;
   try {
-    [routers, services] = await Promise.all([
+    [routers, services, middlewares] = await Promise.all([
       listRouters(httpClient, endpoint),
-      listServices(httpClient, endpoint)
+      listServices(httpClient, endpoint),
+      listMiddlewares(httpClient, endpoint)
     ]);
   } catch (error) {
     if (isUnreachable(error)) {
@@ -878,7 +979,7 @@ async function observedFingerprint(httpClient, endpoint, hostname) {
   if (router === undefined) {
     return null;
   }
-  return fingerprintFor(locatorFor(hostname), { router, service: serviceForRouter(router, services) });
+  return fingerprintFor(locatorFor(hostname), { router, service: serviceForRouter(router, services), middleware: middlewareForRouter(router, middlewares) });
 }
 
 async function apiGet(httpClient, endpoint, path) {
@@ -947,24 +1048,45 @@ function locatorFor(hostname) {
   return { router: routerNameFor(hostname), fragmentPath: fragmentPathFor(hostname) };
 }
 
-function toManagedResource(router, services) {
+function toManagedResource(router, services, middlewares = []) {
   const host = hostForRouter(router);
   const service = serviceForRouter(router, services);
+  const middleware = middlewareForRouter(router, middlewares);
+  const redirect = parseRedirectMiddleware(middleware);
+  const locator = locatorFor(host);
+  // Inspection reports the untrusted default certificate as untrusted: the API
+  // cannot tell a configured trust anchor from Traefik's generated one, and
+  // inspection feeds adoption (ADR-0005), so a guess would be persisted.
+  const tls = tlsSummaryFor(router);
+  if (redirect !== undefined) {
+    return {
+      id: host,
+      locator,
+      fingerprint: fingerprintFor(locator, { router, service, middleware }),
+      route: `https://${host} => ${redirect.to} (${redirect.code})`,
+      router,
+      service,
+      middleware,
+      rule: router.rule,
+      entryPoints: router.entryPoints,
+      status: router.status,
+      tls,
+      redirect,
+      redirectTo: redirect.to,
+      redirectCode: redirect.code,
+      rData: { redirect, tls }
+    };
+  }
   const url = serverUrlFor(service);
   const hostPort = url === undefined ? undefined : hostPortOf(url);
   const [backendIp, backendPortRaw] = typeof hostPort === "string" && hostPort.includes(":")
     ? hostPort.split(":")
     : [undefined, undefined];
   const backendPort = backendPortRaw === undefined ? undefined : Number(backendPortRaw);
-  const locator = locatorFor(host);
-  // Inspection reports the untrusted default certificate as untrusted: the API
-  // cannot tell a configured trust anchor from Traefik's generated one, and
-  // inspection feeds adoption (ADR-0005), so a guess would be persisted.
-  const tls = tlsSummaryFor(router);
   return {
     id: host,
     locator,
-    fingerprint: fingerprintFor(locator, { router, service }),
+    fingerprint: fingerprintFor(locator, { router, service, middleware }),
     route: `https://${host} -> ${url ?? "unknown"}`,
     router,
     service,
@@ -1012,7 +1134,8 @@ function fingerprintFor(locator, observed) {
     .update(JSON.stringify({
       locator,
       router: normalizeForFingerprint(observed?.router),
-      service: normalizeForFingerprint(observed?.service)
+      service: normalizeForFingerprint(observed?.service),
+      middleware: normalizeForFingerprint(observed?.middleware)
     }))
     .digest("hex");
 }

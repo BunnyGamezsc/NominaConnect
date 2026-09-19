@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.2.0] - 2026-09-19
+
+### Added
+- **Redirect exposures.** A hostname can redirect to another URL instead of
+  proxying to a backend (e.g. apex `bunny.internal` → `home.bunny.internal`).
+  - `nomina exposure publish --hostname bunny.internal --redirect-to home.bunny.internal`
+    (`--redirect-code 307` for temporary, `308` permanent default). The target
+    accepts a bare hostname or full URL, path and query are preserved, and no
+    backend IP or port is needed. DNS and TLS work like a normal exposure.
+  - Wizard support: publish asks "Is this a redirect to another URL?", edit can
+    convert between backend and redirect exposures, and the selector lists
+    redirects without requiring a backend.
+  - Caddy serves the exact 307/308 on `:443` plus a direct `:80` → target
+    route. Traefik uses a `redirectRegex` middleware (`noop@internal` service):
+    GET/HEAD redirect with 301/302 while requests with a body keep their method
+    with 308/307, so the stored code selects the permanent vs temporary class.
+  - Background adoption tracks redirect target/code drift and route-type
+    changes, dropping the stale field so a republish cannot resurrect it.
+
 ## [2.1.1] - 2026-09-07
 
 ### Changed

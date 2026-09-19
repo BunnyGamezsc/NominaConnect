@@ -595,6 +595,24 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
             ip: observedBackendIp ?? service.exposure.backend?.ip,
             port: observedBackendPort ?? service.exposure.backend?.port
           };
+          const observedRedirectTo = matchedRoute.redirectTo ?? matchedRoute.redirect?.to;
+          const observedRedirectCode = matchedRoute.redirectCode ?? matchedRoute.redirect?.code;
+          const storedRedirectTo = service.exposure.redirect?.to;
+          const observedIsRedirect = observedRedirectTo !== undefined;
+          const storedIsRedirect = storedRedirectTo !== undefined;
+          // A route-type change (backend <-> redirect) must drop the stale
+          // field: keeping both leaves a republish that prefers the redirect
+          // undoing the observed provider change.
+          const typeChanged = observedIsRedirect !== storedIsRedirect;
+          const staleBackend = observedIsRedirect && service.exposure.backend !== undefined;
+          const redirectChanged = typeChanged ||
+            staleBackend ||
+            ((observedRedirectTo !== undefined || storedRedirectTo !== undefined) &&
+              (observedRedirectTo !== storedRedirectTo ||
+                (observedRedirectCode ?? 308) !== (service.exposure.redirect?.code ?? 308)));
+          const newRedirect = observedIsRedirect
+            ? { to: observedRedirectTo, code: observedRedirectCode ?? 308 }
+            : undefined;
           const storedProxyIdentity = exposureIdentity(project.state, service.id, "reverseProxy");
           const proxyIdentityDrifted = providerIdentityDrifted(providerIdentityOf(matchedRoute), storedProxyIdentity);
 
@@ -602,11 +620,11 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
           // adopted provider reference are only "verified" once the exposure
           // itself still serves (ADR-0029).
           let health = { status: "healthy" };
-          if ((backendChanged || proxyIdentityDrifted) && proxyAdapter.healthCheckExposure !== undefined) {
+          if ((backendChanged || redirectChanged || proxyIdentityDrifted) && proxyAdapter.healthCheckExposure !== undefined) {
             // vmid travels with the request so a proxy that verifies
             // certificates inside its LXC can still do so from tracking.
             health = await withBoundedRetry(
-              () => proxyAdapter.healthCheckExposure({ hostname, backendIp: newBackend.ip, backendPort: newBackend.port, caStrategy: service.exposure.certificateAuthority, ip: proxyRef.ip, vmid: proxyRef.vmid }),
+              () => proxyAdapter.healthCheckExposure({ hostname, backendIp: newBackend.ip, backendPort: newBackend.port, redirectTo: newRedirect?.to, redirectCode: newRedirect?.code, caStrategy: service.exposure.certificateAuthority, ip: proxyRef.ip, vmid: proxyRef.vmid }),
               retryOptions
             );
             if (health.status === "unhealthy") {
@@ -618,11 +636,40 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
             }
           }
 
+          if (redirectChanged) {
+            const updatedExposure = {
+              ...service.exposure
+            };
+            if (newRedirect === undefined) {
+              delete updatedExposure.redirect;
+            } else {
+              updatedExposure.redirect = newRedirect;
+            }
+            if (observedIsRedirect) {
+              delete updatedExposure.backend;
+            }
+
+            changes.push({
+              serviceId: service.id,
+              serviceName: service.name ?? hostname,
+              platformKey: "reverseProxy",
+              kind: "exposure-changed",
+              changes: newRedirect === undefined ? { redirectRemoved: true } : { redirect: newRedirect },
+              before: { ...service.exposure },
+              after: updatedExposure,
+              verified: health.status === "healthy",
+              timestamp: new Date().toISOString()
+            });
+          }
+
           if (backendChanged) {
             const updatedExposure = {
               ...service.exposure,
               backend: newBackend
             };
+            if (!observedIsRedirect) {
+              delete updatedExposure.redirect;
+            }
 
             changes.push({
               serviceId: service.id,

@@ -307,13 +307,26 @@ function appendManagedServices(lines, services) {
     if (service.exposure !== undefined) {
       lines.push(
         "      exposure:",
-        `        hostname: ${yamlScalar(service.exposure.hostname)}`,
-        "        backend:",
-        `          ip: ${yamlScalar(service.exposure.backend.ip)}`,
-        `          port: ${service.exposure.backend.port}`,
-        ...(service.exposure.backend.tls !== undefined
-          ? [`          tls: ${service.exposure.backend.tls === true}`]
-          : []),
+        `        hostname: ${yamlScalar(service.exposure.hostname)}`
+      );
+      if (service.exposure.backend !== undefined) {
+        lines.push(
+          "        backend:",
+          `          ip: ${yamlScalar(service.exposure.backend.ip)}`,
+          `          port: ${service.exposure.backend.port}`,
+          ...(service.exposure.backend.tls !== undefined
+            ? [`          tls: ${service.exposure.backend.tls === true}`]
+            : [])
+        );
+      }
+      if (service.exposure.redirect !== undefined) {
+        lines.push(
+          "        redirect:",
+          `          to: ${yamlScalar(service.exposure.redirect.to)}`,
+          `          code: ${service.exposure.redirect.code}`
+        );
+      }
+      lines.push(
         `        protocol: ${yamlScalar(service.exposure.protocol)}`
       );
       if (service.exposure.certificateAuthority !== undefined) {

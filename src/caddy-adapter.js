@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { normalizeRedirectCode, normalizeRedirectTarget, redirectTargetHost } from "./redirect.js";
 
 const CADDY_ADMIN_PORT = 2019;
 // Restarts of the distro unit reload only /etc/caddy/Caddyfile, wiping every
@@ -129,10 +130,18 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
         try { secretResolver.resolve(request.connectionSecretReference); } catch {}
       }
       await ensureServers(httpClient, endpoint);
-      const newRoute = buildManagedRoute(request.hostname, request.backendIp, request.backendPort, request.backendTls === true);
+      const redirectTo = request.redirectTo !== undefined && request.redirectTo !== ""
+        ? normalizeRedirectTarget(request.redirectTo)
+        : undefined;
+      const redirectCode = normalizeRedirectCode(request.redirectCode);
+      const newRoute = redirectTo !== undefined
+        ? buildRedirectTargetRoute(request.hostname, redirectTo, redirectCode)
+        : buildManagedRoute(request.hostname, request.backendIp, request.backendPort, request.backendTls === true);
       const desiredPolicy = { subjects: [request.hostname], issuers: [issuerFor(request)] };
       await upsertRoute(httpClient, endpoint, TLS_SERVER, request.hostname, [newRoute]);
-      if (request.httpRedirect === true) {
+      if (redirectTo !== undefined) {
+        await upsertRoute(httpClient, endpoint, HTTP_SERVER, request.hostname, [buildHttpRedirectTargetRoute(request.hostname, redirectTo, redirectCode)]);
+      } else if (request.httpRedirect === true) {
         await upsertRoute(httpClient, endpoint, HTTP_SERVER, request.hostname, [buildRedirectRoute(request.hostname)]);
       } else {
         await removeRedirect(httpClient, endpoint, request.hostname);
@@ -200,6 +209,15 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
       }
       const policy = policies.find((entry) => entry.subjects?.includes(request.hostname));
       const tls = tlsSummaryFor(policy?.issuers?.[0], request.caStrategy);
+      if (request.redirectTo !== undefined && request.redirectTo !== "") {
+        const expectedTo = normalizeRedirectTarget(request.redirectTo);
+        const expectedCode = normalizeRedirectCode(request.redirectCode);
+        const observed = parseRedirectTargetRoute(matched);
+        if (observed === undefined || redirectTargetHost(observed.to) !== redirectTargetHost(expectedTo) || observed.to !== expectedTo || observed.code !== expectedCode) {
+          return { https: "reachable", tls: tls.trusted ? "valid" : "untrusted", status: "unhealthy" };
+        }
+        return { https: "reachable", tls: tls.trusted ? "valid" : "untrusted", status: "healthy" };
+      }
       const dial = matched.handle?.[0]?.upstreams?.[0]?.dial ?? matched.upstreams?.[0]?.dial;
       const expectedDial = request.backendIp && request.backendPort ? `${request.backendIp}:${request.backendPort}` : undefined;
       if (expectedDial !== undefined && dial !== undefined && dial !== expectedDial) {
@@ -474,6 +492,59 @@ function buildManagedRoute(hostname, backendIp, backendPort, backendTls = false)
   };
 }
 
+// A managed redirect exposure answers :443 with a 307/308 to an explicit
+// target (e.g. apex bunny.internal -> https://home.bunny.internal), preserving
+// the request URI. The :80 route goes straight to the same target instead of
+// bouncing through https://apex first.
+function buildRedirectTargetRoute(hostname, target, code = 308) {
+  return {
+    "@id": hostname,
+    match: [{ host: [hostname] }],
+    handle: [{
+      handler: "static_response",
+      status_code: code,
+      headers: { Location: [`${target.replace(/\/+$/, "")}{http.request.uri}`] }
+    }],
+    terminal: true
+  };
+}
+
+function buildHttpRedirectTargetRoute(hostname, target, code = 308) {
+  return {
+    "@id": `${hostname}${REDIRECT_SUFFIX}`,
+    match: [{ host: [hostname] }],
+    handle: [{
+      handler: "static_response",
+      status_code: code,
+      headers: { Location: [`${target.replace(/\/+$/, "")}{http.request.uri}`] }
+    }],
+    terminal: true
+  };
+}
+
+// Returns { to, code } for a managed redirect-target route, or undefined for
+// proxy routes and for the http->https self redirects (their Location keeps
+// {http.request.host} instead of naming an explicit target).
+function parseRedirectTargetRoute(route) {
+  const handle = route.handle?.[0];
+  if (handle?.handler !== "static_response") {
+    return undefined;
+  }
+  const code = handle.status_code;
+  if (code !== 307 && code !== 308) {
+    return undefined;
+  }
+  const location = handle.headers?.Location?.[0] ?? handle.headers?.location?.[0];
+  if (typeof location !== "string" || location.includes("{http.request.host}")) {
+    return undefined;
+  }
+  const to = location.replace(/\{http\.request\.uri\}$/, "").replace(/\/+$/, "") || location;
+  if (!/^https:\/\//.test(to)) {
+    return undefined;
+  }
+  return { to, code };
+}
+
 const REDIRECT_SUFFIX = "-auto-http";
 
 // Plain-HTTP hits for an exposure are redirected to HTTPS instead of served.
@@ -547,13 +618,29 @@ function hostForRoute(route) {
 function toManagedResource(route, policies = []) {
   const host = hostForRoute(route) ?? route["@id"] ?? "unknown";
   const locator = { host, configPath: `/config/apps/http/servers/${TLS_SERVER}/routes/${host}` };
-  const dial = route.handle?.[0]?.upstreams?.[0]?.dial;
+  const redirect = parseRedirectTargetRoute(route);
   const policy = policies.find((entry) => entry.subjects?.includes(host));
   // Inspection deliberately reports the internal issuer as untrusted: the
   // published payload ({ module: "internal" }) cannot distinguish
   // caddy-internal-ca from no-CA, and inspection feeds adoption (ADR-0005),
   // so guessing trusted here would propagate a wrong value into nomina.yaml.
   const tls = tlsSummaryFor(policy?.issuers?.[0]);
+  if (redirect !== undefined) {
+    return {
+      id: host,
+      locator,
+      fingerprint: fingerprintFor(locator, { route, tls: policy }),
+      route: formatRoute(host, route),
+      handle: route.handle,
+      match: route.match,
+      tls,
+      redirect,
+      redirectTo: redirect.to,
+      redirectCode: redirect.code,
+      rData: { redirect, tls }
+    };
+  }
+  const dial = route.handle?.[0]?.upstreams?.[0]?.dial;
   const [backendIp, backendPortRaw] = typeof dial === "string" && dial.includes(":") ? dial.split(":") : [undefined, undefined];
   const backendPort = backendPortRaw !== undefined ? Number(backendPortRaw) : undefined;
   const backend = backendIp !== undefined && backendPort !== undefined ? { ip: backendIp, port: backendPort } : undefined;
@@ -574,6 +661,10 @@ function toManagedResource(route, policies = []) {
 }
 
 function formatRoute(host, route) {
+  const redirect = parseRedirectTargetRoute(route);
+  if (redirect !== undefined) {
+    return `https://${host} => ${redirect.to} (${redirect.code})`;
+  }
   const dial = route.handle?.[0]?.upstreams?.[0]?.dial ?? "unknown";
   return `https://${host} -> ${dial}`;
 }

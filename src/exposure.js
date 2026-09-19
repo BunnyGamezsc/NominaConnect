@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { withHealthyRetry } from "./adoption.js";
 import { getPlatformProvider } from "./providers.js";
+import { normalizeRedirectCode, normalizeRedirectTarget } from "./redirect.js";
 
 // Caddy is driven through its Admin API on :2019; Traefik is observed through
 // its dashboard/API on :8080. Callers that build a proxy request must go
@@ -52,6 +53,11 @@ export async function publishManagedExposure({
   }
 
   const { name, hostname, backendIp, backendPort } = options;
+  const redirectTo = options.redirectTo !== undefined && options.redirectTo !== ""
+    ? normalizeRedirectTarget(options.redirectTo)
+    : undefined;
+  const redirectCode = normalizeRedirectCode(options.redirectCode);
+  const isRedirect = redirectTo !== undefined;
   const dnsRef = project.state.providerReferences[dnsService.id];
   const proxyRef = project.state.providerReferences[proxyService.id];
   const publishRequest = {
@@ -89,6 +95,8 @@ export async function publishManagedExposure({
     backendIp,
     backendPort,
     backendTls: options.backendTls === true,
+    redirectTo,
+    redirectCode,
     protocol: "https",
     caStrategy,
     tls: tlsOptions,
@@ -182,6 +190,8 @@ export async function publishManagedExposure({
       hostname,
       backendIp,
       backendPort,
+      redirectTo,
+      redirectCode,
       caStrategy,
       ip: proxyRef?.ip,
       vmid: proxyRef?.vmid,
@@ -212,11 +222,15 @@ export async function publishManagedExposure({
     name,
     exposure: {
       hostname,
-      backend: {
-        ip: backendIp,
-        port: backendPort,
-        ...(options.backendTls === true ? { tls: true } : {})
-      },
+      ...(isRedirect
+        ? { redirect: { to: redirectTo, code: redirectCode } }
+        : {
+          backend: {
+            ip: backendIp,
+            port: backendPort,
+            ...(options.backendTls === true ? { tls: true } : {})
+          }
+        }),
       protocol: "https",
       certificateAuthority: caStrategy,
       tls: {

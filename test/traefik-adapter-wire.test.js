@@ -817,9 +817,9 @@ test("a direct edit to a managed fragment is inspected as the observed configura
 
   const { resources } = await adapter.inspect({ ip: "10.0.0.54" });
   const observed = resources.find((resource) => resource.id === "photos.bunnyhome.test");
-  assert.equal(observed.backendIp, "10.0.0.101");
-  assert.equal(observed.backendPort, 9443);
-  assert.deepEqual(observed.backend, { ip: "10.0.0.101", port: 9443 });
+  assert.equal(observed["backendIp"], "10.0.0.101");
+  assert.equal(observed["backendPort"], 9443);
+  assert.deepEqual(observed["backend"], { ip: "10.0.0.101", port: 9443 });
   assert.notEqual(observed.fingerprint, published.fingerprint, "the edit must be visible as drift");
 });
 

@@ -69,6 +69,33 @@ value). The flag is stored in `nomina.yaml` (`exposure.backend.tls`) and
 survives domain changes, redirect toggles, and edits. Changed your mind?
 Re-publish the same exposure with/without the flag to flip it.
 
+## Redirect exposures (no backend)
+
+A hostname can redirect to another URL instead of proxying to a backend.
+Useful for apex to app moves like `bunny.internal` → `home.bunny.internal`.
+DNS and TLS work the same (A record to the proxy, trusted cert via step-ca),
+but no backend IP or port is needed. Path and query are preserved.
+
+```bash
+# 308 Permanent is the default and recommended (cached, preserves method):
+nomina exposure publish --name root --hostname bunny.internal \
+  --redirect-to home.bunny.internal --project-dir /root
+
+# 307 Temporary instead (not cached, preserves method):
+nomina exposure publish --name root --hostname bunny.internal \
+  --redirect-to home.bunny.internal --redirect-code 307 --project-dir /root
+```
+
+`--redirect-to` accepts a bare hostname (`home.bunny.internal`) or a full URL
+(`https://home.bunny.internal`). The wizard asks "Is this a redirect to
+another URL?" during publish and edit, then the target and the code (308
+recommended, 307 temporary). Stored in `nomina.yaml` as `exposure.redirect`
+and supported on both Caddy and Traefik.
+
+Status-code note: Caddy serves the exact 307/308. Traefik only distinguishes
+permanent vs temporary, so GET/HEAD redirect with 301/302 while requests with
+a body keep their method with 308/307. The stored code selects the class.
+
 ## Real Provider Adapters
 
 **Status: Beta**

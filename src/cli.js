@@ -8,6 +8,7 @@ import {
   upsertManagedExposure
 } from "./config.js";
 import { proxyEndpointFor, publishManagedExposure, stepCaCaHost } from "./exposure.js";
+import { normalizeRedirectCode, normalizeRedirectTarget } from "./redirect.js";
 import { getPlatformProvider } from "./providers.js";
 import { provisionPlatformService, resolveServiceDeployment } from "./provisioning.js";
 import { ensureConnectionSecret, updateConnectionSecret } from "./secrets.js";
@@ -1311,9 +1312,11 @@ async function republishExposures(workingProject, services, providerAdapters) {
       options: {
         name: service.name,
         hostname: service.exposure.hostname,
-        backendIp: service.exposure.backend.ip,
-        backendPort: Number(service.exposure.backend.port),
-        backendTls: service.exposure.backend.tls === true
+        backendIp: service.exposure.backend?.ip,
+        backendPort: service.exposure.backend?.port !== undefined ? Number(service.exposure.backend.port) : undefined,
+        backendTls: service.exposure.backend?.tls === true,
+        redirectTo: service.exposure.redirect?.to,
+        redirectCode: service.exposure.redirect?.code
       },
       providerAdapters
     });
@@ -1354,9 +1357,31 @@ async function changeBaseDomain(options, adapters) {
   const state = project.state;
   const dnsRef = state.providerReferences[dnsService.id];
   const proxyRef = state.providerReferences[proxyService.id];
-  const swapHost = (hostname) => hostname.endsWith(`.${oldDomain}`)
-    ? `${hostname.slice(0, -(oldDomain.length + 1))}.${newDomain}`
-    : hostname;
+  const swapHost = (hostname) => {
+    if (hostname === oldDomain) {
+      return newDomain;
+    }
+    return hostname.endsWith(`.${oldDomain}`)
+      ? `${hostname.slice(0, -(oldDomain.length + 1))}.${newDomain}`
+      : hostname;
+  };
+  const swapTarget = (target) => {
+    if (typeof target !== "string") {
+      return target;
+    }
+    try {
+      const url = new URL(target);
+      const host = url.hostname.toLowerCase();
+      const swapped = swapHost(host);
+      if (swapped === host) {
+        return target;
+      }
+      url.hostname = swapped;
+      return url.toString().replace(/\/$/, "");
+    } catch {
+      return target;
+    }
+  };
 
   const warnings = [];
   const exposures = (project.config.managedInventory.services ?? []).filter(
@@ -1387,7 +1412,16 @@ async function changeBaseDomain(options, adapters) {
 
   const renamedServices = (project.config.managedInventory.services ?? []).map((service) =>
     service.exposure?.hostname !== undefined
-      ? { ...service, exposure: { ...service.exposure, hostname: swapHost(service.exposure.hostname) } }
+      ? {
+        ...service,
+        exposure: {
+          ...service.exposure,
+          hostname: swapHost(service.exposure.hostname),
+          ...(service.exposure.redirect !== undefined
+            ? { redirect: { ...service.exposure.redirect, to: swapTarget(service.exposure.redirect.to) } }
+            : {})
+        }
+      }
       : service
   );
   const workingProject = {
@@ -1627,9 +1661,12 @@ async function publishExposure(options, adapters) {
     ...(result.health.certificateAuthority?.reason !== undefined ? [result.health.certificateAuthority.reason] : [])
   ];
   const warningLines = warnings.map((warning) => `Warning: ${warning}\n`).join("");
+  const destination = resolvedOptions.redirectTo !== undefined && resolvedOptions.redirectTo !== ""
+    ? `redirect to ${resolvedOptions.redirectTo} (${resolvedOptions.redirectCode ?? 308})`
+    : `via HTTPS at ${resolvedOptions.backendIp}:${resolvedOptions.backendPort}`;
 
   return {
-    stdout: `Exposure ${actionLabel} for ${resolvedOptions.hostname} via HTTPS at ${resolvedOptions.backendIp}:${resolvedOptions.backendPort}. Health: ${healthLabel}.\n${warningLines}`,
+    stdout: `Exposure ${actionLabel} for ${resolvedOptions.hostname} ${destination}. Health: ${healthLabel}.\n${warningLines}`,
     health: result.health,
     warnings,
     dnsInspection: result.dnsInspection,
@@ -1730,10 +1767,11 @@ const parseServiceAddOptions = optionParser({
 const parseExposurePublishOptions = optionParser({
   flags: [
     ["--name", "name"], ["--hostname", "hostname"], ["--backend-ip", "backendIp"],
-    ["--backend-port", "backendPort"], ["--backend-tls", "backendTls"]
+    ["--backend-port", "backendPort"], ["--backend-tls", "backendTls"],
+    ["--redirect-to", "redirectTo"], ["--redirect-code", "redirectCode"]
   ],
   booleans: ["--backend-tls"],
-  numbers: ["backendPort"]
+  numbers: ["backendPort", "redirectCode"]
 });
 
 const parseSecretChangeOptions = optionParser({
@@ -1768,9 +1806,19 @@ const parseServiceRecheckOptions = optionParser({
 });
 
 function validateExposureOptions(options) {
-  for (const field of ["name", "hostname", "backendIp", "backendPort"]) {
+  for (const field of ["name", "hostname"]) {
     if (options[field] === undefined || options[field] === "") {
       throw new Error(`${field} is required.`);
+    }
+  }
+  if (options.redirectTo !== undefined && options.redirectTo !== "") {
+    options.redirectTo = normalizeRedirectTarget(options.redirectTo);
+    options.redirectCode = normalizeRedirectCode(options.redirectCode);
+    return;
+  }
+  for (const field of ["backendIp", "backendPort"]) {
+    if (options[field] === undefined || options[field] === "") {
+      throw new Error(`${field} is required (or use --redirect-to for a redirect exposure).`);
     }
   }
   if (!isIpAddress(options.backendIp)) {

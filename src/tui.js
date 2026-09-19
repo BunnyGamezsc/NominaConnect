@@ -337,16 +337,50 @@ export async function runInteractiveApp(adapters) {
     if (!svc?.exposure) {
       throw new Error(`Exposure ${serviceName} not found.`);
     }
-    let backendIp = svc.exposure.backend.ip;
-    let backendPortRaw = String(svc.exposure.backend.port);
+    // The edit wizard can convert between backend and redirect exposures, so
+    // ask for the desired type first and default every later prompt from the
+    // stored values of that type (which may not exist yet after a conversion).
+    let wantRedirect = svc.exposure.redirect !== undefined;
+    if (adapters.prompts !== undefined) {
+      wantRedirect = await confirmPrompt(
+        adapters.prompts,
+        "Is this a redirect to another URL? (no backend, e.g. apex bunny.internal -> home.bunny.internal)",
+        wantRedirect
+      );
+    }
+    if (wantRedirect) {
+      let target = svc.exposure.redirect?.to ?? `home.${projectForEdit.config.baseLocalDomain}`;
+      let code = svc.exposure.redirect?.code ?? 308;
+      if (adapters.prompts?.ask) {
+        const answer = await adapters.prompts.ask("Redirect target", target);
+        if (answer && answer.trim() !== "") {
+          target = answer.trim();
+        }
+      }
+      if (adapters.prompts !== undefined) {
+        code = await promptRedirectCode(adapters.prompts, code);
+      }
+      const result = await adapters.runCommand(
+        ["exposure", "publish", "--name", svc.name, "--hostname", svc.exposure.hostname,
+          "--redirect-to", target, "--redirect-code", String(code)],
+        adapters
+      );
+      clack.outro("Exposure updated.");
+      if (adapters.tracking) {
+        adapters.tracking.run(adapters);
+      }
+      return result;
+    }
+    let backendIp = svc.exposure.backend?.ip ?? "";
+    let backendPortRaw = svc.exposure.backend?.port !== undefined ? String(svc.exposure.backend.port) : "";
     if (adapters.prompts?.ask) {
-      const answerIp = await adapters.prompts.ask("Backend IP", svc.exposure.backend.ip);
+      const answerIp = await adapters.prompts.ask("Backend IP", backendIp || undefined);
       if (answerIp && answerIp.trim() !== "") {
         const err = validateIp(answerIp);
         if (err) throw new Error(err);
         backendIp = answerIp.trim();
       }
-      const answerPort = await adapters.prompts.ask("Backend port", String(svc.exposure.backend.port));
+      const answerPort = await adapters.prompts.ask("Backend port", backendPortRaw || undefined);
       if (answerPort && answerPort.trim() !== "") {
         backendPortRaw = answerPort.trim();
       }
@@ -356,7 +390,7 @@ export async function runInteractiveApp(adapters) {
       throw new Error(`Invalid backend port: ${backendPortRaw}.`);
     }
     // Ask with the stored value as default so edits can flip the TLS setting.
-    let backendTls = svc.exposure.backend.tls === true;
+    let backendTls = svc.exposure.backend?.tls === true;
     if (adapters.prompts !== undefined) {
       backendTls = await confirmPrompt(
         adapters.prompts,
@@ -690,6 +724,20 @@ export async function promptExposureOptions(project, existingOptions, prompts) {
   const name = existingOptions.name ?? await askPrompt(prompts, "Service name", "app");
   const suggestedHostname = `${name}.${project.config.baseLocalDomain}`;
   const hostname = existingOptions.hostname ?? await askPrompt(prompts, "Full hostname", suggestedHostname);
+  const isRedirect = existingOptions.redirectTo !== undefined && existingOptions.redirectTo !== ""
+    ? true
+    : await confirmPrompt(
+      prompts,
+      "Is this a redirect to another URL? (no backend, e.g. apex bunny.internal -> home.bunny.internal)",
+      false
+    );
+  if (isRedirect) {
+    const redirectRaw = existingOptions.redirectTo
+      ?? await askPrompt(prompts, "Redirect target (e.g. home.bunny.internal)", `home.${project.config.baseLocalDomain}`);
+    const redirectCode = existingOptions.redirectCode
+      ?? await promptRedirectCode(prompts, 308);
+    return { ...existingOptions, name, hostname, redirectTo: redirectRaw, redirectCode };
+  }
   const backendIp = existingOptions.backendIp
     ?? await askRequired(prompts, "Backend IP", validateIp);
   const backendPort = existingOptions.backendPort
@@ -702,6 +750,23 @@ export async function promptExposureOptions(project, existingOptions, prompts) {
     );
 
   return { ...existingOptions, name, hostname, backendIp, backendPort, backendTls };
+}
+
+async function promptRedirectCode(prompts, fallback = 308) {
+  if (prompts?.select) {
+    const selected = await prompts.select({
+      message: "Redirect status code",
+      options: [
+        { value: 308, label: "308 Permanent (Recommended)", hint: "cached, preserves method and path" },
+        { value: 307, label: "307 Temporary", hint: "not cached, preserves method and path" }
+      ]
+    });
+    if (selected !== undefined) {
+      return Number(selected);
+    }
+  }
+  const answer = await askPrompt(prompts, "Redirect code (307 or 308)", String(fallback));
+  return Number(answer ?? fallback);
 }
 
 async function askPrompt(prompts, question, fallback = undefined) {
@@ -783,7 +848,12 @@ export async function promptExposureServiceName(project, prompts) {
   const choices = [];
   for (const s of project.config.managedInventory.services ?? []) {
     if (s?.exposure?.hostname) {
-      choices.push({ value: s.id, label: `${s.name} (${s.exposure.hostname})`, hint: `${s.exposure.backend.ip}:${s.exposure.backend.port}` });
+      const hint = s.exposure.redirect !== undefined
+        ? `=> ${s.exposure.redirect.to} (${s.exposure.redirect.code ?? 308})`
+        : s.exposure.backend !== undefined
+          ? `${s.exposure.backend.ip}:${s.exposure.backend.port}`
+          : "";
+      choices.push({ value: s.id, label: `${s.name} (${s.exposure.hostname})`, hint });
     }
   }
   if (choices.length === 0) {
