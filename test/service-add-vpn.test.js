@@ -226,6 +226,47 @@ test("nomina service add tailscale provisions an unprivileged Debian LXC with de
   assert.deepEqual(result.inspection.unmanaged.length, 1);
 });
 
+test("production-style Tailscale provisioning configures tailnet DNS and routes after enrollment", async () => {
+  const filesystem = new FakeFilesystem();
+  seedProject(filesystem);
+  const statePath = "/projects/bunnyhome/.nomina/state.json";
+  const state = JSON.parse(filesystem.read(statePath));
+  state.providerReferences.nc_dns_test = { vmid: 120, ip: "10.0.0.53" };
+  state.providerReferences.nc_proxy_test = { vmid: 121, ip: "10.0.0.54" };
+  filesystem.writeFile(statePath, JSON.stringify(state));
+  const proxmox = createProxmoxAdapter();
+  const configured = [];
+  const tailscale = {
+    ...createTailscaleAdapter({ resources: [
+      { id: "node-self", self: true, locator: { id: "node-self" }, tailscaleIps: ["100.64.0.5"] }
+    ] }),
+    configureTailnet(request) { configured.push(request); }
+  };
+  await runCli(
+    ["service", "add", "tailscale", "--project-dir", "/projects/bunnyhome", "--ip", "10.0.0.60"],
+    { filesystem, runtime: proxmoxRootRuntime(), proxmox, providerAdapters: { tailscale },
+      secretStore: { has: () => true } }
+  );
+  assert.equal(configured.length, 1);
+  assert.deepEqual(configured[0], {
+    vmid: 130, deviceId: "node-self", dnsIp: "10.0.0.53", proxyIp: "10.0.0.54",
+    adminSecretReference: "nominaconnect/tailscale-admin/nc_vpn_test"
+  });
+});
+
+test("Tailscale does not create an LXC when DNS or proxy is not provisioned", async () => {
+  const filesystem = new FakeFilesystem();
+  seedProject(filesystem);
+  const proxmox = createProxmoxAdapter();
+  const tailscale = { ...createTailscaleAdapter(), configureTailnet() {} };
+  await assert.rejects(
+    () => runCli(["service", "add", "tailscale", "--project-dir", "/projects/bunnyhome", "--ip", "10.0.0.60"],
+      { filesystem, runtime: proxmoxRootRuntime(), proxmox, providerAdapters: { tailscale } }),
+    /Provision Technitium and Caddy or Traefik/
+  );
+  assert.equal(proxmox.created.length, 0);
+});
+
 test("nomina service add netbird provisions an unprivileged Debian LXC with defaults", async () => {
   const filesystem = new FakeFilesystem();
   seedNetbirdProject(filesystem);

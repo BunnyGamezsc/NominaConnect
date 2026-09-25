@@ -132,6 +132,42 @@ actual Proxmox LXCs and talk to the providers' own control surfaces.
   selectable yet
 - Backup and disaster recovery procedures are still being refined
 
+## Tailnet access to exposures
+
+When Tailscale is selected, provision Technitium and Caddy or Traefik first,
+then run `nomina service add tailscale`. NominaConnect asks for two different
+credentials: a Tailscale **auth key** to enroll its LXC and an **admin API token**
+with `dns` and `devices:routes` permissions to configure the tailnet. Both go
+into the root-only secret store. For unattended setup, supply the admin token
+through `NOMINA_TAILSCALE_API_TOKEN`, not a CLI flag. Rotate it with
+`nomina secret change --service tailscale-admin` when needed.
+
+Setup advertises only the Technitium and reverse-proxy host addresses. The
+Tailscale LXC's persistent firewall forwards DNS (TCP/UDP 53) and proxy web
+traffic (TCP 80/443) to those hosts; it refuses other forwarded ports and does
+not route application backends. NominaConnect approves those routes through the
+Tailscale API, then makes Technitium the tailnet's sole global nameserver and
+enables DNS override. This replaces any existing tailnet-wide global nameserver
+list so DNS filtering cannot be bypassed by another resolver. MagicDNS is
+preserved. Setup refuses existing split-DNS rules that point at another
+resolver because those domains would evade Technitium's filter.
+
+New exposures allow tailnet access by default. The publish and edit prompts
+include **Allow this exposure over Tailscale?**; the CLI equivalent is
+`--tailnet false` or `--tailnet true` on `nomina exposure publish`. An opted-out
+hostname still resolves, but Caddy or Traefik returns 404 to requests forwarded
+by NominaConnect's Tailscale gateway. LAN requests remain allowed. The setting
+is saved in `nomina.yaml` and survives republishing and domain changes.
+The advertised host routes can also take precedence while a device is on the
+home LAN. On such a device, an opted-out exposure may still be refused until
+subnet route acceptance is disabled or Tailscale is disconnected.
+
+Tailnet devices must use Tailscale DNS and accept approved subnet routes.
+Linux clients may need `tailscale set --accept-routes=true`. The CA root must
+also be trusted on each client for a browser to accept certificates issued by
+step-ca or Caddy Internal CA. A device that disables tailnet DNS or routes will
+not get the managed hostname behavior.
+
 You can also run subcommands directly — they use the same guided prompts when
 flags are omitted:
 

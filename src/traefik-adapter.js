@@ -239,7 +239,9 @@ export function createTraefikAdapter({ httpClient, secretResolver, exec, sleep =
         httpRedirect: request.httpRedirect === true,
         certResolver: trust.resolver,
         redirectTo,
-        redirectCode
+        redirectCode,
+        tailnet: request.tailnet,
+        tailnetGatewayIp: request.tailnetGatewayIp
       });
       await runInLxc(writeFragmentCommand(hostname, fragment));
 
@@ -321,6 +323,12 @@ export function createTraefikAdapter({ httpClient, secretResolver, exec, sleep =
           https: "unreachable",
           reason: `Traefik has no router for ${request.hostname}.`
         });
+      }
+      if (request.tailnetGatewayIp !== undefined) {
+        const denied = `!ClientIP(\`${request.tailnetGatewayIp}\`)`;
+        if (Boolean(router.rule?.includes(denied)) !== (request.tailnet === false)) {
+          return exposureHealth({ https: "reachable", reason: "Traefik's tailnet access rule does not match this exposure." });
+        }
       }
       const tls = tlsSummaryFor(router, request.caStrategy);
       const base = { https: "reachable", tls: tls.trusted ? "valid" : "untrusted", issuer: tls.issuer };
@@ -513,8 +521,12 @@ export function routerNameFor(hostname) {
 
 // A managed exposure is one file per hostname, so a publish or removal can
 // never reach configuration that another fragment owns.
-export function buildFragment({ hostname, backendIp = undefined, backendPort = undefined, backendTls = false, httpRedirect = false, certResolver = undefined, redirectTo = undefined, redirectCode = 308 }) {
+export function buildFragment({ hostname, backendIp = undefined, backendPort = undefined, backendTls = false, httpRedirect = false, certResolver = undefined, redirectTo = undefined, redirectCode = 308, tailnet = true, tailnetGatewayIp = undefined }) {
   const name = routerNameFor(hostname);
+  if (tailnet === false && tailnetGatewayIp === undefined) {
+    throw new Error(`Cannot protect ${hostname} from tailnet access without the Tailscale gateway IP.`);
+  }
+  const hostRule = `Host(\`${hostname}\`)${tailnet === false ? ` && !ClientIP(\`${tailnetGatewayIp}\`)` : ""}`;
   const normalizedRedirect = redirectTo !== undefined && redirectTo !== ""
     ? normalizeRedirectTarget(redirectTo)
     : undefined;
@@ -534,7 +546,7 @@ export function buildFragment({ hostname, backendIp = undefined, backendPort = u
       "http:",
       "  routers:",
       `    ${name}:`,
-      `      rule: "Host(\`${hostname}\`)"`,
+      `      rule: "${hostRule}"`,
       "      entryPoints:",
       "        - websecure",
       `      service: noop@internal`,
@@ -544,7 +556,7 @@ export function buildFragment({ hostname, backendIp = undefined, backendPort = u
       "      middlewares:",
       `        - ${middleware}`,
       `    ${name}${REDIRECT_SUFFIX}:`,
-      `      rule: "Host(\`${hostname}\`)"`,
+      `      rule: "${hostRule}"`,
       "      entryPoints:",
       "        - web",
       `      service: noop@internal`,
@@ -565,7 +577,7 @@ export function buildFragment({ hostname, backendIp = undefined, backendPort = u
     "http:",
     "  routers:",
     `    ${name}:`,
-    `      rule: "Host(\`${hostname}\`)"`,
+    `      rule: "${hostRule}"`,
     "      entryPoints:",
     "        - websecure",
     `      service: ${name}`,
@@ -581,7 +593,7 @@ export function buildFragment({ hostname, backendIp = undefined, backendPort = u
   if (httpRedirect) {
     lines.push(
       `    ${name}${REDIRECT_SUFFIX}:`,
-      `      rule: "Host(\`${hostname}\`)"`,
+      `      rule: "${hostRule}"`,
       "      entryPoints:",
       "        - web",
       `      service: ${name}`,

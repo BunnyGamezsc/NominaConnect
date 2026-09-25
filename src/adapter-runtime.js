@@ -8,6 +8,7 @@ import { createCaddyAdapter } from "./caddy-adapter.js";
 import { createNetBirdAdapter } from "./netbird-adapter.js";
 import { createStepCaAdapter } from "./step-ca-adapter.js";
 import { createTailscaleAdapter } from "./tailscale-adapter.js";
+import { createTailnetController } from "./tailscale-tailnet.js";
 import { createTechnitiumAdapter } from "./technitium-adapter.js";
 import { createTraefikAdapter } from "./traefik-adapter.js";
 
@@ -250,7 +251,12 @@ export function createProductionAdapters(options = {}) {
     tailscale: createTailscaleAdapter({
       secretResolver,
       exec: (vmid, command) => proxmox.pctExec(vmid, command),
-      enableTunDevice: (vmid) => proxmox.enableTunDevice(vmid)
+      enableTunDevice: (vmid) => proxmox.enableTunDevice(vmid),
+      tailnetController: createTailnetController({
+        httpClient,
+        secretResolver,
+        exec: (vmid, command) => proxmox.pctExec(vmid, command)
+      })
     }),
     // NetBird is driven entirely through its CLI inside the service LXC, and
     // like Tailscale it needs the Proxmox host to hand the container a TUN
