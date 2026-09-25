@@ -226,7 +226,7 @@ test("nomina service add tailscale provisions an unprivileged Debian LXC with de
   assert.deepEqual(result.inspection.unmanaged.length, 1);
 });
 
-test("production-style Tailscale provisioning configures tailnet DNS and routes after enrollment", async () => {
+test("production-style Tailscale provisioning configures gateway DNS after enrollment", async () => {
   const filesystem = new FakeFilesystem();
   seedProject(filesystem);
   const statePath = "/projects/bunnyhome/.nomina/state.json";
@@ -249,7 +249,7 @@ test("production-style Tailscale provisioning configures tailnet DNS and routes 
   );
   assert.equal(configured.length, 1);
   assert.deepEqual(configured[0], {
-    vmid: 130, deviceId: "node-self", dnsIp: "10.0.0.53", proxyIp: "10.0.0.54",
+    vmid: 130, dnsIp: "10.0.0.53", proxyIp: "10.0.0.54", zone: "bunnyhome.test",
     adminSecretReference: "nominaconnect/tailscale-admin/nc_vpn_test"
   });
 });

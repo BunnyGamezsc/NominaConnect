@@ -821,8 +821,7 @@ async function syncTailscaleTailnet(project, vpnReference, providerAdapter, adap
       providerReferences: { ...project.state.providerReferences, [vpnService.id]: vpnReference }
     }
   };
-  // Protect opt-out routes before advertising the proxy IP. A failed publish
-  // leaves the tailnet route unavailable; recheck can retry the setup.
+  // Install opt-out guards before sending tailnet web traffic to the proxy.
   const republishedReferences = await republishExposures(workingProject, project.config.managedInventory.services, adapters.providerAdapters,
     { verifyTailnetGuards: true });
   if (project.config.managedInventory.platform.reverseProxy.service === "caddy") {
@@ -830,9 +829,9 @@ async function syncTailscaleTailnet(project, vpnReference, providerAdapter, adap
   }
   await providerAdapter.configureTailnet({
     vmid: vpnReference.vmid,
-    deviceId: vpnReference.locator?.id,
     dnsIp,
     proxyIp,
+    zone: project.config.baseLocalDomain,
     adminSecretReference
   });
   return republishedReferences;
@@ -1538,6 +1537,24 @@ async function changeBaseDomain(options, adapters) {
 
   if (proxyService.service === "caddy") {
     persistCaddyLiveConfig(proxmox, proxyRef?.vmid);
+  }
+
+  const vpnService = project.config.managedInventory.platform.vpn;
+  const vpnRef = state.providerReferences[vpnService?.id];
+  if (vpnService?.service === "tailscale" && vpnRef !== undefined &&
+      typeof providerAdapters.tailscale?.configureTailnet === "function") {
+    const adminSecretReference = project.config.connectionSecretReferences.tailscaleAdmin
+      ?? `nominaconnect/tailscale-admin/${vpnService.id}`;
+    await ensureConnectionSecret(adapters, "Tailscale admin API token", adminSecretReference, {
+      secret: process.env.NOMINA_TAILSCALE_API_TOKEN
+    });
+    await providerAdapters.tailscale.configureTailnet({
+      vmid: vpnRef.vmid,
+      dnsIp: dnsRef.ip,
+      proxyIp: proxyRef.ip,
+      zone: newDomain,
+      adminSecretReference
+    });
   }
 
   writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(workingProject.config));

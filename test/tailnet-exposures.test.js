@@ -1,14 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createTailnetController, firewallInstallScript } from "../src/tailscale-tailnet.js";
+import { spawnSync } from "node:child_process";
+import { createTailnetController, dnsInstallScript, DNS_RELAY, firewallInstallScript } from "../src/tailscale-tailnet.js";
 import { buildFragment } from "../src/traefik-adapter.js";
 import { parseProjectConfiguration, serializeProjectConfiguration } from "../src/config.js";
 
-function fakeTailnet({ routeApproval = true, splitDns = {} } = {}) {
+function fakeTailnet({ splitDns = {} } = {}) {
   const calls = [];
   const state = {
-    routes: { advertisedRoutes: ["192.168.1.90/32", "192.168.1.86/32"], enabledRoutes: ["10.0.0.0/24"] },
     nameservers: { dns: ["1.1.1.1"] },
     preferences: { magicDNS: true, overrideLocalDNS: false }
   };
@@ -17,13 +17,6 @@ function fakeTailnet({ routeApproval = true, splitDns = {} } = {}) {
       calls.push({ method: request.method, path: new URL(request.url).pathname, body: request.body && JSON.parse(request.body) });
       assert.equal(request.headers.Authorization, "Bearer secret-token");
       const path = new URL(request.url).pathname;
-      if (path.endsWith("/routes")) {
-        if (request.method === "POST") {
-          if (routeApproval) state.routes.enabledRoutes = JSON.parse(request.body).routes;
-          return { status: 200, body: "" };
-        }
-        return { status: 200, body: JSON.stringify(state.routes) };
-      }
       if (path.endsWith("/dns/split-dns")) {
         return { status: 200, body: JSON.stringify(splitDns) };
       }
@@ -44,6 +37,9 @@ function fakeTailnet({ routeApproval = true, splitDns = {} } = {}) {
     exec: async (vmid, command) => {
       calls.push({ vmid, command });
       assert.equal(vmid, 120);
+      if (command.binary === "/usr/bin/tailscale" && command.args[0] === "ip") {
+        return { stdout: "100.70.80.90\n" };
+      }
     }
   });
   return { controller, calls, state };
@@ -51,32 +47,27 @@ function fakeTailnet({ routeApproval = true, splitDns = {} } = {}) {
 
 const REQUEST = {
   vmid: 120,
-  deviceId: "nodeAAA",
   dnsIp: "192.168.1.90",
   proxyIp: "192.168.1.86",
+  zone: "bunny.internal",
   adminSecretReference: "nominaconnect/tailscale-admin/vpn"
 };
 
-test("tailnet setup allows DNS and web ports before enabling routes, then forces Technitium DNS", async () => {
+test("tailnet setup serves DNS and web at the gateway address without advertising LAN routes", async () => {
   const { controller, calls, state } = fakeTailnet();
   await controller.configure(REQUEST);
   const firewall = calls.find((call) => call.command?.args?.[1]?.includes("nomina-tailnet-firewall"));
   assert.ok(firewall);
   assert.match(firewall.command.args[1], /--dport 53/);
-  assert.match(firewall.command.args[1], /--dport 443/);
+  assert.match(firewall.command.args[1], /--dports 80,443/);
   assert.doesNotMatch(firewall.command.args[1], /--dport 5380|--dport 2019|--dport 8080/);
   assert.ok(calls.indexOf(firewall) < calls.findIndex((call) => call.command?.args?.[0] === "set"));
-  assert.deepEqual(state.routes.enabledRoutes, ["10.0.0.0/24", "192.168.1.90/32", "192.168.1.86/32"]);
-  assert.deepEqual(state.nameservers, { dns: ["192.168.1.90"] });
+  assert.deepEqual(calls.find((call) => call.command?.args?.[0] === "set").command.args,
+    ["set", "--advertise-routes="]);
+  assert.equal(calls.some((call) => call.path?.endsWith("/routes")), false);
+  assert.deepEqual(state.nameservers, { dns: ["100.70.80.90"] });
   assert.deepEqual(state.preferences, { magicDNS: true, overrideLocalDNS: true });
-  assert.ok(calls.findIndex((call) => call.method === "POST" && call.path.endsWith("/routes")) <
-    calls.findIndex((call) => call.method === "POST" && call.path.endsWith("/dns/nameservers")));
-});
-
-test("tailnet setup leaves DNS alone if routes were not approved", async () => {
-  const { controller, calls } = fakeTailnet({ routeApproval: false });
-  await assert.rejects(() => controller.configure(REQUEST), /did not approve/);
-  assert.equal(calls.some((call) => call.method === "POST" && call.path?.includes("/dns/")), false);
+  assert.ok(calls.some((call) => call.command?.args?.[1]?.includes("nomina-tailnet-dns.service")));
 });
 
 test("tailnet setup refuses a split resolver that would bypass Technitium", async () => {
@@ -85,11 +76,41 @@ test("tailnet setup refuses a split resolver that would bypass Technitium", asyn
   assert.equal(calls.some((call) => call.command?.args?.[0] === "set"), false);
 });
 
-test("gateway firewall rejects all tailnet forwarding beyond DNS and proxy web ports", () => {
-  const script = firewallInstallScript("192.168.1.90", "192.168.1.86");
-  assert.match(script, /iptables -A NOMINA_TAILNET -j REJECT/);
-  assert.match(script, /Requires=nomina-tailnet-firewall.service/);
-  assert.throws(() => firewallInstallScript("192.168.1.90; bad", "192.168.1.86"), /IPv4/);
+test("gateway firewall rejects non-DNS input and non-web forwarding", () => {
+  const script = firewallInstallScript("192.168.1.90", "192.168.1.86", "100.70.80.90");
+  const syntax = spawnSync("sh", ["-n"], { input: script, encoding: "utf8" });
+  assert.equal(syntax.status, 0, syntax.stderr);
+  assert.match(script, /NOMINA_TAILNET_INPUT -j REJECT/);
+  assert.match(script, /NOMINA_TAILNET_FORWARD -j REJECT/);
+  assert.match(script, /DNAT --to-destination 192.168.1.86/);
+  assert.match(script, /MASQUERADE/);
+  assert.throws(() => firewallInstallScript("192.168.1.90; bad", "192.168.1.86", "100.70.80.90"), /IPv4/);
+});
+
+test("DNS relay preserves Technitium blocks and rewrites only managed proxy A answers", () => {
+  const probe = `
+import struct
+def packet(name, ip, rcode=0):
+    q = b"".join(bytes([len(x)]) + x.encode() for x in name.split(".")) + b"\\0\\0\\1\\0\\1"
+    header = struct.pack("!HHHHHH", 1, 0x8180 | rcode, 1, 0 if rcode else 1, 0, 0)
+    answer = b"" if rcode else b"\\xc0\\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) + bytes(map(int, ip.split(".")))
+    return struct.pack("!HHHHHH", 1, 0x0100, 1, 0, 0, 0) + q, header + q + answer
+q, a = packet("app.bunny.internal", "192.168.1.86")
+assert rewrite(q, a)[-4:] == bytes([100,70,80,90])
+q, a = packet("app.bunny.internal", "192.168.1.86", 3)
+assert rewrite(q, a) == a
+q, a = packet("other.example", "192.168.1.86")
+assert rewrite(q, a) == a
+q, a = packet("app.bunny.internal", "192.168.1.88")
+assert rewrite(q, a) == a
+`;
+  const source = DNS_RELAY.split("import threading")[0];
+  const result = spawnSync("python3", ["-c", source + probe, "100.70.80.90", "192.168.1.90", "192.168.1.86", "bunny.internal"], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const install = dnsInstallScript({ ...REQUEST, gatewayIp: "100.70.80.90" });
+  const syntax = spawnSync("sh", ["-n"], { input: install, encoding: "utf8" });
+  assert.equal(syntax.status, 0, syntax.stderr);
+  assert.match(install, /nomina-tailnet-dns.service/);
 });
 
 test("Traefik blocks the gateway for opted-out exposures on HTTP and HTTPS", () => {
