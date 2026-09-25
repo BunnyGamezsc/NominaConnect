@@ -832,9 +832,43 @@ async function syncTailscaleTailnet(project, vpnReference, providerAdapter, adap
     dnsIp,
     proxyIp,
     zone: project.config.baseLocalDomain,
-    adminSecretReference
+    adminSecretReference,
+    saveDnsSnapshot: (snapshot, gatewayIp) => saveTailnetDnsSnapshot(project, adapters, snapshot, gatewayIp)
   });
   return republishedReferences;
+}
+
+function saveTailnetDnsSnapshot(project, adapters, snapshot, gatewayIp) {
+  if (project.state.tailnetDnsSnapshot !== undefined) {
+    if (snapshot.nameservers.length !== 1 || snapshot.nameservers[0] !== gatewayIp ||
+        snapshot.overrideLocalDNS !== true) {
+      throw new Error("Tailnet DNS settings changed outside NominaConnect; refusing to overwrite them or the saved recovery snapshot.");
+    }
+    return;
+  }
+  project.state.tailnetDnsSnapshot = snapshot;
+  writeAtomically(adapters.filesystem, project.statePath, `${JSON.stringify(project.state, null, 2)}\n`);
+  adapters.filesystem.chmod(project.statePath, 0o600);
+}
+
+async function restoreTailnetDns(project, providerRef, adapters) {
+  const snapshot = project.state.tailnetDnsSnapshot;
+  const adapter = adapters.providerAdapters?.tailscale;
+  if (typeof adapter?.restoreTailnetDns !== "function") {
+    if (snapshot === undefined) return;
+    throw new Error("Tailscale DNS recovery is unavailable; the gateway was left running.");
+  }
+  const vpnService = project.config.managedInventory.platform.vpn;
+  const adminSecretReference = project.config.connectionSecretReferences.tailscaleAdmin
+    ?? `nominaconnect/tailscale-admin/${vpnService.id}`;
+  await ensureConnectionSecret(adapters, "Tailscale admin API token", adminSecretReference, {
+    secret: process.env.NOMINA_TAILSCALE_API_TOKEN
+  });
+  await adapter.restoreTailnetDns({
+    vmid: providerRef.vmid,
+    adminSecretReference,
+    snapshot
+  });
 }
 
 async function addTailscaleService(options, adapters) {
@@ -994,6 +1028,9 @@ async function removeService(serviceName, rawOptions, adapters) {
       throw new Error(`Service ${resolvedServiceName} is not provisioned in this project.`);
     }
 
+    if (managedItem.service === "tailscale") {
+      await restoreTailnetDns(project, providerRef, adapters);
+    }
     if (proxmox?.stopLxc && providerRef.vmid !== undefined) {
       await proxmox.stopLxc(providerRef.vmid);
     }
@@ -1027,6 +1064,7 @@ async function removeService(serviceName, rawOptions, adapters) {
         }
       }
     };
+    if (managedItem.service === "tailscale") delete updatedState.tailnetDnsSnapshot;
 
     writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
     writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
@@ -1152,6 +1190,9 @@ async function destroyService(serviceName, rawOptions, adapters) {
     };
   }
 
+  if (resolvedServiceName === "tailscale" && project.state.providerReferences?.[managedItemId]) {
+    await restoreTailnetDns(project, { vmid }, adapters);
+  }
   if (proxmox?.stopLxc) {
     await proxmox.stopLxc(vmid);
   }
@@ -1187,6 +1228,7 @@ async function destroyService(serviceName, rawOptions, adapters) {
     providerReferences: updatedProviderRefs,
     retainedServices: updatedRetainedServices
   };
+  if (resolvedServiceName === "tailscale") delete updatedState.tailnetDnsSnapshot;
 
   writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
   writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
@@ -1306,6 +1348,9 @@ async function recheckService(serviceName, rawOptions, adapters) {
   if (managedItem.service === "tailscale" && typeof providerAdapter.configureTailnet === "function") {
     Object.assign(updatedState.providerReferences,
       await syncTailscaleTailnet(project, updatedState.providerReferences[managedItem.id], providerAdapter, adapters));
+    if (project.state.tailnetDnsSnapshot !== undefined) {
+      updatedState.tailnetDnsSnapshot = project.state.tailnetDnsSnapshot;
+    }
   }
   writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
   writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
@@ -1553,7 +1598,8 @@ async function changeBaseDomain(options, adapters) {
       dnsIp: dnsRef.ip,
       proxyIp: proxyRef.ip,
       zone: newDomain,
-      adminSecretReference
+      adminSecretReference,
+      saveDnsSnapshot: (snapshot, gatewayIp) => saveTailnetDnsSnapshot(project, adapters, snapshot, gatewayIp)
     });
   }
 

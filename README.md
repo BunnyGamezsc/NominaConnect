@@ -152,8 +152,11 @@ installation's LAN subnet and does not route application backends.
 NominaConnect makes the gateway the tailnet's sole global nameserver and
 enables DNS override. This replaces existing global nameservers so they cannot
 bypass Technitium filtering. MagicDNS is preserved. Setup refuses split-DNS
-rules pointing at another resolver. Existing clients do not need to accept
-subnet routes.
+rules pointing at another resolver. NominaConnect saves the prior global
+nameserver list and DNS override setting in the private project state, then
+restores them when Tailscale is removed or destroyed. If those settings were
+changed outside NominaConnect afterward, removal stops and asks you to resolve
+the DNS change first. Existing clients do not need to accept subnet routes.
 
 New exposures allow tailnet access by default. The publish and edit prompts
 include **Allow this exposure over Tailscale?**; the CLI equivalent is
@@ -168,7 +171,9 @@ gateway, and opted-out exposures are refused. NominaConnect does not switch
 automatically to direct LAN access based on the client's location. To reach an
 opted-out exposure at home, disconnect Tailscale or configure that device to
 use local DNS while at home. Automatic switching requires a client-side
-network-aware DNS or VPN profile.
+network-aware DNS helper. An optional macOS launchd and Linux systemd user
+addon checks the home router and a managed DNS answer, then switches only that
+client between local and Tailscale DNS. See [the home DNS addon guide](clients/home-dns/README.md).
 [Tailscale's DNS override documentation](https://tailscale.com/docs/reference/dns-in-tailscale)
 explains why connected clients ignore local DNS settings.
 

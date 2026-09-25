@@ -55,7 +55,16 @@ const REQUEST = {
 
 test("tailnet setup serves DNS and web at the gateway address without advertising LAN routes", async () => {
   const { controller, calls, state } = fakeTailnet();
-  await controller.configure(REQUEST);
+  let saved;
+  await controller.configure({
+    ...REQUEST,
+    saveDnsSnapshot(snapshot, gatewayIp) {
+      saved = snapshot;
+      assert.equal(gatewayIp, "100.70.80.90");
+      assert.equal(calls.some((call) => call.method === "POST"), false);
+    }
+  });
+  assert.deepEqual(saved, { nameservers: ["1.1.1.1"], overrideLocalDNS: false });
   const firewall = calls.find((call) => call.command?.args?.[1]?.includes("nomina-tailnet-firewall"));
   assert.ok(firewall);
   assert.match(firewall.command.args[1], /--dport 53/);
@@ -68,6 +77,37 @@ test("tailnet setup serves DNS and web at the gateway address without advertisin
   assert.deepEqual(state.nameservers, { dns: ["100.70.80.90"] });
   assert.deepEqual(state.preferences, { magicDNS: true, overrideLocalDNS: true });
   assert.ok(calls.some((call) => call.command?.args?.[1]?.includes("nomina-tailnet-dns.service")));
+});
+
+test("tailnet DNS refuses a change without a recovery snapshot", async () => {
+  const { controller, calls } = fakeTailnet();
+  await assert.rejects(() => controller.configure(REQUEST), /recovery snapshot/);
+  assert.equal(calls.some((call) => call.method === "POST"), false);
+});
+
+test("tailnet DNS restoration preserves other preferences and refuses later nameserver edits", async () => {
+  const { controller, calls, state } = fakeTailnet();
+  const snapshot = { nameservers: ["1.1.1.1"], overrideLocalDNS: false };
+  await controller.configure({ ...REQUEST, saveDnsSnapshot: () => {} });
+  state.preferences.magicDNS = false;
+  await controller.restore({ vmid: 120, adminSecretReference: REQUEST.adminSecretReference, snapshot });
+  assert.deepEqual(state.nameservers.dns, ["1.1.1.1"]);
+  assert.deepEqual(state.preferences, { magicDNS: false, overrideLocalDNS: false });
+  state.nameservers.dns = ["9.9.9.9"];
+  await assert.rejects(() => controller.restore({
+    vmid: 120, adminSecretReference: REQUEST.adminSecretReference, snapshot
+  }), /changed since/);
+  assert.deepEqual(state.nameservers.dns, ["9.9.9.9"]);
+  assert.ok(calls.some((call) => call.method === "POST" && call.path.endsWith("/dns/nameservers")));
+});
+
+test("tailnet DNS removal refuses to stop a gateway when no previous settings were saved", async () => {
+  const { controller, state } = fakeTailnet();
+  state.nameservers.dns = ["100.70.80.90"];
+  state.preferences.overrideLocalDNS = true;
+  await assert.rejects(() => controller.restore({
+    vmid: 120, adminSecretReference: REQUEST.adminSecretReference
+  }), /no previous DNS settings/);
 });
 
 test("tailnet setup refuses a split resolver that would bypass Technitium", async () => {

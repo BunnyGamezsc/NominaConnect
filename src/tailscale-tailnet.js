@@ -4,7 +4,7 @@ const API_BASE = "https://api.tailscale.com/api/v2";
 
 export function createTailnetController({ httpClient, secretResolver, exec }) {
   return Object.freeze({
-    async configure({ vmid, dnsIp, proxyIp, zone, adminSecretReference }) {
+    async configure({ vmid, dnsIp, proxyIp, zone, adminSecretReference, saveDnsSnapshot = undefined }) {
       if (!Number.isInteger(vmid) || !adminSecretReference || !validZone(zone)) {
         throw new Error("Tailscale tailnet setup needs its managed LXC, local domain, and admin API token.");
       }
@@ -62,6 +62,19 @@ export function createTailnetController({ httpClient, secretResolver, exec }) {
       if (!Array.isArray(nameservers.dns) || typeof preferences !== "object" || preferences === null) {
         throw new Error("Tailscale returned unexpected DNS settings; refusing to replace them.");
       }
+      if (typeof preferences.overrideLocalDNS !== "boolean") {
+        throw new Error("Tailscale returned an unexpected DNS override setting.");
+      }
+      if (nameservers.dns.length !== 1 || nameservers.dns[0] !== gatewayIp ||
+          preferences.overrideLocalDNS !== true) {
+        if (typeof saveDnsSnapshot !== "function") {
+          throw new Error("Tailnet DNS settings cannot change without a saved recovery snapshot.");
+        }
+        await saveDnsSnapshot({
+          nameservers: [...nameservers.dns],
+          overrideLocalDNS: preferences.overrideLocalDNS
+        }, gatewayIp);
+      }
       if (nameservers.dns.length !== 1 || nameservers.dns[0] !== gatewayIp) {
         await api("POST", nameserversPath, { dns: [gatewayIp] });
       }
@@ -75,6 +88,58 @@ export function createTailnetController({ httpClient, secretResolver, exec }) {
         throw new Error("Tailnet DNS did not retain the gateway as its sole global resolver.");
       }
       return { nameserver: gatewayIp };
+    },
+    async restore({ vmid, adminSecretReference, snapshot = undefined }) {
+      if (!Number.isInteger(vmid) || !adminSecretReference) {
+        throw new Error("The managed Tailscale LXC and admin API token are required for DNS restoration.");
+      }
+      if (snapshot !== undefined &&
+          (!Array.isArray(snapshot.nameservers) ||
+           snapshot.nameservers.some((server) => typeof server !== "string" || server.length === 0) ||
+           typeof snapshot.overrideLocalDNS !== "boolean")) {
+        throw new Error("The saved tailnet DNS snapshot is invalid.");
+      }
+      const token = secretResolver?.resolve(adminSecretReference)?.trim();
+      if (!token) throw new Error("A Tailscale admin API token is required to restore tailnet DNS.");
+      const gatewayIp = String((await exec(vmid, {
+        binary: "/usr/bin/tailscale", args: ["ip", "-4"], timeoutMs: 30_000
+      }))?.stdout ?? "").trim();
+      if (isIP(gatewayIp) !== 4) throw new Error("The Tailscale gateway address is unavailable; DNS was not changed.");
+      const api = (method, path, body) => apiRequest(httpClient, token, method, path, body);
+      const nameserversPath = "/tailnet/-/dns/nameservers";
+      const preferencesPath = "/tailnet/-/dns/preferences";
+      const nameservers = await api("GET", nameserversPath);
+      const preferences = await api("GET", preferencesPath);
+      if (!Array.isArray(nameservers.dns) || typeof preferences?.overrideLocalDNS !== "boolean") {
+        throw new Error("Tailscale returned unexpected DNS settings; restoration stopped.");
+      }
+      const managedNameservers = nameservers.dns.length === 1 && nameservers.dns[0] === gatewayIp;
+      if (snapshot === undefined) {
+        if (managedNameservers) {
+          throw new Error("Tailnet DNS still points at this gateway, but no previous DNS settings were saved. Change tailnet DNS manually before removing Tailscale.");
+        }
+        return;
+      }
+      const alreadyRestored = JSON.stringify(nameservers.dns) === JSON.stringify(snapshot.nameservers);
+      if (!managedNameservers && !alreadyRestored) {
+        throw new Error("Tailnet DNS nameservers changed since NominaConnect configured them. Restore them manually before removing Tailscale.");
+      }
+      if (preferences.overrideLocalDNS !== true &&
+          preferences.overrideLocalDNS !== snapshot.overrideLocalDNS) {
+        throw new Error("Tailnet DNS override changed since NominaConnect configured it. Restore it manually before removing Tailscale.");
+      }
+      if (!alreadyRestored) await api("POST", nameserversPath, { dns: snapshot.nameservers });
+      if (preferences.overrideLocalDNS !== snapshot.overrideLocalDNS) {
+        await api("POST", preferencesPath, {
+          ...preferences, overrideLocalDNS: snapshot.overrideLocalDNS
+        });
+      }
+      const verifiedNameservers = await api("GET", nameserversPath);
+      const verifiedPreferences = await api("GET", preferencesPath);
+      if (JSON.stringify(verifiedNameservers.dns) !== JSON.stringify(snapshot.nameservers) ||
+          verifiedPreferences.overrideLocalDNS !== snapshot.overrideLocalDNS) {
+        throw new Error("Tailnet DNS restoration did not retain the previous settings.");
+      }
     }
   });
 }

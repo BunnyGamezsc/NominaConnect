@@ -240,7 +240,11 @@ test("production-style Tailscale provisioning configures gateway DNS after enrol
     ...createTailscaleAdapter({ resources: [
       { id: "node-self", self: true, locator: { id: "node-self" }, tailscaleIps: ["100.64.0.5"] }
     ] }),
-    configureTailnet(request) { configured.push(request); }
+    async configureTailnet(request) {
+      configured.push(request);
+      await request.saveDnsSnapshot({ nameservers: ["9.9.9.9"], overrideLocalDNS: false }, "100.64.0.5");
+    },
+    restoreTailnetDns(request) { configured.push({ restore: request }); }
   };
   await runCli(
     ["service", "add", "tailscale", "--project-dir", "/projects/bunnyhome", "--ip", "10.0.0.60"],
@@ -248,10 +252,27 @@ test("production-style Tailscale provisioning configures gateway DNS after enrol
       secretStore: { has: () => true } }
   );
   assert.equal(configured.length, 1);
-  assert.deepEqual(configured[0], {
+  const { saveDnsSnapshot, ...configuredRequest } = configured[0];
+  assert.equal(typeof saveDnsSnapshot, "function");
+  assert.deepEqual(configuredRequest, {
     vmid: 130, dnsIp: "10.0.0.53", proxyIp: "10.0.0.54", zone: "bunnyhome.test",
     adminSecretReference: "nominaconnect/tailscale-admin/nc_vpn_test"
   });
+  const saved = JSON.parse(filesystem.read(statePath));
+  assert.deepEqual(saved.tailnetDnsSnapshot, { nameservers: ["9.9.9.9"], overrideLocalDNS: false });
+  await runCli(
+    ["service", "remove", "tailscale", "--project-dir", "/projects/bunnyhome"],
+    { filesystem, runtime: proxmoxRootRuntime(), proxmox, providerAdapters: { tailscale },
+      secretStore: { has: () => true } }
+  );
+  assert.deepEqual(configured[1].restore.snapshot, saved.tailnetDnsSnapshot);
+  assert.equal(JSON.parse(filesystem.read(statePath)).tailnetDnsSnapshot, undefined);
+  await runCli(
+    ["service", "destroy", "tailscale", "--yes", "--project-dir", "/projects/bunnyhome"],
+    { filesystem, runtime: proxmoxRootRuntime(), proxmox, providerAdapters: { tailscale },
+      secretStore: { has: () => true } }
+  );
+  assert.equal(configured.length, 2);
 });
 
 test("Tailscale does not create an LXC when DNS or proxy is not provisioned", async () => {

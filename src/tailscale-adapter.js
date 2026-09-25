@@ -44,7 +44,8 @@ export function createTailscaleAdapter({ secretResolver, exec, enableTunDevice, 
 
   return Object.freeze({
     ...(tailnetController === undefined ? {} : {
-      configureTailnet: (request) => tailnetController.configure(request)
+      configureTailnet: (request) => tailnetController.configure(request),
+      restoreTailnetDns: (request) => tailnetController.restore(request)
     }),
     // Prerequisites are checked before any install command is returned, so an
     // LXC that cannot run a VPN fails with remediation instead of leaving a
