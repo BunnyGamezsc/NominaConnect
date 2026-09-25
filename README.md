@@ -171,9 +171,9 @@ gateway, and opted-out exposures are refused. NominaConnect does not switch
 automatically to direct LAN access based on the client's location. To reach an
 opted-out exposure at home, disconnect Tailscale or configure that device to
 use local DNS while at home. Automatic switching requires a client-side
-network-aware DNS helper. An optional macOS launchd and Linux systemd user
-addon checks the home router and a managed DNS answer, then switches only that
-client between local and Tailscale DNS. See [the home DNS addon guide](clients/home-dns/README.md).
+network-aware DNS helper. The optional home DNS addon supports macOS, Linux,
+and Windows. It checks the home router and a managed DNS answer, then changes
+only that client between local and Tailscale DNS. See [the home DNS addon guide](clients/home-dns/README.md).
 [Tailscale's DNS override documentation](https://tailscale.com/docs/reference/dns-in-tailscale)
 explains why connected clients ignore local DNS settings.
 

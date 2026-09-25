@@ -93,15 +93,23 @@ system_answer_matches() {
 
 ask_value() {
   PROMPT="$1"
+  DEFAULT_VALUE="${2:-}"
+  ESCAPED_PROMPT="$(printf '%s' "$PROMPT" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+  ESCAPED_DEFAULT="$(printf '%s' "$DEFAULT_VALUE" | sed 's/\\/\\\\/g; s/"/\\"/g')"
   if [ "$OS" = Darwin ] && command -v osascript >/dev/null 2>&1; then
-    osascript -e "text returned of (display dialog \"$PROMPT\" default answer \"\")" 2>/dev/null
+    ANSWER="$(osascript -e "text returned of (display dialog \"$ESCAPED_PROMPT\" default answer \"$ESCAPED_DEFAULT\")" 2>/dev/null)" || return 1
+    printf '%s\n' "${ANSWER:-$DEFAULT_VALUE}"
   elif command -v zenity >/dev/null 2>&1; then
-    zenity --entry --title="Nomina home DNS" --text="$PROMPT"
+    zenity --entry --title="Nomina home DNS" --text="$PROMPT" --entry-text="$DEFAULT_VALUE"
   else
     [ -t 0 ] || die "Pass the home DNS IP and managed hostname as setup arguments."
-    printf '%s: ' "$PROMPT" >&2
+    if [ -n "$DEFAULT_VALUE" ]; then
+      printf '%s [%s]: ' "$PROMPT" "$DEFAULT_VALUE" >&2
+    else
+      printf '%s: ' "$PROMPT" >&2
+    fi
     IFS= read -r ANSWER
-    printf '%s\n' "$ANSWER"
+    printf '%s\n' "${ANSWER:-$DEFAULT_VALUE}"
   fi
 }
 
@@ -111,8 +119,14 @@ setup() {
   TAILSCALE="$(tailscale_cli)"
   HOME_DNS="${1:-}"
   PROBE_HOST="${2:-}"
-  [ -n "$HOME_DNS" ] || HOME_DNS="$(ask_value "Technitium LAN IPv4 address")"
-  [ -n "$PROBE_HOST" ] || PROBE_HOST="$(ask_value "A managed hostname, such as stats.bunny.internal")"
+  if [ -z "$HOME_DNS" ]; then
+    DEFAULT_HOME_DNS="$(sed -n '1p' "$CONFIG" 2>/dev/null || true)"
+    HOME_DNS="$(ask_value "Technitium LAN IPv4 address" "$DEFAULT_HOME_DNS")"
+  fi
+  if [ -z "$PROBE_HOST" ]; then
+    DEFAULT_PROBE_HOST="$(sed -n '2p' "$CONFIG" 2>/dev/null || true)"
+    PROBE_HOST="$(ask_value "A managed hostname, such as stats.bunny.internal" "$DEFAULT_PROBE_HOST")"
+  fi
   valid_ip "$HOME_DNS" || die "Enter a valid Technitium IPv4 address."
   valid_host "$PROBE_HOST" || die "Enter a valid managed hostname."
   router_identity || die "The home router and its MAC address could not be identified."
@@ -207,22 +221,22 @@ status() {
 
 ui() {
   if [ "$OS" = Darwin ] && command -v osascript >/dev/null 2>&1; then
-    ACTION="$(osascript -e 'choose from list {"Set up home DNS", "Show status", "Remove addon"} with title "NominaConnect" with prompt "Home network DNS helper" default items {"Show status"}' 2>/dev/null)" ||
+    ACTION="$(osascript -e 'choose from list {"Install or edit home DNS", "Show status", "Uninstall"} with title "NominaConnect" with prompt "Home network DNS helper" default items {"Show status"}' 2>/dev/null)" ||
       return 0
     case "$ACTION" in
-      "Set up home DNS") setup "" "" ;;
+      "Install or edit home DNS") setup "" "" ;;
       "Show status") status ;;
-      "Remove addon") uninstall ;;
+      "Uninstall") uninstall ;;
       *) return 0 ;;
     esac
     osascript -e 'display notification "Action finished. See Terminal for details." with title "NominaConnect"' 2>/dev/null || true
   elif command -v zenity >/dev/null 2>&1; then
-    ACTION="$(zenity --list --title="NominaConnect" --text="Home network DNS helper" --column="Action" "Set up home DNS" "Show status" "Remove addon")" ||
+    ACTION="$(zenity --list --title="NominaConnect" --text="Home network DNS helper" --column="Action" "Install or edit home DNS" "Show status" "Uninstall")" ||
       return 0
     case "$ACTION" in
-      "Set up home DNS") setup "" "" ;;
+      "Install or edit home DNS") setup "" "" ;;
       "Show status") status ;;
-      "Remove addon") uninstall ;;
+      "Uninstall") uninstall ;;
       *) return 0 ;;
     esac
   else
