@@ -26,13 +26,13 @@ cd "$repo"
 bun run build:native
 [ -f "$binary" ] || { printf 'Build output missing: %s\n' "$binary" >&2; exit 1; }
 local_hash=$(shasum -a 256 "$binary" | awk '{print $1}')
-scp "${identity[@]}" -P "$port" -o ConnectTimeout=10 "$binary" "$target:$temporary"
-ssh "${identity[@]}" -p "$port" -o ConnectTimeout=10 "$target" \
+scp ${identity+"${identity[@]}"} -P "$port" -o ConnectTimeout=10 "$binary" "$target:$temporary"
+ssh ${identity+"${identity[@]}"} -p "$port" -o ConnectTimeout=10 "$target" \
   "mkdir -p /opt/nominaconnect-test && install -m 755 $temporary $remote && rm -f $temporary"
-remote_hash=$(ssh "${identity[@]}" -p "$port" -o ConnectTimeout=10 "$target" "sha256sum $remote" | awk '{print $1}')
+remote_hash=$(ssh ${identity+"${identity[@]}"} -p "$port" -o ConnectTimeout=10 "$target" "sha256sum $remote" | awk '{print $1}')
 if [ "$local_hash" != "$remote_hash" ]; then
   printf 'Binary hashes differ (Mac %s, Proxmox %s). Do not run field tests.\n' "$local_hash" "$remote_hash" >&2
   exit 1
 fi
-ssh "${identity[@]}" -p "$port" -o ConnectTimeout=10 "$target" "$remote --version"
+ssh ${identity+"${identity[@]}"} -p "$port" -o ConnectTimeout=10 "$target" "$remote --version"
 printf 'Verified %s on Proxmox (SHA-256 %s). Use this path for field tests.\n' "$remote" "$local_hash"
