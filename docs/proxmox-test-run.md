@@ -1,5 +1,11 @@
 # Testing NominaConnect on a Proxmox host
 
+This is the historical September 2026 walkthrough. The acceptance suite has
+since run on real Proxmox; see [the run report](proxmox-test-run-report.md).
+The addresses and Mac gateway below do not match the current Windows-hosted
+lab. Use [the Windows VirtualBox lab guide](../tools/lab/README.md) and the
+[Kimi K3 field test handoff](kimi-k3-proxmox-field-tests.md) for that setup.
+
 A worked first-run against a disposable Proxmox host, using a Proxmox VM at
 `192.168.1.3` bridged onto the same ethernet LAN as the workstation.
 

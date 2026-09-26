@@ -205,6 +205,8 @@ You do not pass a project path.
 - [Manual reference path](docs/manual/dns-proxy-tls.md) — validation workflow for DNS + proxy + TLS.
 - [Live Proxmox acceptance](docs/live-proxmox-acceptance.md) — running the disposable-host acceptance suite.
 - [Proxmox test run](docs/proxmox-test-run.md) — worked first-run walkthrough against a disposable host.
+- [Proxmox lab network setup](tools/lab/README.md) — Windows VirtualBox setup and repeatable Mac NAT setup/uninstall.
+- [Kimi K3 field test handoff](docs/kimi-k3-proxmox-field-tests.md) — checks for the Windows-hosted Proxmox VM.
 - [Domain language](CONTEXT.md) — ubiquitous terms used across the project.
 - [ADRs](docs/adr/) — recorded implementation decisions.
 - [Changelog](CHANGELOG.md) — version history and changes.
