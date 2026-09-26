@@ -223,24 +223,35 @@ ui() {
   if [ "$OS" = Darwin ] && command -v osascript >/dev/null 2>&1; then
     ACTION="$(osascript -e 'choose from list {"Install or edit home DNS", "Show status", "Uninstall"} with title "NominaConnect" with prompt "Home network DNS helper" default items {"Show status"}' 2>/dev/null)" ||
       return 0
-    case "$ACTION" in
-      "Install or edit home DNS") setup "" "" ;;
-      "Show status") status ;;
-      "Uninstall") uninstall ;;
-      *) return 0 ;;
-    esac
-    osascript -e 'display notification "Action finished. See Terminal for details." with title "NominaConnect"' 2>/dev/null || true
   elif command -v zenity >/dev/null 2>&1; then
     ACTION="$(zenity --list --title="NominaConnect" --text="Home network DNS helper" --column="Action" "Install or edit home DNS" "Show status" "Uninstall")" ||
       return 0
-    case "$ACTION" in
-      "Install or edit home DNS") setup "" "" ;;
-      "Show status") status ;;
-      "Uninstall") uninstall ;;
-      *) return 0 ;;
-    esac
   else
     die "Install zenity for the Linux menu, or run setup, status, or uninstall in a terminal."
+  fi
+
+  case "$ACTION" in
+    "Install or edit home DNS") COMMAND=setup ;;
+    "Show status") COMMAND=status ;;
+    "Uninstall") COMMAND=uninstall ;;
+    *) return 0 ;;
+  esac
+  if OUTPUT="$(sh "$0" "$COMMAND" 2>&1)"; then
+    RESULT=info
+  else
+    RESULT=error
+    [ -n "$OUTPUT" ] || OUTPUT="Action cancelled or failed."
+  fi
+  if [ "$OS" = Darwin ]; then
+    osascript - "$OUTPUT" <<'APPLESCRIPT' >/dev/null 2>&1 || true
+on run argv
+  display dialog (item 1 of argv) with title "NominaConnect" buttons {"OK"} default button "OK"
+end run
+APPLESCRIPT
+  elif [ "$RESULT" = error ]; then
+    zenity --error --title="NominaConnect" --text="$OUTPUT" >/dev/null 2>&1 || true
+  else
+    zenity --info --title="NominaConnect" --text="$OUTPUT" >/dev/null 2>&1 || true
   fi
 }
 

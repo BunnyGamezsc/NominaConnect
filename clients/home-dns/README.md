@@ -49,8 +49,9 @@ chmod 700 nomina-home-dns.sh
 ```
 
 The native menu can install or edit settings, show status, or uninstall the
-helper. macOS uses a per-user launchd agent and AppleScript dialogs. Linux uses
-a systemd user timer and needs `zenity` for the graphical menu. Without zenity,
+helper. Results and errors appear in dialogs. macOS uses a per-user launchd
+agent and AppleScript dialogs. Linux uses a systemd user timer and needs
+`zenity` for the graphical menu. Without zenity,
 run `setup`, `status`, or `uninstall` in a terminal. On Linux, allow your user
 to run `tailscale set` once:
 
