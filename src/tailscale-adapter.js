@@ -31,7 +31,7 @@ const CLIENT = Object.freeze({
 
 export { VpnPrerequisiteError as TailscalePrerequisiteError };
 
-export function createTailscaleAdapter({ secretResolver, exec, enableTunDevice, sleep = defaultSleep }) {
+export function createTailscaleAdapter({ secretResolver, exec, enableTunDevice, tailnetController = undefined, sleep = defaultSleep }) {
   const requireExec = (request) => {
     if (typeof exec !== "function") {
       throw new Error("Tailscale requires Proxmox-shell execution, which is unavailable.");
@@ -43,6 +43,10 @@ export function createTailscaleAdapter({ secretResolver, exec, enableTunDevice, 
   };
 
   return Object.freeze({
+    ...(tailnetController === undefined ? {} : {
+      configureTailnet: (request) => tailnetController.configure(request),
+      restoreTailnetDns: (request) => tailnetController.restore(request)
+    }),
     // Prerequisites are checked before any install command is returned, so an
     // LXC that cannot run a VPN fails with remediation instead of leaving a
     // half-installed client behind. The auth key is resolved here too — only to

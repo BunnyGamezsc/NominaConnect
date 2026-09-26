@@ -226,6 +226,68 @@ test("nomina service add tailscale provisions an unprivileged Debian LXC with de
   assert.deepEqual(result.inspection.unmanaged.length, 1);
 });
 
+test("production-style Tailscale provisioning configures gateway DNS after enrollment", async () => {
+  const filesystem = new FakeFilesystem();
+  seedProject(filesystem);
+  const statePath = "/projects/bunnyhome/.nomina/state.json";
+  const state = JSON.parse(filesystem.read(statePath));
+  state.providerReferences.nc_dns_test = { vmid: 120, ip: "10.0.0.53" };
+  state.providerReferences.nc_proxy_test = { vmid: 121, ip: "10.0.0.54" };
+  filesystem.writeFile(statePath, JSON.stringify(state));
+  const proxmox = createProxmoxAdapter();
+  const configured = [];
+  const tailscale = {
+    ...createTailscaleAdapter({ resources: [
+      { id: "node-self", self: true, locator: { id: "node-self" }, tailscaleIps: ["100.64.0.5"] }
+    ] }),
+    async configureTailnet(request) {
+      configured.push(request);
+      await request.saveDnsSnapshot({ nameservers: ["9.9.9.9"], overrideLocalDNS: false }, "100.64.0.5");
+    },
+    restoreTailnetDns(request) { configured.push({ restore: request }); }
+  };
+  await runCli(
+    ["service", "add", "tailscale", "--project-dir", "/projects/bunnyhome", "--ip", "10.0.0.60"],
+    { filesystem, runtime: proxmoxRootRuntime(), proxmox, providerAdapters: { tailscale },
+      secretStore: { has: () => true } }
+  );
+  assert.equal(configured.length, 1);
+  const { saveDnsSnapshot, ...configuredRequest } = configured[0];
+  assert.equal(typeof saveDnsSnapshot, "function");
+  assert.deepEqual(configuredRequest, {
+    vmid: 130, dnsIp: "10.0.0.53", proxyIp: "10.0.0.54", zone: "bunnyhome.test",
+    adminSecretReference: "nominaconnect/tailscale-admin/nc_vpn_test"
+  });
+  const saved = JSON.parse(filesystem.read(statePath));
+  assert.deepEqual(saved.tailnetDnsSnapshot, { nameservers: ["9.9.9.9"], overrideLocalDNS: false });
+  await runCli(
+    ["service", "remove", "tailscale", "--project-dir", "/projects/bunnyhome"],
+    { filesystem, runtime: proxmoxRootRuntime(), proxmox, providerAdapters: { tailscale },
+      secretStore: { has: () => true } }
+  );
+  assert.deepEqual(configured[1].restore.snapshot, saved.tailnetDnsSnapshot);
+  assert.equal(JSON.parse(filesystem.read(statePath)).tailnetDnsSnapshot, undefined);
+  await runCli(
+    ["service", "destroy", "tailscale", "--yes", "--project-dir", "/projects/bunnyhome"],
+    { filesystem, runtime: proxmoxRootRuntime(), proxmox, providerAdapters: { tailscale },
+      secretStore: { has: () => true } }
+  );
+  assert.equal(configured.length, 2);
+});
+
+test("Tailscale does not create an LXC when DNS or proxy is not provisioned", async () => {
+  const filesystem = new FakeFilesystem();
+  seedProject(filesystem);
+  const proxmox = createProxmoxAdapter();
+  const tailscale = { ...createTailscaleAdapter(), configureTailnet() {} };
+  await assert.rejects(
+    () => runCli(["service", "add", "tailscale", "--project-dir", "/projects/bunnyhome", "--ip", "10.0.0.60"],
+      { filesystem, runtime: proxmoxRootRuntime(), proxmox, providerAdapters: { tailscale } }),
+    /Provision Technitium and Caddy or Traefik/
+  );
+  assert.equal(proxmox.created.length, 0);
+});
+
 test("nomina service add netbird provisions an unprivileged Debian LXC with defaults", async () => {
   const filesystem = new FakeFilesystem();
   seedNetbirdProject(filesystem);

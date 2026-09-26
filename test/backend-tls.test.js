@@ -76,7 +76,7 @@ test("routes dial TLS backends through Caddy's http transport with skip-verify w
   const fake = new FakeCaddyAdmin();
   await createAdapter(fake).publishRoute({
     hostname: "pve.bunny.internal",
-    backendIp: "192.168.4.85",
+    backendIp: "192.0.2.85",
     backendPort: 8006,
     caStrategy: "step-ca",
     tls: { mode: "step-ca", trusted: true },

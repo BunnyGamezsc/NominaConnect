@@ -22,6 +22,10 @@ export async function publishManagedExposure({
   const dnsService = project.config.managedInventory.platform.dns;
   const proxyService = project.config.managedInventory.platform.reverseProxy;
   const caService = project.config.managedInventory.platform.certificateAuthority;
+  const vpnService = project.config.managedInventory.platform.vpn;
+  const tailnetGatewayIp = vpnService?.service === "tailscale"
+    ? project.state.providerReferences[vpnService.id]?.ip
+    : undefined;
 
   if (dnsService?.service !== "technitium") {
     throw new Error("Technitium is not selected as the DNS provider for this project.");
@@ -53,6 +57,16 @@ export async function publishManagedExposure({
   }
 
   const { name, hostname, backendIp, backendPort } = options;
+  const existingService = project.config.managedInventory.services.find(
+    (service) => service.exposure?.hostname === hostname
+  );
+  const tailnet = vpnService?.service === "tailscale"
+    ? (options.tailnet ?? existingService?.exposure?.tailnet ?? true)
+    : false;
+  if (tailnet === false && vpnService?.service === "tailscale" &&
+      project.state.providerReferences[vpnService.id] !== undefined && tailnetGatewayIp === undefined) {
+    throw new Error("The Tailscale gateway IP is missing; refusing to publish an unprotected exposure.");
+  }
   const redirectTo = options.redirectTo !== undefined && options.redirectTo !== ""
     ? normalizeRedirectTarget(options.redirectTo)
     : undefined;
@@ -95,6 +109,8 @@ export async function publishManagedExposure({
     backendIp,
     backendPort,
     backendTls: options.backendTls === true,
+    tailnet: tailnetGatewayIp === undefined ? true : tailnet,
+    tailnetGatewayIp,
     redirectTo,
     redirectCode,
     protocol: "https",
@@ -177,6 +193,8 @@ export async function publishManagedExposure({
       hostname,
       backendIp,
       backendPort,
+      tailnet,
+      tailnetGatewayIp,
       zone: project.config.baseLocalDomain,
       ip: dnsRef?.ip,
       endpoint: dnsRef?.ip ? `http://${dnsRef.ip}:5380` : undefined,
@@ -190,6 +208,8 @@ export async function publishManagedExposure({
       hostname,
       backendIp,
       backendPort,
+      tailnet: routeRequest.tailnet,
+      tailnetGatewayIp,
       redirectTo,
       redirectCode,
       caStrategy,
@@ -213,9 +233,6 @@ export async function publishManagedExposure({
     && observedTls !== "missing"
     && observedTls !== "unknown";
 
-  const existingService = project.config.managedInventory.services.find(
-    (service) => service.exposure?.hostname === hostname
-  );
   const serviceId = existingService?.id ?? `nc_${randomUUID()}`;
   const managedService = {
     id: serviceId,
@@ -232,6 +249,7 @@ export async function publishManagedExposure({
           }
         }),
       protocol: "https",
+      tailnet,
       certificateAuthority: caStrategy,
       tls: {
         mode: tlsOptions.mode,

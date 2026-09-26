@@ -329,6 +329,9 @@ function appendManagedServices(lines, services) {
       lines.push(
         `        protocol: ${yamlScalar(service.exposure.protocol)}`
       );
+      if (service.exposure.tailnet !== undefined) {
+        lines.push(`        tailnet: ${service.exposure.tailnet === true}`);
+      }
       if (service.exposure.certificateAuthority !== undefined) {
         lines.push(`        certificateAuthority: ${yamlScalar(service.exposure.certificateAuthority)}`);
       }
