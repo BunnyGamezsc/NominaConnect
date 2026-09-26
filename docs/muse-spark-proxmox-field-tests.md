@@ -15,10 +15,12 @@ private project state in the thread or report.
   Mac batch-mode root SSH to `192.168.1.3` works. The VM is `pve`, Proxmox VE
   9.2.2, with `vmbr0` at `192.168.1.3/24` and default route via the Mac at
   `192.168.1.1`. The web UI listens on port 8006.
-- At the last read-only check, LXCs 100-103 existed but were **stopped**:
-  Technitium, Caddy, step-ca, and Tailscale. The old full-stack project under
-  `/root/nomina-fullstack` still had its config and private state. Recheck
-  both before deleting; this baseline can change.
+- Cleanup has already been completed on this test VM: the old NominaConnect
+  project was uninstalled, LXCs 100-103 were destroyed, the old
+  `/usr/local/bin/nomina` binary was removed, and a read-only follow-up found
+  `pct list` empty with the old project config and secrets directory absent.
+  Recheck this baseline before provisioning; do not repeat cleanup if it is
+  still empty.
 - A Windows VirtualBox Host-Only adapter named `Ethernet 4` was observed at
   `192.168.1.1`, conflicting with the Mac gateway. Its current state is
   unconfirmed. Resolve that duplicate on Windows if it remains. The Windows
@@ -29,22 +31,16 @@ private project state in the thread or report.
   verified. The old [run report](proxmox-test-run-report.md) explains the
   historical workarounds and 7/7 Caddy and Traefik acceptance runs.
 
-## 1. Inventory, uninstall, and clear the disposable VM
+## 1. Verify the cleared disposable VM
 
 Confirm the SSH host is `pve` at `192.168.1.3`. Record `pct list`, every LXC
 config, relevant project paths, and the project-owned VMIDs without exposing
-secrets. This VM is disposable for this task: the operator explicitly
-authorized removing **all** of its LXCs and the old NominaConnect install.
-Do not run these operations against any other Proxmox host.
-
-Run the old project's `nomina uninstall --yes` from its project directory so
-its state, provider resources, and managed LXCs are removed through the normal
-path. Check the result against the inventory. Stop and `pct destroy` any
-remaining LXCs on this **test VM only**, including old orphans; report each
-VMID removed. Remove the old installed `nomina` binary from this VM after
-confirming its path. Preserve Proxmox itself, its network configuration,
-storage, templates, and the test source checkout. Verify `pct list` is empty
-before provisioning again.
+secrets. The authorized cleanup has already run: NominaConnect's uninstall
+destroyed LXCs 100-103 and removed its old project state, then the old binary
+was removed. Verify `pct list` is still empty. If the VM has changed since
+that check, investigate before deleting anything else. Preserve Proxmox
+itself, its network configuration, storage, templates, and test source
+checkout. Do not run destructive operations against any other host.
 
 ## 2. Use the existing Ethernet bridge
 
