@@ -74,6 +74,11 @@ const unmanagedRouteHost = `operator.${domain}`;
 // changes it. NominaConnect authenticates with whatever is in the secret
 // store; it never sets the password itself.
 const dnsPassword = process.env.NOMINA_ACCEPTANCE_DNS_PASSWORD ?? "admin";
+// Restricted labs (this one included) may block direct root-server DNS while
+// allowing public recursors. When set, the suite points the fresh Technitium
+// at these forwarders through its own API before any downstream LXC needs
+// managed DNS. Unset by default: no behavior change on open networks.
+const dnsForwarders = (process.env.NOMINA_ACCEPTANCE_FORWARDERS ?? "").trim();
 
 const filesystem = {
   exists: fs.existsSync,
@@ -99,6 +104,15 @@ const prompts = {
       return dnsPassword;
     }
     if (/tailscale|netbird/i.test(question)) {
+      // The tailnet admin API token (tailnet DNS/nameserver administration)
+      // is a different credential from the enrollment auth key. An operator
+      // mints both in the admin console; the suite keeps them in separate
+      // variables so a test can never confuse one for the other.
+      if (/admin/i.test(question)) {
+        const token = process.env.NOMINA_ACCEPTANCE_TAILSCALE_API_TOKEN;
+        assert.ok(token, "a VPN acceptance run needs NOMINA_ACCEPTANCE_TAILSCALE_API_TOKEN for the admin question");
+        return token;
+      }
       const key = process.env.NOMINA_ACCEPTANCE_VPN_KEY;
       assert.ok(key, "a VPN acceptance run needs NOMINA_ACCEPTANCE_VPN_KEY");
       return key;
@@ -175,6 +189,25 @@ test("live Proxmox acceptance", { skip, timeout: 45 * 60 * 1000 }, async (t) => 
       () => cli(["service", "add", proxy, "--ip", process.env.NOMINA_ACCEPTANCE_DNS_IP, ...templateFlags()]),
       /already in use/i,
       "a known collision blocks provisioning instead of creating a second LXC"
+    );
+  });
+
+  await t.test("points Technitium at lab forwarders when configured", async () => {
+    if (dnsForwarders === "") {
+      return;
+    }
+    // Provider-native, like the unmanaged seeds below: an operator on a
+    // root-blocking network would configure forwarders, so the suite adopts
+    // the same explicit lab setting instead of failing downstream installs.
+    const token = await technitiumSession(referenceFor("dns").ip);
+    await technitiumCall(referenceFor("dns").ip, "/api/settings/set", {
+      forwarders: dnsForwarders
+    }, token);
+    const settings = await technitiumCall(referenceFor("dns").ip, "/api/settings/get", {}, token);
+    const active = settings.response?.forwarders ?? [];
+    assert.ok(
+      active.some((entry) => dnsForwarders.split(",").map((part) => part.trim()).includes(String(entry))),
+      `forwarders did not take effect (want ${dnsForwarders}, have ${JSON.stringify(active)})`
     );
   });
 
