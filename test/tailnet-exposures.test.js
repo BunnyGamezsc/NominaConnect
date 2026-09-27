@@ -6,11 +6,13 @@ import { createTailnetController, dnsInstallScript, DNS_RELAY, firewallInstallSc
 import { buildFragment } from "../src/traefik-adapter.js";
 import { parseProjectConfiguration, serializeProjectConfiguration } from "../src/config.js";
 
-function fakeTailnet({ splitDns = {} } = {}) {
+function fakeTailnet({ splitDns = {}, preferences = undefined, dropOverride = false } = {}) {
   const calls = [];
   const state = {
     nameservers: { dns: ["1.1.1.1"] },
-    preferences: { magicDNS: true, overrideLocalDNS: false }
+    // An explicit preferences object replaces the default wholesale so tests
+    // can omit overrideLocalDNS exactly like older tailnets do.
+    preferences: preferences ?? { magicDNS: true, overrideLocalDNS: false }
   };
   const httpClient = {
     async request(request) {
@@ -25,7 +27,14 @@ function fakeTailnet({ splitDns = {} } = {}) {
         return { status: 200, body: JSON.stringify(state.nameservers) };
       }
       if (path.endsWith("/dns/preferences")) {
-        if (request.method === "POST") state.preferences = JSON.parse(request.body);
+        if (request.method === "POST") {
+          const body = JSON.parse(request.body);
+          // Some tailnets accept the write and silently drop the field, which is
+          // what makes the override impossible to verify from the API.
+          state.preferences = dropOverride
+            ? Object.fromEntries(Object.entries(body).filter(([key]) => key !== "overrideLocalDNS"))
+            : body;
+        }
         return { status: 200, body: JSON.stringify(state.preferences) };
       }
       throw new Error(`Unexpected API path ${path}`);
@@ -108,6 +117,81 @@ test("tailnet DNS removal refuses to stop a gateway when no previous settings we
   await assert.rejects(() => controller.restore({
     vmid: 120, adminSecretReference: REQUEST.adminSecretReference
   }), /no previous DNS settings/);
+});
+
+test("tailnet setup treats a missing DNS override as off and still rejects garbage", async () => {
+  const { controller, state } = fakeTailnet({ preferences: { magicDNS: true } });
+  let saved;
+  await controller.configure({
+    ...REQUEST,
+    saveDnsSnapshot(snapshot) {
+      saved = snapshot;
+    }
+  });
+  assert.deepEqual(saved, { nameservers: ["1.1.1.1"], overrideLocalDNS: false });
+  assert.deepEqual(state.preferences, { magicDNS: true, overrideLocalDNS: true });
+
+  const bad = fakeTailnet({ preferences: { magicDNS: true, overrideLocalDNS: "yes" } });
+  await assert.rejects(() => bad.controller.configure({
+    ...REQUEST,
+    saveDnsSnapshot: () => {}
+  }), /unexpected DNS override/);
+});
+
+test("tailnet setup warns instead of failing when the tailnet cannot hold the override", async () => {
+  const { controller, state } = fakeTailnet({ preferences: { magicDNS: true }, dropOverride: true });
+  const snapshots = [];
+  const result = await controller.configure({
+    ...REQUEST,
+    saveDnsSnapshot(snapshot, gatewayIp, options) {
+      snapshots.push({ snapshot, gatewayIp, options });
+    }
+  });
+
+  assert.equal(result.nameserver, "100.70.80.90");
+  assert.equal(result.overrideLocalDNS, false, "the flag stays off when the tailnet drops it");
+  assert.equal(result.warnings.length, 1);
+  assert.match(result.warnings[0], /does not report its DNS override setting/);
+  assert.match(result.warnings[0], /Override local DNS/);
+  // The gateway is still the sole global resolver, so it is still restorable.
+  assert.deepEqual(state.nameservers, { dns: ["100.70.80.90"] });
+  assert.deepEqual(snapshots, [{
+    snapshot: { nameservers: ["1.1.1.1"], overrideLocalDNS: false },
+    gatewayIp: "100.70.80.90",
+    options: { overrideUnsupported: true }
+  }]);
+});
+
+test("tailnet setup still fails when a tailnet that reports the override refuses it", async () => {
+  const { controller, state } = fakeTailnet({ dropOverride: true });
+  await assert.rejects(() => controller.configure({
+    ...REQUEST,
+    saveDnsSnapshot: () => {}
+  }), /did not retain the override/);
+  // Failing here is safe: the snapshot was already saved and the nameserver
+  // write is the one the recovery path knows how to undo.
+  assert.deepEqual(state.nameservers, { dns: ["100.70.80.90"] });
+});
+
+test("tailnet setup reports no warning on a tailnet that holds the override", async () => {
+  const { controller } = fakeTailnet();
+  const options = [];
+  const result = await controller.configure({
+    ...REQUEST,
+    saveDnsSnapshot: (snapshot, gatewayIp, opts) => { options.push(opts); }
+  });
+
+  assert.equal(result.overrideLocalDNS, true);
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(options, [{ overrideUnsupported: false }]);
+});
+
+test("tailnet DNS restoration tolerates a missing override on a settled tailnet", async () => {
+  const { controller, state } = fakeTailnet({ preferences: { magicDNS: true } });
+  const snapshot = { nameservers: ["1.1.1.1"], overrideLocalDNS: false };
+  await controller.restore({ vmid: 120, adminSecretReference: REQUEST.adminSecretReference, snapshot });
+  assert.deepEqual(state.nameservers.dns, ["1.1.1.1"]);
+  assert.deepEqual(state.preferences, { magicDNS: true });
 });
 
 test("tailnet setup refuses a split resolver that would bypass Technitium", async () => {

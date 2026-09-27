@@ -62,32 +62,52 @@ export function createTailnetController({ httpClient, secretResolver, exec }) {
       if (!Array.isArray(nameservers.dns) || typeof preferences !== "object" || preferences === null) {
         throw new Error("Tailscale returned unexpected DNS settings; refusing to replace them.");
       }
-      if (typeof preferences.overrideLocalDNS !== "boolean") {
+      // Older tailnets omit overrideLocalDNS entirely; the documented default
+      // is off. An explicit non-boolean is still rejected.
+      const overrideLocalDNS = preferences.overrideLocalDNS ?? false;
+      if (typeof overrideLocalDNS !== "boolean") {
         throw new Error("Tailscale returned an unexpected DNS override setting.");
       }
+      // A tailnet whose preferences never carry the key cannot hold it: its API
+      // accepts the write and drops the field. That is observably different from
+      // a tailnet that answers false, which is a setting we failed to set.
+      const overrideUnsupported = !Object.hasOwn(preferences, "overrideLocalDNS");
       if (nameservers.dns.length !== 1 || nameservers.dns[0] !== gatewayIp ||
-          preferences.overrideLocalDNS !== true) {
+          overrideLocalDNS !== true) {
         if (typeof saveDnsSnapshot !== "function") {
           throw new Error("Tailnet DNS settings cannot change without a saved recovery snapshot.");
         }
         await saveDnsSnapshot({
           nameservers: [...nameservers.dns],
-          overrideLocalDNS: preferences.overrideLocalDNS
-        }, gatewayIp);
+          overrideLocalDNS
+        }, gatewayIp, { overrideUnsupported });
       }
       if (nameservers.dns.length !== 1 || nameservers.dns[0] !== gatewayIp) {
         await api("POST", nameserversPath, { dns: [gatewayIp] });
       }
-      if (preferences.overrideLocalDNS !== true) {
+      if (overrideLocalDNS !== true) {
         await api("POST", preferencesPath, { ...preferences, overrideLocalDNS: true });
       }
       const verifiedNameservers = await api("GET", nameserversPath);
       const verifiedPreferences = await api("GET", preferencesPath);
-      if (verifiedNameservers.dns?.length !== 1 || verifiedNameservers.dns[0] !== gatewayIp ||
-          verifiedPreferences.overrideLocalDNS !== true) {
+      if (verifiedNameservers.dns?.length !== 1 || verifiedNameservers.dns[0] !== gatewayIp) {
         throw new Error("Tailnet DNS did not retain the gateway as its sole global resolver.");
       }
-      return { nameserver: gatewayIp };
+      const warnings = [];
+      if (verifiedPreferences?.overrideLocalDNS !== true) {
+        if (!overrideUnsupported || Object.hasOwn(verifiedPreferences ?? {}, "overrideLocalDNS")) {
+          throw new Error("Tailnet DNS did not retain the override needed to serve every domain.");
+        }
+        // The nameserver we manage and can restore is in place; only the
+        // precedence flag is out of reach, and it fails closed (a client that
+        // never asks the gateway gets no answer, never a wrong one).
+        warnings.push("This tailnet does not report its DNS override setting, so NominaConnect could not verify that tailnet DNS replaces each client's local DNS. Global nameservers point at this gateway. Enable 'Override local DNS' in the Tailscale admin console if tailnet clients fail to resolve exposed hostnames.");
+      }
+      return {
+        nameserver: gatewayIp,
+        overrideLocalDNS: verifiedPreferences?.overrideLocalDNS === true,
+        warnings
+      };
     },
     async restore({ vmid, adminSecretReference, snapshot = undefined }) {
       if (!Number.isInteger(vmid) || !adminSecretReference) {
@@ -110,7 +130,12 @@ export function createTailnetController({ httpClient, secretResolver, exec }) {
       const preferencesPath = "/tailnet/-/dns/preferences";
       const nameservers = await api("GET", nameserversPath);
       const preferences = await api("GET", preferencesPath);
-      if (!Array.isArray(nameservers.dns) || typeof preferences?.overrideLocalDNS !== "boolean") {
+      if (!Array.isArray(nameservers.dns) || typeof preferences !== "object" || preferences === null) {
+        throw new Error("Tailscale returned unexpected DNS settings; restoration stopped.");
+      }
+      // Same defaulting as configure: absent means off, explicit garbage stops.
+      const overrideLocalDNS = preferences?.overrideLocalDNS ?? false;
+      if (typeof overrideLocalDNS !== "boolean") {
         throw new Error("Tailscale returned unexpected DNS settings; restoration stopped.");
       }
       const managedNameservers = nameservers.dns.length === 1 && nameservers.dns[0] === gatewayIp;
@@ -124,12 +149,12 @@ export function createTailnetController({ httpClient, secretResolver, exec }) {
       if (!managedNameservers && !alreadyRestored) {
         throw new Error("Tailnet DNS nameservers changed since NominaConnect configured them. Restore them manually before removing Tailscale.");
       }
-      if (preferences.overrideLocalDNS !== true &&
-          preferences.overrideLocalDNS !== snapshot.overrideLocalDNS) {
+      if (overrideLocalDNS !== true &&
+          overrideLocalDNS !== snapshot.overrideLocalDNS) {
         throw new Error("Tailnet DNS override changed since NominaConnect configured it. Restore it manually before removing Tailscale.");
       }
       if (!alreadyRestored) await api("POST", nameserversPath, { dns: snapshot.nameservers });
-      if (preferences.overrideLocalDNS !== snapshot.overrideLocalDNS) {
+      if (overrideLocalDNS !== snapshot.overrideLocalDNS) {
         await api("POST", preferencesPath, {
           ...preferences, overrideLocalDNS: snapshot.overrideLocalDNS
         });
@@ -137,7 +162,7 @@ export function createTailnetController({ httpClient, secretResolver, exec }) {
       const verifiedNameservers = await api("GET", nameserversPath);
       const verifiedPreferences = await api("GET", preferencesPath);
       if (JSON.stringify(verifiedNameservers.dns) !== JSON.stringify(snapshot.nameservers) ||
-          verifiedPreferences.overrideLocalDNS !== snapshot.overrideLocalDNS) {
+          (verifiedPreferences.overrideLocalDNS ?? false) !== snapshot.overrideLocalDNS) {
         throw new Error("Tailnet DNS restoration did not retain the previous settings.");
       }
     }

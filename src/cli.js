@@ -733,12 +733,25 @@ async function addVpnService(serviceName, serviceLabel, promptOptions, options, 
     retryOptions: adapters.retryOptions
   });
 
+  // Record the enrolled LXC before any tailnet work: a setup that fails halfway
+  // must leave the LXC known to the project, or neither 'service remove' (which
+  // restores tailnet DNS) nor nuclear uninstall can find it to take it back.
+  project.state = {
+    ...project.state,
+    providerReferences: { ...project.state.providerReferences, [vpnService.id]: result.providerReference }
+  };
+  writeAtomically(filesystem, project.statePath, `${JSON.stringify(project.state, null, 2)}\n`);
+  filesystem.chmod(project.statePath, 0o600);
+
   let republishedReferences = {};
+  const tailnetWarnings = [];
   if (serviceName === "tailscale" && typeof providerAdapter.configureTailnet === "function") {
     try {
-      republishedReferences = await syncTailscaleTailnet(project, result.providerReference, providerAdapter, adapters);
+      const tailnetSync = await syncTailscaleTailnet(project, result.providerReference, providerAdapter, adapters);
+      republishedReferences = tailnetSync.references;
+      tailnetWarnings.push(...tailnetSync.warnings);
     } catch (error) {
-      throw new Error(`Tailscale LXC ${result.created.vmid} enrolled, but tailnet setup failed: ${error.message} Run 'nomina service recheck tailscale --ip ${resolvedOptions.ip}' to retry without creating another LXC.`);
+      throw new Error(`Tailscale LXC ${result.created.vmid} enrolled, but tailnet setup failed: ${error.message} Run 'nomina service destroy tailscale --yes' to restore tailnet DNS and remove the LXC, then add it again.`);
     }
   }
 
@@ -771,7 +784,7 @@ async function addVpnService(serviceName, serviceLabel, promptOptions, options, 
     ip: resolvedOptions.ip,
     hostname: result.lxcSpec.hostname,
     providerReference: result.providerReference,
-    warnings: result.warnings,
+    warnings: [...result.warnings, ...tailnetWarnings],
     health: result.health,
     inspectedCount: result.inspection.unmanaged.length,
     inspectedLabel: "unmanaged VPN resource(s) preserved"
@@ -827,21 +840,32 @@ async function syncTailscaleTailnet(project, vpnReference, providerAdapter, adap
   if (project.config.managedInventory.platform.reverseProxy.service === "caddy") {
     await persistCaddyLiveConfig(adapters.proxmox, project.state.providerReferences[project.config.managedInventory.platform.reverseProxy.id]?.vmid);
   }
-  await providerAdapter.configureTailnet({
+  const tailnetResult = await providerAdapter.configureTailnet({
     vmid: vpnReference.vmid,
     dnsIp,
     proxyIp,
     zone: project.config.baseLocalDomain,
     adminSecretReference,
-    saveDnsSnapshot: (snapshot, gatewayIp) => saveTailnetDnsSnapshot(project, adapters, snapshot, gatewayIp)
+    saveDnsSnapshot: (snapshot, gatewayIp, options) => saveTailnetDnsSnapshot(project, adapters, snapshot, gatewayIp, options)
   });
-  return republishedReferences;
+  return {
+    references: republishedReferences,
+    warnings: tailnetResult?.warnings ?? []
+  };
 }
 
-function saveTailnetDnsSnapshot(project, adapters, snapshot, gatewayIp) {
-  if (project.state.tailnetDnsSnapshot !== undefined) {
+function saveTailnetDnsSnapshot(project, adapters, snapshot, gatewayIp, { overrideUnsupported = false } = {}) {
+  const saved = project.state.tailnetDnsSnapshot;
+  if (saved !== undefined) {
+    // Re-running setup is only safe when the live tailnet still looks like the
+    // state NominaConnect put it in: this gateway is the sole global resolver
+    // and the override is on — or the tailnet cannot hold the override at all
+    // and the saved snapshot shows it was already off before setup began.
+    const overrideAsExpected = overrideUnsupported
+      ? saved.overrideLocalDNS === false
+      : snapshot.overrideLocalDNS === true;
     if (snapshot.nameservers.length !== 1 || snapshot.nameservers[0] !== gatewayIp ||
-        snapshot.overrideLocalDNS !== true) {
+        !overrideAsExpected) {
       throw new Error("Tailnet DNS settings changed outside NominaConnect; refusing to overwrite them or the saved recovery snapshot.");
     }
     return;
@@ -1345,9 +1369,11 @@ async function recheckService(serviceName, rawOptions, adapters) {
       }
     }
   };
+  const tailnetWarnings = [];
   if (managedItem.service === "tailscale" && typeof providerAdapter.configureTailnet === "function") {
-    Object.assign(updatedState.providerReferences,
-      await syncTailscaleTailnet(project, updatedState.providerReferences[managedItem.id], providerAdapter, adapters));
+    const tailnetSync = await syncTailscaleTailnet(project, updatedState.providerReferences[managedItem.id], providerAdapter, adapters);
+    Object.assign(updatedState.providerReferences, tailnetSync.references);
+    tailnetWarnings.push(...tailnetSync.warnings);
     if (project.state.tailnetDnsSnapshot !== undefined) {
       updatedState.tailnetDnsSnapshot = project.state.tailnetDnsSnapshot;
     }
@@ -1356,8 +1382,10 @@ async function recheckService(serviceName, rawOptions, adapters) {
   writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
   filesystem.chmod(project.statePath, 0o600);
   const healthLabel = health.status === "healthy" ? "healthy" : "unhealthy";
+  const warningText = tailnetWarnings.length > 0 ? `Warning: ${tailnetWarnings.join("\nWarning: ")}\n` : "";
   return {
-    stdout: `Rechecked ${resolvedServiceName}: LXC ${vmid} at ${ip} (${deployment.hostname}) is ${healthLabel} and adopted. Inspected ${inspection?.managed?.length ?? 0} managed resource(s).\n`,
+    stdout: `${warningText}Rechecked ${resolvedServiceName}: LXC ${vmid} at ${ip} (${deployment.hostname}) is ${healthLabel} and adopted. Inspected ${inspection?.managed?.length ?? 0} managed resource(s).\n`,
+    warnings: tailnetWarnings,
     health,
     inspection,
     vmid,
@@ -1700,8 +1728,9 @@ async function uninstallEverything(options, adapters) {
   // Only LXC vmids recorded in NominaConnect's own state are ever touched:
   // provider references (active) and retained services (previously removed).
   const targets = new Map();
+  let project = null;
   if (filesystem.exists(configPath)) {
-    const project = loadProject(filesystem, options.projectDir);
+    project = loadProject(filesystem, options.projectDir);
     for (const [id, reference] of Object.entries(project.state.providerReferences ?? {})) {
       if (reference?.vmid !== undefined && !targets.has(reference.vmid)) {
         targets.set(reference.vmid, id);
@@ -1731,6 +1760,29 @@ async function uninstallEverything(options, adapters) {
 
   const destroyed = [];
   const failed = [];
+
+  // Tailnet DNS is admin-console state, not LXC state, so this is the last
+  // moment it can be put back: the recovery snapshot lives in the state file
+  // deleted below, and the adapter verifies against a gateway address it reads
+  // from the LXC destroyed here.
+  let dnsLine = "";
+  if (project !== null && project.state.tailnetDnsSnapshot !== undefined) {
+    const snapshot = project.state.tailnetDnsSnapshot;
+    const manual = `Set tailnet DNS by hand: nameservers ${snapshot.nameservers.join(", ") || "none"}, override local DNS ${snapshot.overrideLocalDNS}.`;
+    const vpnId = project.config.managedInventory?.platform?.vpn?.id;
+    const vpnReference = project.state.providerReferences?.[vpnId];
+    if (vpnReference?.vmid === undefined) {
+      failed.push(`tailnet DNS: the gateway LXC is no longer recorded, so tailnet DNS was not restored. ${manual}`);
+    } else {
+      try {
+        await restoreTailnetDns(project, vpnReference, adapters);
+        dnsLine = `Restored tailnet DNS: nameservers ${snapshot.nameservers.join(", ") || "none"}, override local DNS ${snapshot.overrideLocalDNS}.`;
+      } catch (error) {
+        failed.push(`tailnet DNS: ${error.message} ${manual}`);
+      }
+    }
+  }
+
   if (proxmox?.stopLxc !== undefined && proxmox?.destroyLxc !== undefined) {
     for (const vmid of targetList) {
       try {
@@ -1760,6 +1812,7 @@ async function uninstallEverything(options, adapters) {
   }
 
   const lines = [];
+  if (dnsLine !== "") lines.push(dnsLine);
   lines.push(targetList.length > 0 ? `Destroyed ${destroyed.length} LXC(s): ${destroyed.join(", ")}.` : "No managed LXCs were recorded; nothing to destroy.");
   lines.push(`Removed: ${removedPaths.join(", ") || "nothing"}.`);
   if (failed.length > 0) {
