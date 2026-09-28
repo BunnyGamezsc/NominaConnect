@@ -55,6 +55,8 @@ export NOMINA_ACCEPTANCE_VPN=tailscale        # or netbird
 export NOMINA_ACCEPTANCE_VPN_IP=10.0.0.57
 export NOMINA_ACCEPTANCE_VPN_KEY=tskey-auth-…
 export NOMINA_ACCEPTANCE_FORWARDERS=1.1.1.1,8.8.8.8
+# Bootstrap resolver only if the gateway does not provide DNS.
+export NOMINA_ACCEPTANCE_TECHNITIUM_NAMESERVER=1.1.1.1
 ```
 
 `NOMINA_ACCEPTANCE_FORWARDERS` is only for labs whose network blocks direct
@@ -62,6 +64,11 @@ root-server DNS while allowing public recursors. When set, the suite points
 the fresh Technitium at those forwarders through its own API before any
 downstream LXC needs managed DNS. Unset by default: no behavior change on
 open networks.
+
+`NOMINA_ACCEPTANCE_TECHNITIUM_NAMESERVER` optionally sets the resolver inside
+the first Technitium LXC while its own DNS service is being installed. The
+default is the LXC's gateway address. Set this when that gateway does not
+answer DNS; later service LXCs use the managed Technitium address by default.
 
 ## Tailscale credentials (two different keys)
 

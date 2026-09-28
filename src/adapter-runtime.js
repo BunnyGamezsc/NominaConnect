@@ -330,7 +330,11 @@ function createProxmoxAdapter(commandRunner) {
           ...(spec.nameserver !== undefined ? ["--nameserver", spec.nameserver] : []),
           "--unprivileged", spec.unprivileged ? "1" : "0",
           "--start", "1"
-        ]
+        ],
+        // Template extraction plus first boot on slow (e.g. nested-virtualized)
+        // storage routinely exceeds the 30s default; killing pct create
+        // mid-extraction leaves a half-written rootfs ("received interrupt").
+        timeoutMs: 600_000
       });
       return { vmid: Number(vmid), hostname: spec.hostname };
     },
@@ -550,6 +554,7 @@ function parsePctConfig(stdout) {
     unprivileged: values.unprivileged === "1",
     ip: net0.match(/ip=([^/,]+)/)?.[1],
     bridge: net0.match(/bridge=([^,]+)/)?.[1],
+    nameserver: values.nameserver,
     storage: values.rootfs?.split(":")[0]
   };
 }

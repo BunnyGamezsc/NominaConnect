@@ -38,7 +38,7 @@ test("command runner uses argument arrays and redacts secret-derived diagnostics
   );
 });
 
-test("createLxc configures the container gateway and nameserver for outbound DNS", async () => {
+test("createLxc configures the container gateway, nameserver, and a provisioning timeout", async () => {
   const commands = [];
   const { proxmox } = createProductionAdapters({
     commandRunner: {
@@ -79,6 +79,25 @@ test("createLxc configures the container gateway and nameserver for outbound DNS
   assert.match(create.args.find((arg) => arg.startsWith("name=eth0")), /gw=10\.0\.0\.1/);
   const nameserverIndex = create.args.indexOf("--nameserver");
   assert.equal(create.args[nameserverIndex + 1], "10.0.0.1");
+  assert.equal(create.timeoutMs, 600_000, "pct create may need time to extract a template on slow storage");
+});
+
+test("inspectLxc reports the configured bootstrap nameserver", async () => {
+  const { proxmox } = createProductionAdapters({
+    commandRunner: {
+      async run(command) {
+        assert.deepEqual(command.args, ["config", "150"]);
+        return {
+          exitCode: 0,
+          stdout: "hostname: technitium\nunprivileged: 1\nnet0: name=eth0,bridge=vmbr0,ip=192.168.1.53/24,gw=192.168.1.1\nnameserver: 1.1.1.1\nrootfs: local-lvm:vm-150-disk-0,size=8G\n",
+          stderr: ""
+        };
+      }
+    }
+  });
+
+  const observed = await proxmox.inspectLxc(150);
+  assert.equal(observed.nameserver, "1.1.1.1");
 });
 
 test("root-local secret resolution accepts configured references without exposing them", () => {
