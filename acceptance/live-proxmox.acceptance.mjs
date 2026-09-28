@@ -30,7 +30,7 @@ import process from "node:process";
 
 import { runCli } from "../src/cli.js";
 import { loadProject } from "../src/config.js";
-import { createHttpClient, createProductionAdapters } from "../src/adapter-runtime.js";
+import { createCommandRunner, createHttpClient, createProductionAdapters } from "../src/adapter-runtime.js";
 
 const REQUIRED = [
   "NOMINA_ACCEPTANCE_STORAGE",
@@ -74,6 +74,15 @@ const unmanagedRouteHost = `operator.${domain}`;
 // changes it. NominaConnect authenticates with whatever is in the secret
 // store; it never sets the password itself.
 const dnsPassword = process.env.NOMINA_ACCEPTANCE_DNS_PASSWORD ?? "admin";
+// A fresh Technitium LXC cannot resolve through itself before its DNS service
+// is installed. Some lab gateways also do not provide DNS, so allow the suite
+// to set an explicit bootstrap resolver for that first container only.
+const technitiumNameserver = (process.env.NOMINA_ACCEPTANCE_TECHNITIUM_NAMESERVER ?? "").trim();
+// Restricted labs (this one included) may block direct root-server DNS while
+// allowing public recursors. When set, the suite points the fresh Technitium
+// at these forwarders through its own API before any downstream LXC needs
+// managed DNS. Unset by default: no behavior change on open networks.
+const dnsForwarders = (process.env.NOMINA_ACCEPTANCE_FORWARDERS ?? "").trim();
 
 const filesystem = {
   exists: fs.existsSync,
@@ -99,6 +108,15 @@ const prompts = {
       return dnsPassword;
     }
     if (/tailscale|netbird/i.test(question)) {
+      // The tailnet admin API token (tailnet DNS/nameserver administration)
+      // is a different credential from the enrollment auth key. An operator
+      // mints both in the admin console; the suite keeps them in separate
+      // variables so a test can never confuse one for the other.
+      if (/admin/i.test(question)) {
+        const token = process.env.NOMINA_ACCEPTANCE_TAILSCALE_API_TOKEN;
+        assert.ok(token, "a VPN acceptance run needs NOMINA_ACCEPTANCE_TAILSCALE_API_TOKEN for the admin question");
+        return token;
+      }
       const key = process.env.NOMINA_ACCEPTANCE_VPN_KEY;
       assert.ok(key, "a VPN acceptance run needs NOMINA_ACCEPTANCE_VPN_KEY");
       return key;
@@ -112,19 +130,48 @@ const prompts = {
 test("live Proxmox acceptance", { skip, timeout: 45 * 60 * 1000 }, async (t) => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomina-acceptance-"));
   const production = createProductionAdapters();
+  const commandRunner = createCommandRunner();
   const adapters = { filesystem, cwd: projectDir, runtime, ...production, prompts };
   const cli = (argumentsList) => runCli([...argumentsList, "--project-dir", projectDir], adapters);
 
   const project = () => loadProject(filesystem, projectDir);
   const platformId = (key) => project().config.managedInventory.platform[key]?.id;
   const referenceFor = (key) => project().state.providerReferences[platformId(key)];
-  const createdVmids = () => Object.values(project().state.providerReferences ?? {})
-    .map((reference) => reference?.vmid)
-    .filter((vmid) => vmid !== undefined);
+  const createdVmids = () => {
+    if (!filesystem.exists(path.join(projectDir, "nomina.yaml"))) return [];
+    return Object.values(project().state.providerReferences ?? {})
+      .map((reference) => reference?.vmid)
+      .filter((vmid) => vmid !== undefined);
+  };
+  const initialInventory = await commandRunner.run({ binary: "/usr/sbin/pct", args: ["list"] });
+  const initialVmids = new Set(initialInventory.stdout.split("\n").slice(1)
+    .map((line) => line.trim().split(/\s+/)[0])
+    .filter((vmid) => /^\d+$/.test(vmid)));
+  const testServicesByIp = new Map([
+    [process.env.NOMINA_ACCEPTANCE_DNS_IP, "technitium"],
+    [process.env.NOMINA_ACCEPTANCE_PROXY_IP, proxy],
+    ...(ca === "step-ca" ? [[process.env.NOMINA_ACCEPTANCE_CA_IP, "step-ca"]] : []),
+    ...(vpn !== "none" ? [[process.env.NOMINA_ACCEPTANCE_VPN_IP, vpn]] : [])
+  ].filter(([ip]) => typeof ip === "string" && ip !== ""));
+  const initiallyAvailableTestIps = new Set();
 
-  // Teardown destroys only what this run recorded in its own state file.
+  // A provider setup can fail after pct create but before its VMID is saved to
+  // project state. Clean up a new test LXC by reserved IP and expected hostname
+  // as well, but never a VMID that existed before this suite started.
   t.after(async () => {
-    for (const vmid of createdVmids()) {
+    const vmids = new Set(createdVmids());
+    for (const [ip, expectedHostname] of testServicesByIp) {
+      if (!initiallyAvailableTestIps.has(ip)) continue;
+      try {
+        const availability = await production.proxmox.checkIpAvailability(ip);
+        if (availability.status !== "known-collision") continue;
+        const vmid = String(availability.conflictWith ?? "").match(/(?:lxc\/)?(\d+)/)?.[1];
+        if (vmid === undefined || initialVmids.has(vmid)) continue;
+        const observed = await production.proxmox.inspectLxc(Number(vmid));
+        if (observed.ip === ip && observed.hostname === expectedHostname) vmids.add(Number(vmid));
+      } catch {}
+    }
+    for (const vmid of vmids) {
       try {
         await production.proxmox.stopLxc(vmid);
       } catch {}
@@ -134,6 +181,11 @@ test("live Proxmox acceptance", { skip, timeout: 45 * 60 * 1000 }, async (t) => 
     }
     fs.rmSync(projectDir, { recursive: true, force: true });
   });
+
+  for (const ip of testServicesByIp.keys()) {
+    const availability = await production.proxmox.checkIpAvailability(ip);
+    if (availability.status === "available") initiallyAvailableTestIps.add(ip);
+  }
 
   await t.test("initialises a project against this node", async () => {
     await cli([
@@ -156,7 +208,8 @@ test("live Proxmox acceptance", { skip, timeout: 45 * 60 * 1000 }, async (t) => 
   let dnsVmid;
 
   await t.test("creates a real unprivileged Debian LXC for Technitium", async () => {
-    await cli(["service", "add", "technitium", "--ip", process.env.NOMINA_ACCEPTANCE_DNS_IP, ...templateFlags()]);
+    const dnsFlags = technitiumNameserver === "" ? [] : ["--nameserver", technitiumNameserver];
+    await cli(["service", "add", "technitium", "--ip", process.env.NOMINA_ACCEPTANCE_DNS_IP, ...templateFlags(), ...dnsFlags]);
 
     dnsVmid = referenceFor("dns").vmid;
     assert.ok(Number.isFinite(dnsVmid), "the created LXC id was recorded in local state");
@@ -165,6 +218,9 @@ test("live Proxmox acceptance", { skip, timeout: 45 * 60 * 1000 }, async (t) => 
     assert.equal(observed.ip, process.env.NOMINA_ACCEPTANCE_DNS_IP, "the LXC has the requested static IP");
     assert.equal(observed.unprivileged, true, "service LXCs stay unprivileged (ADR-0030)");
     assert.equal(observed.bridge, process.env.NOMINA_ACCEPTANCE_BRIDGE);
+    if (technitiumNameserver !== "") {
+      assert.equal(observed.nameserver, technitiumNameserver, "the explicitly requested bootstrap resolver is installed");
+    }
   });
 
   await t.test("blocks a requested IP that is already in use", async () => {
@@ -175,6 +231,25 @@ test("live Proxmox acceptance", { skip, timeout: 45 * 60 * 1000 }, async (t) => 
       () => cli(["service", "add", proxy, "--ip", process.env.NOMINA_ACCEPTANCE_DNS_IP, ...templateFlags()]),
       /already in use/i,
       "a known collision blocks provisioning instead of creating a second LXC"
+    );
+  });
+
+  await t.test("points Technitium at lab forwarders when configured", async () => {
+    if (dnsForwarders === "") {
+      return;
+    }
+    // Provider-native, like the unmanaged seeds below: an operator on a
+    // root-blocking network would configure forwarders, so the suite adopts
+    // the same explicit lab setting instead of failing downstream installs.
+    const token = await technitiumSession(referenceFor("dns").ip);
+    await technitiumCall(referenceFor("dns").ip, "/api/settings/set", {
+      forwarders: dnsForwarders
+    }, token);
+    const settings = await technitiumCall(referenceFor("dns").ip, "/api/settings/get", {}, token);
+    const active = settings.response?.forwarders ?? [];
+    assert.ok(
+      active.some((entry) => dnsForwarders.split(",").map((part) => part.trim()).includes(String(entry))),
+      `forwarders did not take effect (want ${dnsForwarders}, have ${JSON.stringify(active)})`
     );
   });
 

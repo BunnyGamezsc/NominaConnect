@@ -260,24 +260,32 @@ async function changeConnectionSecret(options, adapters) {
   let reference;
   let label;
   if (serviceId !== undefined) {
-    const platformEntries = Object.entries(project.config.managedInventory.platform);
-    const matchedPlatform = platformEntries.find(
-      ([key, item]) => item?.service === serviceId || item?.id === serviceId || key === serviceId
-    );
-    if (matchedPlatform) {
-      serviceId = matchedPlatform[1].id;
-      label = matchedPlatform[1].service;
-      reference = project.config.connectionSecretReferences[serviceId];
+    if (serviceId === "tailscale-admin") {
+      const vpn = project.config.managedInventory.platform.vpn;
+      if (vpn?.service !== "tailscale") throw new Error("Tailscale is not selected for this project.");
+      label = "Tailscale admin API token";
+      reference = project.config.connectionSecretReferences.tailscaleAdmin
+        ?? `nominaconnect/tailscale-admin/${vpn.id}`;
     } else {
-      const svc = (project.config.managedInventory.services ?? []).find(
-        (s) => s.name === serviceId || s.id === serviceId || s.exposure?.hostname === serviceId
+      const platformEntries = Object.entries(project.config.managedInventory.platform);
+      const matchedPlatform = platformEntries.find(
+        ([key, item]) => item?.service === serviceId || item?.id === serviceId || key === serviceId
       );
-      if (svc) {
-        serviceId = svc.id;
-        label = svc.name;
+      if (matchedPlatform) {
+        serviceId = matchedPlatform[1].id;
+        label = matchedPlatform[1].service;
         reference = project.config.connectionSecretReferences[serviceId];
       } else {
-        throw new Error(`Service ${serviceId} not found in managed inventory.`);
+        const svc = (project.config.managedInventory.services ?? []).find(
+          (s) => s.name === serviceId || s.id === serviceId || s.exposure?.hostname === serviceId
+        );
+        if (svc) {
+          serviceId = svc.id;
+          label = svc.name;
+          reference = project.config.connectionSecretReferences[serviceId];
+        } else {
+          throw new Error(`Service ${serviceId} not found in managed inventory.`);
+        }
       }
     }
   } else {
@@ -293,6 +301,10 @@ async function changeConnectionSecret(options, adapters) {
       label = svc?.name ?? serviceId;
     }
     reference = project.config.connectionSecretReferences[serviceId];
+    if (serviceId === "tailscaleAdmin") {
+      label = "Tailscale admin API token";
+      reference ??= `nominaconnect/tailscale-admin/${project.config.managedInventory.platform.vpn.id}`;
+    }
   }
   if (!reference) {
     throw new Error(`No connection secret reference for ${label ?? serviceId}.`);
@@ -698,6 +710,16 @@ async function addVpnService(serviceName, serviceLabel, promptOptions, options, 
     throw new Error("Proxmox adapter is unavailable.");
   }
 
+  if (serviceName === "tailscale" && typeof providerAdapter.configureTailnet === "function") {
+    requireTailnetEndpoints(project);
+    await ensureConnectionSecret(
+      adapters,
+      "Tailscale admin API token",
+      project.config.connectionSecretReferences.tailscaleAdmin ?? `nominaconnect/tailscale-admin/${vpnService.id}`,
+      { secret: process.env.NOMINA_TAILSCALE_API_TOKEN }
+    );
+  }
+
   await ensureConnectionSecret(adapters, secretLabel, project.config.connectionSecretReferences[vpnService.id], options);
 
   const result = await provisionPlatformService({
@@ -710,6 +732,28 @@ async function addVpnService(serviceName, serviceLabel, promptOptions, options, 
     providerAdapter,
     retryOptions: adapters.retryOptions
   });
+
+  // Record the enrolled LXC before any tailnet work: a setup that fails halfway
+  // must leave the LXC known to the project, or neither 'service remove' (which
+  // restores tailnet DNS) nor nuclear uninstall can find it to take it back.
+  project.state = {
+    ...project.state,
+    providerReferences: { ...project.state.providerReferences, [vpnService.id]: result.providerReference }
+  };
+  writeAtomically(filesystem, project.statePath, `${JSON.stringify(project.state, null, 2)}\n`);
+  filesystem.chmod(project.statePath, 0o600);
+
+  let republishedReferences = {};
+  const tailnetWarnings = [];
+  if (serviceName === "tailscale" && typeof providerAdapter.configureTailnet === "function") {
+    try {
+      const tailnetSync = await syncTailscaleTailnet(project, result.providerReference, providerAdapter, adapters);
+      republishedReferences = tailnetSync.references;
+      tailnetWarnings.push(...tailnetSync.warnings);
+    } catch (error) {
+      throw new Error(`Tailscale LXC ${result.created.vmid} enrolled, but tailnet setup failed: ${error.message} Run 'nomina service destroy tailscale --yes' to restore tailnet DNS and remove the LXC, then add it again.`);
+    }
+  }
 
   const deployment = {
     ip: resolvedOptions.ip,
@@ -726,6 +770,7 @@ async function addVpnService(serviceName, serviceLabel, promptOptions, options, 
     ...project.state,
     providerReferences: {
       ...project.state.providerReferences,
+      ...republishedReferences,
       [vpnService.id]: result.providerReference
     }
   };
@@ -739,7 +784,7 @@ async function addVpnService(serviceName, serviceLabel, promptOptions, options, 
     ip: resolvedOptions.ip,
     hostname: result.lxcSpec.hostname,
     providerReference: result.providerReference,
-    warnings: result.warnings,
+    warnings: [...result.warnings, ...tailnetWarnings],
     health: result.health,
     inspectedCount: result.inspection.unmanaged.length,
     inspectedLabel: "unmanaged VPN resource(s) preserved"
@@ -761,6 +806,93 @@ async function addVpnService(serviceName, serviceLabel, promptOptions, options, 
     lxcSpec: result.lxcSpec,
     providerReference: result.providerReference
   };
+}
+
+function requireTailnetEndpoints(project) {
+  const dns = project.config.managedInventory.platform.dns;
+  const proxy = project.config.managedInventory.platform.reverseProxy;
+  const dnsIp = project.state.providerReferences[dns?.id]?.ip;
+  const proxyIp = project.state.providerReferences[proxy?.id]?.ip;
+  if (dns?.service !== "technitium" || !["caddy", "traefik"].includes(proxy?.service) || !dnsIp || !proxyIp) {
+    throw new Error("Provision Technitium and Caddy or Traefik before enabling tailnet DNS and app access.");
+  }
+  return { dnsIp, proxyIp };
+}
+
+async function syncTailscaleTailnet(project, vpnReference, providerAdapter, adapters) {
+  const { dnsIp, proxyIp } = requireTailnetEndpoints(project);
+  const vpnService = project.config.managedInventory.platform.vpn;
+  const adminSecretReference = project.config.connectionSecretReferences.tailscaleAdmin
+    ?? `nominaconnect/tailscale-admin/${vpnService.id}`;
+  await ensureConnectionSecret(adapters, "Tailscale admin API token", adminSecretReference, {
+    secret: process.env.NOMINA_TAILSCALE_API_TOKEN
+  });
+  const workingProject = {
+    ...project,
+    state: {
+      ...project.state,
+      providerReferences: { ...project.state.providerReferences, [vpnService.id]: vpnReference }
+    }
+  };
+  // Install opt-out guards before sending tailnet web traffic to the proxy.
+  const republishedReferences = await republishExposures(workingProject, project.config.managedInventory.services, adapters.providerAdapters,
+    { verifyTailnetGuards: true });
+  if (project.config.managedInventory.platform.reverseProxy.service === "caddy") {
+    await persistCaddyLiveConfig(adapters.proxmox, project.state.providerReferences[project.config.managedInventory.platform.reverseProxy.id]?.vmid);
+  }
+  const tailnetResult = await providerAdapter.configureTailnet({
+    vmid: vpnReference.vmid,
+    dnsIp,
+    proxyIp,
+    zone: project.config.baseLocalDomain,
+    adminSecretReference,
+    saveDnsSnapshot: (snapshot, gatewayIp, options) => saveTailnetDnsSnapshot(project, adapters, snapshot, gatewayIp, options)
+  });
+  return {
+    references: republishedReferences,
+    warnings: tailnetResult?.warnings ?? []
+  };
+}
+
+function saveTailnetDnsSnapshot(project, adapters, snapshot, gatewayIp, { overrideUnsupported = false } = {}) {
+  const saved = project.state.tailnetDnsSnapshot;
+  if (saved !== undefined) {
+    // Re-running setup is only safe when the live tailnet still looks like the
+    // state NominaConnect put it in: this gateway is the sole global resolver
+    // and the override is on — or the tailnet cannot hold the override at all
+    // and the saved snapshot shows it was already off before setup began.
+    const overrideAsExpected = overrideUnsupported
+      ? saved.overrideLocalDNS === false
+      : snapshot.overrideLocalDNS === true;
+    if (snapshot.nameservers.length !== 1 || snapshot.nameservers[0] !== gatewayIp ||
+        !overrideAsExpected) {
+      throw new Error("Tailnet DNS settings changed outside NominaConnect; refusing to overwrite them or the saved recovery snapshot.");
+    }
+    return;
+  }
+  project.state.tailnetDnsSnapshot = snapshot;
+  writeAtomically(adapters.filesystem, project.statePath, `${JSON.stringify(project.state, null, 2)}\n`);
+  adapters.filesystem.chmod(project.statePath, 0o600);
+}
+
+async function restoreTailnetDns(project, providerRef, adapters) {
+  const snapshot = project.state.tailnetDnsSnapshot;
+  const adapter = adapters.providerAdapters?.tailscale;
+  if (typeof adapter?.restoreTailnetDns !== "function") {
+    if (snapshot === undefined) return;
+    throw new Error("Tailscale DNS recovery is unavailable; the gateway was left running.");
+  }
+  const vpnService = project.config.managedInventory.platform.vpn;
+  const adminSecretReference = project.config.connectionSecretReferences.tailscaleAdmin
+    ?? `nominaconnect/tailscale-admin/${vpnService.id}`;
+  await ensureConnectionSecret(adapters, "Tailscale admin API token", adminSecretReference, {
+    secret: process.env.NOMINA_TAILSCALE_API_TOKEN
+  });
+  await adapter.restoreTailnetDns({
+    vmid: providerRef.vmid,
+    adminSecretReference,
+    snapshot
+  });
 }
 
 async function addTailscaleService(options, adapters) {
@@ -920,6 +1052,9 @@ async function removeService(serviceName, rawOptions, adapters) {
       throw new Error(`Service ${resolvedServiceName} is not provisioned in this project.`);
     }
 
+    if (managedItem.service === "tailscale") {
+      await restoreTailnetDns(project, providerRef, adapters);
+    }
     if (proxmox?.stopLxc && providerRef.vmid !== undefined) {
       await proxmox.stopLxc(providerRef.vmid);
     }
@@ -953,6 +1088,7 @@ async function removeService(serviceName, rawOptions, adapters) {
         }
       }
     };
+    if (managedItem.service === "tailscale") delete updatedState.tailnetDnsSnapshot;
 
     writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
     writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
@@ -1078,6 +1214,9 @@ async function destroyService(serviceName, rawOptions, adapters) {
     };
   }
 
+  if (resolvedServiceName === "tailscale" && project.state.providerReferences?.[managedItemId]) {
+    await restoreTailnetDns(project, { vmid }, adapters);
+  }
   if (proxmox?.stopLxc) {
     await proxmox.stopLxc(vmid);
   }
@@ -1113,6 +1252,7 @@ async function destroyService(serviceName, rawOptions, adapters) {
     providerReferences: updatedProviderRefs,
     retainedServices: updatedRetainedServices
   };
+  if (resolvedServiceName === "tailscale") delete updatedState.tailnetDnsSnapshot;
 
   writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
   writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
@@ -1229,12 +1369,23 @@ async function recheckService(serviceName, rawOptions, adapters) {
       }
     }
   };
+  const tailnetWarnings = [];
+  if (managedItem.service === "tailscale" && typeof providerAdapter.configureTailnet === "function") {
+    const tailnetSync = await syncTailscaleTailnet(project, updatedState.providerReferences[managedItem.id], providerAdapter, adapters);
+    Object.assign(updatedState.providerReferences, tailnetSync.references);
+    tailnetWarnings.push(...tailnetSync.warnings);
+    if (project.state.tailnetDnsSnapshot !== undefined) {
+      updatedState.tailnetDnsSnapshot = project.state.tailnetDnsSnapshot;
+    }
+  }
   writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
   writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
   filesystem.chmod(project.statePath, 0o600);
   const healthLabel = health.status === "healthy" ? "healthy" : "unhealthy";
+  const warningText = tailnetWarnings.length > 0 ? `Warning: ${tailnetWarnings.join("\nWarning: ")}\n` : "";
   return {
-    stdout: `Rechecked ${resolvedServiceName}: LXC ${vmid} at ${ip} (${deployment.hostname}) is ${healthLabel} and adopted. Inspected ${inspection?.managed?.length ?? 0} managed resource(s).\n`,
+    stdout: `${warningText}Rechecked ${resolvedServiceName}: LXC ${vmid} at ${ip} (${deployment.hostname}) is ${healthLabel} and adopted. Inspected ${inspection?.managed?.length ?? 0} managed resource(s).\n`,
+    warnings: tailnetWarnings,
     health,
     inspection,
     vmid,
@@ -1302,12 +1453,13 @@ function parseDomainChangeOptions(rawOptions) {
   return options;
 }
 
-async function republishExposures(workingProject, services, providerAdapters) {
+async function republishExposures(workingProject, services, providerAdapters, { verifyTailnetGuards = false } = {}) {
+  const references = {};
   for (const service of services) {
     if (service.exposure === undefined) {
       continue;
     }
-    await publishManagedExposure({
+    const result = await publishManagedExposure({
       project: workingProject,
       options: {
         name: service.name,
@@ -1315,12 +1467,19 @@ async function republishExposures(workingProject, services, providerAdapters) {
         backendIp: service.exposure.backend?.ip,
         backendPort: service.exposure.backend?.port !== undefined ? Number(service.exposure.backend.port) : undefined,
         backendTls: service.exposure.backend?.tls === true,
+        tailnet: service.exposure.tailnet,
         redirectTo: service.exposure.redirect?.to,
         redirectCode: service.exposure.redirect?.code
       },
       providerAdapters
     });
+    if (verifyTailnetGuards && service.exposure.tailnet === false &&
+        result.health.reverseProxy?.status !== "healthy") {
+      throw new Error(`The reverse proxy could not verify tailnet denial for ${service.exposure.hostname}; routes were not advertised.`);
+    }
+    references[result.managedService.id] = result.integrationReferences;
   }
+  return references;
 }
 
 async function changeBaseDomain(options, adapters) {
@@ -1453,6 +1612,25 @@ async function changeBaseDomain(options, adapters) {
     persistCaddyLiveConfig(proxmox, proxyRef?.vmid);
   }
 
+  const vpnService = project.config.managedInventory.platform.vpn;
+  const vpnRef = state.providerReferences[vpnService?.id];
+  if (vpnService?.service === "tailscale" && vpnRef !== undefined &&
+      typeof providerAdapters.tailscale?.configureTailnet === "function") {
+    const adminSecretReference = project.config.connectionSecretReferences.tailscaleAdmin
+      ?? `nominaconnect/tailscale-admin/${vpnService.id}`;
+    await ensureConnectionSecret(adapters, "Tailscale admin API token", adminSecretReference, {
+      secret: process.env.NOMINA_TAILSCALE_API_TOKEN
+    });
+    await providerAdapters.tailscale.configureTailnet({
+      vmid: vpnRef.vmid,
+      dnsIp: dnsRef.ip,
+      proxyIp: proxyRef.ip,
+      zone: newDomain,
+      adminSecretReference,
+      saveDnsSnapshot: (snapshot, gatewayIp) => saveTailnetDnsSnapshot(project, adapters, snapshot, gatewayIp)
+    });
+  }
+
   writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(workingProject.config));
 
   return {
@@ -1550,8 +1728,9 @@ async function uninstallEverything(options, adapters) {
   // Only LXC vmids recorded in NominaConnect's own state are ever touched:
   // provider references (active) and retained services (previously removed).
   const targets = new Map();
+  let project = null;
   if (filesystem.exists(configPath)) {
-    const project = loadProject(filesystem, options.projectDir);
+    project = loadProject(filesystem, options.projectDir);
     for (const [id, reference] of Object.entries(project.state.providerReferences ?? {})) {
       if (reference?.vmid !== undefined && !targets.has(reference.vmid)) {
         targets.set(reference.vmid, id);
@@ -1581,6 +1760,29 @@ async function uninstallEverything(options, adapters) {
 
   const destroyed = [];
   const failed = [];
+
+  // Tailnet DNS is admin-console state, not LXC state, so this is the last
+  // moment it can be put back: the recovery snapshot lives in the state file
+  // deleted below, and the adapter verifies against a gateway address it reads
+  // from the LXC destroyed here.
+  let dnsLine = "";
+  if (project !== null && project.state.tailnetDnsSnapshot !== undefined) {
+    const snapshot = project.state.tailnetDnsSnapshot;
+    const manual = `Set tailnet DNS by hand: nameservers ${snapshot.nameservers.join(", ") || "none"}, override local DNS ${snapshot.overrideLocalDNS}.`;
+    const vpnId = project.config.managedInventory?.platform?.vpn?.id;
+    const vpnReference = project.state.providerReferences?.[vpnId];
+    if (vpnReference?.vmid === undefined) {
+      failed.push(`tailnet DNS: the gateway LXC is no longer recorded, so tailnet DNS was not restored. ${manual}`);
+    } else {
+      try {
+        await restoreTailnetDns(project, vpnReference, adapters);
+        dnsLine = `Restored tailnet DNS: nameservers ${snapshot.nameservers.join(", ") || "none"}, override local DNS ${snapshot.overrideLocalDNS}.`;
+      } catch (error) {
+        failed.push(`tailnet DNS: ${error.message} ${manual}`);
+      }
+    }
+  }
+
   if (proxmox?.stopLxc !== undefined && proxmox?.destroyLxc !== undefined) {
     for (const vmid of targetList) {
       try {
@@ -1610,6 +1812,7 @@ async function uninstallEverything(options, adapters) {
   }
 
   const lines = [];
+  if (dnsLine !== "") lines.push(dnsLine);
   lines.push(targetList.length > 0 ? `Destroyed ${destroyed.length} LXC(s): ${destroyed.join(", ")}.` : "No managed LXCs were recorded; nothing to destroy.");
   lines.push(`Removed: ${removedPaths.join(", ") || "nothing"}.`);
   if (failed.length > 0) {
@@ -1768,9 +1971,10 @@ const parseExposurePublishOptions = optionParser({
   flags: [
     ["--name", "name"], ["--hostname", "hostname"], ["--backend-ip", "backendIp"],
     ["--backend-port", "backendPort"], ["--backend-tls", "backendTls"],
-    ["--redirect-to", "redirectTo"], ["--redirect-code", "redirectCode"]
+    ["--redirect-to", "redirectTo"], ["--redirect-code", "redirectCode"],
+    ["--tailnet", "tailnet"]
   ],
-  booleans: ["--backend-tls"],
+  booleans: ["--backend-tls", "--tailnet"],
   numbers: ["backendPort", "redirectCode"]
 });
 
@@ -1907,12 +2111,16 @@ function createManagedInventory(answers) {
 }
 
 function createSecretReferences(inventory) {
-  return Object.values(inventory.platform)
+  const references = Object.values(inventory.platform)
     .filter((item) => item !== null)
     .reduce((references, item) => ({
       ...references,
       [item.id]: `nominaconnect/provider/${item.id}`
     }), {});
+  if (inventory.platform.vpn?.service === "tailscale") {
+    references.tailscaleAdmin = `nominaconnect/tailscale-admin/${inventory.platform.vpn.id}`;
+  }
+  return references;
 }
 
 const PLAN_ONLY_ADAPTER = Object.freeze({

@@ -54,7 +54,62 @@ export NOMINA_ACCEPTANCE_NODE=pve-1           # default: hostname
 export NOMINA_ACCEPTANCE_VPN=tailscale        # or netbird
 export NOMINA_ACCEPTANCE_VPN_IP=10.0.0.57
 export NOMINA_ACCEPTANCE_VPN_KEY=tskey-auth-…
+export NOMINA_ACCEPTANCE_FORWARDERS=1.1.1.1,8.8.8.8
+# Bootstrap resolver only if the gateway does not provide DNS.
+export NOMINA_ACCEPTANCE_TECHNITIUM_NAMESERVER=1.1.1.1
 ```
+
+`NOMINA_ACCEPTANCE_FORWARDERS` is only for labs whose network blocks direct
+root-server DNS while allowing public recursors. When set, the suite points
+the fresh Technitium at those forwarders through its own API before any
+downstream LXC needs managed DNS. Unset by default: no behavior change on
+open networks.
+
+`NOMINA_ACCEPTANCE_TECHNITIUM_NAMESERVER` optionally sets the resolver inside
+the first Technitium LXC while its own DNS service is being installed. The
+default is the LXC's gateway address. Set this when that gateway does not
+answer DNS; later service LXCs use the managed Technitium address by default.
+
+## Tailscale credentials (two different keys)
+
+A VPN run needs **two** credentials from the Tailscale admin console. They are
+not interchangeable:
+
+- **Auth key** (`tskey-auth-…`): lets one device join the tailnet. Mint at
+  `https://login.tailscale.com/admin/settings/keys` under **Auth keys**.
+  Prefer a short expiry and a tag if your tailnet uses them. The service LXC
+  consumes it once for `tailscale up`.
+- **Admin API token** (`tskey-api-…`): lets NominaConnect call the Tailscale
+  control-plane API to set tailnet-wide DNS (split-DNS for the lab zone,
+  tailnet nameservers) and to restore the prior tailnet DNS on removal. Mint
+  at `https://login.tailscale.com/admin/settings/keys` under **API access
+  tokens** (past the Auth keys section). Prefer a short expiry and revoke it
+  after the run. It never enters the LXC; it stays in the local secret store.
+
+For the suite:
+
+```sh
+export NOMINA_ACCEPTANCE_VPN=tailscale
+export NOMINA_ACCEPTANCE_VPN_IP=10.0.0.57
+export NOMINA_ACCEPTANCE_VPN_KEY=tskey-auth-…        # enrollment only
+export NOMINA_ACCEPTANCE_TAILSCALE_API_TOKEN=tskey-api-…  # tailnet DNS admin
+```
+
+For the `nomina` binary (same meanings, different names):
+
+```sh
+export NOMINA_SECRET_TAILSCALE__TAILNET_AUTH_KEY_=tskey-auth-…
+export NOMINA_TAILSCALE_API_TOKEN=tskey-api-…
+```
+
+(The doubled/trailing underscores in the first name come from the product's
+`NOMINA_SECRET_<LABEL>` derivation; copy it exactly.)
+
+Handling rules, everywhere: keep each key in its own root-only (`0600`) file
+on the Proxmox host and load it into the environment at run time — never paste
+either key into chat, tickets, or reports, and never pass one as a CLI flag
+(it would show in process listings). The VPN acceptance check asserts the
+enrollment credential never reaches command output.
 
 Without `NOMINA_ACCEPTANCE=1` and `NOMINA_ACCEPTANCE_DISPOSABLE=yes` — or off
 a Proxmox root shell, or with any required variable unset — the suite skips

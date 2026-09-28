@@ -227,6 +227,41 @@ test("nomina exposure publish creates Technitium record and Caddy HTTPS route to
   assert.ok(proxyInspection.some((resource) => resource.id === "photos.bunnyhome.test"));
 });
 
+test("an opted-out Tailscale exposure stays opted out on edit and can be enabled later", async () => {
+  const filesystem = new FakeFilesystem();
+  seedProvisionedProject(filesystem);
+  const configPath = "/projects/bunnyhome/nomina.yaml";
+  filesystem.writeFile(configPath, filesystem.read(configPath).replace("    vpn: null", `    vpn:
+      id: nc_vpn_test
+      service: tailscale`));
+  const statePath = "/projects/bunnyhome/.nomina/state.json";
+  const state = JSON.parse(filesystem.read(statePath));
+  state.providerReferences.nc_vpn_test = { vmid: 122, ip: "10.0.0.55" };
+  filesystem.writeFile(statePath, JSON.stringify(state));
+  const technitium = createTechnitiumAdapter();
+  const checked = [];
+  const caddy = createCaddyAdapter({ exposureHealth(request) {
+    checked.push(request);
+    return { https: "reachable", status: "healthy" };
+  } });
+  const adapters = { filesystem, runtime: proxmoxRootRuntime(), providerAdapters: { technitium, caddy } };
+  const command = ["exposure", "publish", "--project-dir", "/projects/bunnyhome", "--name", "photos",
+    "--hostname", "photos.bunnyhome.test", "--backend-ip", "10.0.0.100", "--backend-port", "8080"];
+
+  await runCli([...command, "--tailnet", "false"], adapters);
+  assert.equal(caddy.publishCalls.at(-1).tailnet, false);
+  assert.equal(caddy.publishCalls.at(-1).tailnetGatewayIp, "10.0.0.55");
+  assert.equal(checked.at(-1).tailnet, false);
+  assert.equal(checked.at(-1).tailnetGatewayIp, "10.0.0.55");
+  assert.match(filesystem.read(configPath), /tailnet: false/);
+
+  await runCli(command, adapters);
+  assert.equal(caddy.publishCalls.at(-1).tailnet, false, "omitting the flag on edit keeps the saved choice");
+  await runCli([...command, "--tailnet", "true"], adapters);
+  assert.equal(caddy.publishCalls.at(-1).tailnet, true);
+  assert.match(filesystem.read(configPath), /tailnet: true/);
+});
+
 test("nomina exposure publish updates an existing managed hostname", async () => {
   const filesystem = new FakeFilesystem();
   seedProvisionedProject(filesystem);

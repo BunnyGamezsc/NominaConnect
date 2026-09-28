@@ -8,6 +8,7 @@ import { createCaddyAdapter } from "./caddy-adapter.js";
 import { createNetBirdAdapter } from "./netbird-adapter.js";
 import { createStepCaAdapter } from "./step-ca-adapter.js";
 import { createTailscaleAdapter } from "./tailscale-adapter.js";
+import { createTailnetController } from "./tailscale-tailnet.js";
 import { createTechnitiumAdapter } from "./technitium-adapter.js";
 import { createTraefikAdapter } from "./traefik-adapter.js";
 
@@ -250,7 +251,12 @@ export function createProductionAdapters(options = {}) {
     tailscale: createTailscaleAdapter({
       secretResolver,
       exec: (vmid, command) => proxmox.pctExec(vmid, command),
-      enableTunDevice: (vmid) => proxmox.enableTunDevice(vmid)
+      enableTunDevice: (vmid) => proxmox.enableTunDevice(vmid),
+      tailnetController: createTailnetController({
+        httpClient,
+        secretResolver,
+        exec: (vmid, command) => proxmox.pctExec(vmid, command)
+      })
     }),
     // NetBird is driven entirely through its CLI inside the service LXC, and
     // like Tailscale it needs the Proxmox host to hand the container a TUN
@@ -324,7 +330,11 @@ function createProxmoxAdapter(commandRunner) {
           ...(spec.nameserver !== undefined ? ["--nameserver", spec.nameserver] : []),
           "--unprivileged", spec.unprivileged ? "1" : "0",
           "--start", "1"
-        ]
+        ],
+        // Template extraction plus first boot on slow (e.g. nested-virtualized)
+        // storage routinely exceeds the 30s default; killing pct create
+        // mid-extraction leaves a half-written rootfs ("received interrupt").
+        timeoutMs: 600_000
       });
       return { vmid: Number(vmid), hostname: spec.hostname };
     },
@@ -544,6 +554,7 @@ function parsePctConfig(stdout) {
     unprivileged: values.unprivileged === "1",
     ip: net0.match(/ip=([^/,]+)/)?.[1],
     bridge: net0.match(/bridge=([^,]+)/)?.[1],
+    nameserver: values.nameserver,
     storage: values.rootfs?.split(":")[0]
   };
 }

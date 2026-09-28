@@ -89,7 +89,7 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
         }
         throw error;
       }
-      const resources = routes.filter((route) => !isRedirectRoute(route)).map((route) => toManagedResource(route, policies));
+      const resources = routes.filter((route) => !isImplementationRoute(route)).map((route) => toManagedResource(route, policies));
       return { resources };
     },
     async adopt(request) {
@@ -137,12 +137,19 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
       const newRoute = redirectTo !== undefined
         ? buildRedirectTargetRoute(request.hostname, redirectTo, redirectCode)
         : buildManagedRoute(request.hostname, request.backendIp, request.backendPort, request.backendTls === true);
+      restrictTailnetRoute(newRoute, request);
       const desiredPolicy = { subjects: [request.hostname], issuers: [issuerFor(request)] };
-      await upsertRoute(httpClient, endpoint, TLS_SERVER, request.hostname, [newRoute]);
+      await upsertRoute(httpClient, endpoint, TLS_SERVER, request.hostname, [...tlsTailnetDenyRoutes(request), newRoute]);
       if (redirectTo !== undefined) {
-        await upsertRoute(httpClient, endpoint, HTTP_SERVER, request.hostname, [buildHttpRedirectTargetRoute(request.hostname, redirectTo, redirectCode)]);
+        const httpRoute = buildHttpRedirectTargetRoute(request.hostname, redirectTo, redirectCode);
+        restrictTailnetRoute(httpRoute, request);
+        await upsertRoute(httpClient, endpoint, HTTP_SERVER, request.hostname, [...httpTailnetDenyRoutes(request), httpRoute]);
       } else if (request.httpRedirect === true) {
-        await upsertRoute(httpClient, endpoint, HTTP_SERVER, request.hostname, [buildRedirectRoute(request.hostname)]);
+        const httpRoute = buildRedirectRoute(request.hostname);
+        restrictTailnetRoute(httpRoute, request);
+        await upsertRoute(httpClient, endpoint, HTTP_SERVER, request.hostname, [...httpTailnetDenyRoutes(request), httpRoute]);
+      } else if (request.tailnet === false) {
+        await upsertRoute(httpClient, endpoint, HTTP_SERVER, request.hostname, httpTailnetDenyRoutes(request));
       } else {
         await removeRedirect(httpClient, endpoint, request.hostname);
       }
@@ -203,9 +210,30 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
         }
         throw error;
       }
-      const matched = routes.find((r) => hostForRoute(r) === request.hostname);
+      const matched = routes.find((r) => r["@id"] === request.hostname);
       if (matched === undefined) {
         return { https: "unreachable", status: "unhealthy" };
+      }
+      if (request.tailnetGatewayIp !== undefined) {
+        const expected = request.tailnet === false
+          ? [{ remote_ip: { ranges: [request.tailnetGatewayIp] } }]
+          : undefined;
+        if (JSON.stringify(matched.match?.[0]?.not) !== JSON.stringify(expected)) {
+          return { https: "reachable", status: "unhealthy", reason: "Caddy's tailnet access rule does not match this exposure." };
+        }
+        const deny = routes.find((route) => route["@id"] === `${request.hostname}${TAILNET_TLS_DENY_SUFFIX}`);
+        if (request.tailnet === false
+          ? deny?.match?.[0]?.remote_ip?.ranges?.[0] !== request.tailnetGatewayIp
+          : deny !== undefined) {
+          return { https: "reachable", status: "unhealthy", reason: "Caddy's tailnet denial route does not match this exposure." };
+        }
+        const httpRoutes = await listRoutes(httpClient, endpoint, HTTP_SERVER);
+        const httpDeny = httpRoutes.find((route) => route["@id"] === `${request.hostname}${TAILNET_DENY_SUFFIX}`);
+        if (request.tailnet === false
+          ? httpDeny?.match?.[0]?.remote_ip?.ranges?.[0] !== request.tailnetGatewayIp
+          : httpDeny !== undefined) {
+          return { https: "reachable", status: "unhealthy", reason: "Caddy's HTTP tailnet denial route does not match this exposure." };
+        }
       }
       const policy = policies.find((entry) => entry.subjects?.includes(request.hostname));
       const tls = tlsSummaryFor(policy?.issuers?.[0], request.caStrategy);
@@ -381,7 +409,7 @@ async function upsertRoute(httpClient, endpoint, server, hostname, additions) {
 
 async function removeRedirect(httpClient, endpoint, hostname) {
   const routes = await listRoutes(httpClient, endpoint, HTTP_SERVER);
-  const filtered = routes.filter((r) => r["@id"] !== `${hostname}${REDIRECT_SUFFIX}`);
+  const filtered = routes.filter((r) => !isManagedRouteFor(r, hostname));
   if (filtered.length !== routes.length) {
     await replaceMapValue(httpClient, endpoint, httpRoutesPath(), filtered);
   }
@@ -492,6 +520,32 @@ function buildManagedRoute(hostname, backendIp, backendPort, backendTls = false)
   };
 }
 
+function restrictTailnetRoute(route, request) {
+  if (request.tailnet !== false) return;
+  if (request.tailnetGatewayIp === undefined) {
+    throw new Error(`Cannot protect ${request.hostname} from tailnet access without the Tailscale gateway IP.`);
+  }
+  // Match the direct connection address. Request headers such as
+  // X-Forwarded-For are controlled by the client and cannot enforce this rule.
+  route.match[0].not = [{ remote_ip: { ranges: [request.tailnetGatewayIp] } }];
+}
+
+function tailnetDenyRoute(request, suffix) {
+  if (request.tailnet !== false) return [];
+  if (request.tailnetGatewayIp === undefined) {
+    throw new Error(`Cannot protect ${request.hostname} from tailnet access without the Tailscale gateway IP.`);
+  }
+  return [{
+    "@id": `${request.hostname}${suffix}`,
+    match: [{ host: [request.hostname], remote_ip: { ranges: [request.tailnetGatewayIp] } }],
+    handle: [{ handler: "static_response", status_code: 404 }],
+    terminal: true
+  }];
+}
+
+const httpTailnetDenyRoutes = (request) => tailnetDenyRoute(request, TAILNET_DENY_SUFFIX);
+const tlsTailnetDenyRoutes = (request) => tailnetDenyRoute(request, TAILNET_TLS_DENY_SUFFIX);
+
 // A managed redirect exposure answers :443 with a 307/308 to an explicit
 // target (e.g. apex bunny.internal -> https://home.bunny.internal), preserving
 // the request URI. The :80 route goes straight to the same target instead of
@@ -546,6 +600,8 @@ function parseRedirectTargetRoute(route) {
 }
 
 const REDIRECT_SUFFIX = "-auto-http";
+const TAILNET_DENY_SUFFIX = "-tailnet-deny-auto-http";
+const TAILNET_TLS_DENY_SUFFIX = "-tailnet-deny";
 
 // Plain-HTTP hits for an exposure are redirected to HTTPS instead of served.
 // The route lives on srv_http (:80) only, so scheme separation comes from the
@@ -565,12 +621,16 @@ function buildRedirectRoute(hostname) {
   };
 }
 
-function isRedirectRoute(route) {
-  return typeof route["@id"] === "string" && route["@id"].endsWith(REDIRECT_SUFFIX);
+function isImplementationRoute(route) {
+  return typeof route["@id"] === "string" && (
+    route["@id"].endsWith(REDIRECT_SUFFIX) || route["@id"].endsWith(TAILNET_TLS_DENY_SUFFIX)
+  );
 }
 
 function isManagedRouteFor(route, hostname) {
-  return hostForRoute(route) === hostname || route["@id"] === `${hostname}${REDIRECT_SUFFIX}`;
+  return hostForRoute(route) === hostname || route["@id"] === `${hostname}${REDIRECT_SUFFIX}`
+    || route["@id"] === `${hostname}${TAILNET_DENY_SUFFIX}`
+    || route["@id"] === `${hostname}${TAILNET_TLS_DENY_SUFFIX}`;
 }
 
 function issuerFor(request) {

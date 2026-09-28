@@ -223,6 +223,32 @@ test("publishRoute bootstraps an empty Caddy config with a valid route and step-
   ]);
 });
 
+test("Caddy refuses the Tailscale gateway on opted-out HTTPS and HTTP routes", async () => {
+  const fake = new FakeCaddyAdmin();
+  const adapter = createCaddyAdapter({ httpClient: createHttpClient(fake), secretResolver: () => {} });
+  const request = stepCaRequest({ tailnet: false, tailnetGatewayIp: "192.168.4.91", httpRedirect: true });
+  await adapter.publishRoute(request);
+  const httpsRoute = fake.get("apps/http/servers/srv_https/routes").find((route) => route["@id"] === request.hostname);
+  const deniedHttps = fake.get("apps/http/servers/srv_https/routes").find((route) => route["@id"] === `${request.hostname}-tailnet-deny`);
+  const httpRoutes = fake.get("apps/http/servers/srv_http/routes");
+  const httpRoute = httpRoutes.find((route) => route["@id"] === `${request.hostname}-auto-http`);
+  const deniedHttp = httpRoutes.find((route) => route["@id"] === `${request.hostname}-tailnet-deny-auto-http`);
+  const denied = [{ remote_ip: { ranges: ["192.168.4.91"] } }];
+  assert.deepEqual(httpsRoute.match[0].not, denied);
+  assert.deepEqual(deniedHttps.match[0].remote_ip, { ranges: ["192.168.4.91"] });
+  assert.equal(deniedHttps.handle[0].status_code, 404);
+  assert.deepEqual(httpRoute.match[0].not, denied);
+  assert.deepEqual(deniedHttp.match[0].remote_ip, { ranges: ["192.168.4.91"] });
+  assert.equal(deniedHttp.handle[0].status_code, 404);
+  assert.equal((await adapter.healthCheckExposure(request)).status, "healthy");
+  await adapter.publishRoute({ ...request, tailnet: true });
+  const allowed = fake.get("apps/http/servers/srv_https/routes").find((route) => route["@id"] === request.hostname);
+  assert.equal(allowed.match[0].not, undefined);
+  assert.equal(fake.get("apps/http/servers/srv_https/routes").some((route) => route["@id"] === deniedHttps["@id"]), false);
+  assert.equal(fake.get("apps/http/servers/srv_http/routes").some((route) => route["@id"] === deniedHttp["@id"]), false);
+  assert.equal((await adapter.healthCheckExposure({ ...request, tailnet: true })).status, "healthy");
+});
+
 test("publishRoute prefers the step-ca hostname over the bare IP for the ACME directory URL", async () => {
   const fake = new FakeCaddyAdmin();
   const adapter = createCaddyAdapter({ httpClient: createHttpClient(fake), secretResolver: () => {} });

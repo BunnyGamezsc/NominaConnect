@@ -360,9 +360,10 @@ export async function runInteractiveApp(adapters) {
       if (adapters.prompts !== undefined) {
         code = await promptRedirectCode(adapters.prompts, code);
       }
+      const tailnet = await promptTailnetAccess(projectForEdit, svc.exposure.tailnet, adapters.prompts);
       const result = await adapters.runCommand(
         ["exposure", "publish", "--name", svc.name, "--hostname", svc.exposure.hostname,
-          "--redirect-to", target, "--redirect-code", String(code)],
+          "--redirect-to", target, "--redirect-code", String(code), "--tailnet", String(tailnet)],
         adapters
       );
       clack.outro("Exposure updated.");
@@ -402,6 +403,7 @@ export async function runInteractiveApp(adapters) {
     if (backendTls) {
       publishArgs.push("--backend-tls");
     }
+    publishArgs.push("--tailnet", String(await promptTailnetAccess(projectForEdit, svc.exposure.tailnet, adapters.prompts)));
     const result = await adapters.runCommand(publishArgs, adapters);
     clack.outro("Exposure updated.");
     if (adapters.tracking) {
@@ -724,6 +726,7 @@ export async function promptExposureOptions(project, existingOptions, prompts) {
   const name = existingOptions.name ?? await askPrompt(prompts, "Service name", "app");
   const suggestedHostname = `${name}.${project.config.baseLocalDomain}`;
   const hostname = existingOptions.hostname ?? await askPrompt(prompts, "Full hostname", suggestedHostname);
+  const tailnet = existingOptions.tailnet ?? await promptTailnetAccess(project, undefined, prompts);
   const isRedirect = existingOptions.redirectTo !== undefined && existingOptions.redirectTo !== ""
     ? true
     : await confirmPrompt(
@@ -736,7 +739,7 @@ export async function promptExposureOptions(project, existingOptions, prompts) {
       ?? await askPrompt(prompts, "Redirect target (e.g. home.bunny.internal)", `home.${project.config.baseLocalDomain}`);
     const redirectCode = existingOptions.redirectCode
       ?? await promptRedirectCode(prompts, 308);
-    return { ...existingOptions, name, hostname, redirectTo: redirectRaw, redirectCode };
+    return { ...existingOptions, name, hostname, tailnet, redirectTo: redirectRaw, redirectCode };
   }
   const backendIp = existingOptions.backendIp
     ?? await askRequired(prompts, "Backend IP", validateIp);
@@ -749,7 +752,14 @@ export async function promptExposureOptions(project, existingOptions, prompts) {
       false
     );
 
-  return { ...existingOptions, name, hostname, backendIp, backendPort, backendTls };
+  return { ...existingOptions, name, hostname, tailnet, backendIp, backendPort, backendTls };
+}
+
+async function promptTailnetAccess(project, stored, prompts) {
+  const available = project.config.managedInventory.platform.vpn?.service === "tailscale";
+  if (!available) return false;
+  if (prompts === undefined) return stored ?? true;
+  return confirmPrompt(prompts, "Allow this exposure over Tailscale?", stored ?? true);
 }
 
 async function promptRedirectCode(prompts, fallback = 308) {
@@ -911,6 +921,10 @@ export async function promptDestroyServiceName(project, prompts) {
 
 export async function promptSecretServiceName(project, prompts) {
   const entries = [];
+  if (project.config.managedInventory.platform.vpn?.service === "tailscale") {
+    entries.push({ id: "tailscaleAdmin", service: "tailscale-admin", platformKey: "vpn",
+      label: "Tailscale admin API token", hint: "tailnet DNS and route approval" });
+  }
   for (const [platformKey, item] of Object.entries(project.config.managedInventory.platform ?? {})) {
     if (item && project.config.connectionSecretReferences[item.id] !== undefined) {
       const provisioned = project.state.providerReferences?.[item.id] !== undefined;
