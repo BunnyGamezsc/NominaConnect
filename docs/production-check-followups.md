@@ -63,7 +63,7 @@ tailnet settings or targeting a reused VMID.
 - Keep Windows awake and verify Proxmox NTP synchronization after host sleep
   or VM suspension. Chrony was adjusted in this lab to recover later jumps.
 - Repeat gateway port restrictions after a full host reboot with the final
-  raw-ingress firewall fix. The fix passed a Tailscale service restart, but
+  raw-ingress firewall and DNS-retry fixes. The fix passed a Tailscale service restart, but
   the earlier full reboot preceded that final change.
 - Repeat local-only, both-on and disconnected-client HTTPS checks using
   native DNS and a trusted CA. A stable Tailscale answer at home is expected;
@@ -81,6 +81,7 @@ tailnet settings or targeting a reused VMID.
 Issuer policy is installed before the Caddy route and replacements use PATCH;
 managed LXCs start on boot; gateway IPv6 is closed; firewall replacements are
 atomic; a raw ingress allowlist runs before Tailscale's accept hooks;
+DNS retries recover while the gateway address appears;
 uninstall preserves recovery resources on failure and respects an isolated
 credential store; exposure removal calls the actual Technitium DNS-delete
 adapter. The unit/wire suite passed 499 tests, and typecheck passed.

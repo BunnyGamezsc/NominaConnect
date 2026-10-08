@@ -60,7 +60,7 @@ regression examines each intermediate configuration during initial publication
 and republication. It failed before the fix and passes afterward.
 
 The fixed native binary was deployed with SHA-256
-`7e3b56a87e320b542d6c1c1c61bb03ee7f36ec908ede6b9d603e66ea71e937dd`.
+`5f26f6f0602787d4ede9c3768e0d2744055deaf1866de8404966e1aa3951b6cc`.
 Both exposures were republished. Caddy restarted using its saved ACME policies,
 which cleared the previously cached certificate selection. The local and remote
 probes then verified both step-ca certificate chains and hostnames.
@@ -161,6 +161,13 @@ Disposable acceptance containers were created and removed separately.
   The operator confirmed waking the PC after it had slept. Both-on DNS
   and HTTPS passed again after recovery. The stable Tailscale answer
   was routed through Ethernet locally, without a Mac DNS override.
+- Final service inspection found the DNS relay failed after a Tailscale
+  restart: binding the not-yet-present gateway address failed, and rapid
+  retries hit systemd's start limit. Restarting the relay restored live DNS.
+  The product now uses five-second retries without the start-rate cutoff.
+  The regression failed before the fix; all 14 tailnet tests passed after it.
+  The same unit settings were applied to the retained gateway. A full reboot
+  with this final change remains a follow-up.
 - Read-only tailnet policy inspection found a broad allow rule.
   The operator chose access for trusted tailnet members;
   the existing policy remains in place.
@@ -170,6 +177,5 @@ readiness. See [the remaining fix and verification plan](production-check-follow
 PR #24 remains unmerged. No live tests were left running at the final host check.
 
 Final deployed native binary SHA-256:
-`7e3b56a87e320b542d6c1c1c61bb03ee7f36ec908ede6b9d603e66ea71e937dd`.
+`5f26f6f0602787d4ede9c3768e0d2744055deaf1866de8404966e1aa3951b6cc`.
 Mac-to-Proxmox clock difference was about one second after synchronization.
-

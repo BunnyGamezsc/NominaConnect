@@ -247,6 +247,8 @@ assert rewrite(q, a) == a
   const syntax = spawnSync("sh", ["-n"], { input: install, encoding: "utf8" });
   assert.equal(syntax.status, 0, syntax.stderr);
   assert.match(install, /nomina-tailnet-dns.service/);
+  assert.match(install, /StartLimitIntervalSec=0/);
+  assert.match(install, /RestartSec=5/);
 });
 
 test("Traefik blocks the gateway for opted-out exposures on HTTP and HTTPS", () => {
