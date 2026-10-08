@@ -1,5 +1,31 @@
 # Changelog
 
+## [2.3.0] - 2026-10-07
+
+### Added
+- **Tailnet gateway DNS and exposure access controls.** Managed names resolve
+  through Technitium at the Tailscale gateway, and managed HTTPS traffic reaches
+  Caddy or Traefik there. Each exposure can opt out of tailnet access while
+  keeping its DNS answer.
+- **Optional home-DNS clients** for Windows, macOS and Linux. They use local DNS
+  at home and tailnet DNS away without routing general internet traffic through
+  the DNS server.
+- **Disposable Proxmox recovery checks** for backup restore, certificate renewal,
+  gateway recovery and tailnet readiness.
+
+### Improved
+- Tailnet DNS settings are snapshotted and restored during gateway removal.
+  Destructive uninstall stops when restoration cannot be verified, and saved
+  progress lets interrupted cleanup resume without destroying an unrelated LXC
+  that reuses a VMID.
+- Gateway firewall rules run before Tailscale's accept hooks, close the IPv6
+  ingress path, and persist across reboot. DNS relay binding retries while the
+  Tailscale address starts.
+- Caddy and Traefik enforce per-exposure tailnet restrictions. Caddy repairs
+  missing HTTPS listeners and installs issuer policy before routes.
+- Background adoption and interactive edits preserve observed exposure access
+  settings; DNS relay TCP framing handles partial reads.
+
 ## [2.2.0] - 2026-09-19
 
 ### Added
