@@ -10,7 +10,7 @@ const HOST = "app.home.test";
 const GATEWAY = "10.0.0.60";
 const PROJECT_DIR = "/projects/home";
 
-async function trackingFixture(provider) {
+async function trackingFixture(provider, { vpnService = "tailscale", storedTailnet = true } = {}) {
   const files = new Map();
   const filesystem = {
     exists: (path) => files.has(path),
@@ -26,11 +26,11 @@ async function trackingFixture(provider) {
     managedInventory: {
       platform: {
         dns: null, reverseProxy: { id: "nc_proxy", service: provider },
-        certificateAuthority: null, vpn: { id: "nc_vpn", service: "tailscale" }
+        certificateAuthority: null, vpn: { id: "nc_vpn", service: vpnService }
       },
       services: [{ id: "nc_app", name: "app", exposure: {
         hostname: HOST, backend: { ip: "10.0.0.80", port: 8080 },
-        protocol: "https", certificateAuthority: "none", tailnet: true
+        protocol: "https", certificateAuthority: "none", tailnet: storedTailnet
       } }]
     },
     connectionSecretReferences: {}
@@ -80,7 +80,8 @@ async function trackingFixture(provider) {
   const proxy = provider === "caddy"
     ? createCaddyAdapter({ httpClient, secretResolver: { resolve() {} } })
     : createTraefikAdapter({ httpClient, secretResolver: { resolve() {} }, exec: async () => ({ stdout: "" }) });
-  const observed = (await proxy.inspect({ ip: "10.0.0.54", tailnetGatewayIp: GATEWAY })).resources[0];
+  const tailnetGatewayIp = vpnService === "tailscale" ? GATEWAY : undefined;
+  const observed = (await proxy.inspect({ ip: "10.0.0.54", tailnetGatewayIp })).resources[0];
   const state = { version: 1, providerReferences: {
     nc_proxy: { vmid: 121, ip: "10.0.0.54" }, nc_vpn: { vmid: 130, ip: GATEWAY },
     nc_app: { reverseProxy: observed }
@@ -88,7 +89,7 @@ async function trackingFixture(provider) {
   filesystem.writeFile(`${PROJECT_DIR}/nomina.yaml`, serializeProjectConfiguration(config));
   filesystem.writeFile(`${PROJECT_DIR}/.nomina/state.json`, JSON.stringify(state));
   return {
-    filesystem, edit, inspect: () => proxy.inspect({ ip: "10.0.0.54", tailnetGatewayIp: GATEWAY }),
+    filesystem, edit, inspect: () => proxy.inspect({ ip: "10.0.0.54", tailnetGatewayIp }),
     project: () => loadProject(filesystem, PROJECT_DIR),
     track: () => runTrackingJob({ filesystem, projectDir: PROJECT_DIR, providerAdapters: { [provider]: proxy },
       retryOptions: { baseDelayMs: 0 } })
@@ -111,4 +112,13 @@ test("Traefik inspection detects provider tailnet rules relative to the gateway 
   const fixture = await trackingFixture("traefik");
   fixture.edit(false, "10.0.0.81");
   assert.equal((await fixture.inspect()).resources[0]?.tailnet, false, JSON.stringify(await fixture.inspect()));
+});
+
+test("background tracking does not treat a non-Tailscale VPN IP as a tailnet gateway", async () => {
+  const fixture = await trackingFixture("caddy", { vpnService: "netbird", storedTailnet: false });
+
+  const tracked = await fixture.track();
+
+  assert.equal(fixture.project().config.managedInventory.services[0].exposure.tailnet, false);
+  assert.equal(tracked.changes.some((change) => change.kind === "exposure-changed"), false);
 });

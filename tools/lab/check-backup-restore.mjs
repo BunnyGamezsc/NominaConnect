@@ -4,6 +4,7 @@ import path from "node:path";
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
 import { createCommandRunner } from "../../src/adapter-runtime.js";
+import { restoreCloneWithLeftoverCheck } from "./proxmox-recovery.mjs";
 
 assert.equal(process.env.NOMINA_READINESS, "1");
 assert.equal(process.getuid(), 0);
@@ -56,7 +57,7 @@ assert.ok(backup);
 fs.chmodSync(path.join(dir, backup), 0o600);
 let created = false;
 try {
-  await run("/usr/sbin/pct", ["restore", String(clone), path.join(dir, backup), "--storage", "local-lvm"], 600_000);
+  await restoreCloneWithLeftoverCheck(run, { vmid: clone, archive: path.join(dir, backup) });
   created = true;
   fs.writeFileSync(marker, JSON.stringify({ vmid: clone, hostname: "nomina-recovery-stepca", stage: "restored" }), { mode: 0o600 });
   await run("/usr/sbin/pct", ["set", String(clone), "--hostname", "nomina-recovery-stepca", "--onboot", "0",

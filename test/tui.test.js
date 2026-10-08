@@ -12,6 +12,8 @@ import {
   canProvisionReverseProxy,
   canProvisionTechnitium,
   canPublishExposure,
+  promptExposureOptions,
+  promptSecretServiceName,
   runInteractiveApp,
   selectLxcTemplate
 } from "../src/tui.js";
@@ -364,6 +366,51 @@ connectionSecretReferences:
 
   assert.match(result.stdout, /photos\.bunnyhome\.test/i);
   assert.match(result.stdout, /published/i);
+});
+
+test("editing an opted-out exposure keeps false as the interactive Tailscale default", async () => {
+  let tailnetDefault;
+  const result = await promptExposureOptions({
+    config: {
+      baseLocalDomain: "home.test",
+      managedInventory: {
+        platform: { vpn: { service: "tailscale" } },
+        services: [{ exposure: { hostname: "app.home.test", tailnet: false } }]
+      }
+    }
+  }, { name: "app" }, {
+    ask: async (question, fallback) => {
+      if (question === "Backend IP") return "192.0.2.80";
+      if (question === "Backend port") return "8080";
+      return fallback ?? "app.home.test";
+    },
+    confirm: async ({ message, initialValue }) => {
+      if (message === "Allow this exposure over Tailscale?") tailnetDefault = initialValue;
+      return initialValue;
+    }
+  });
+
+  assert.equal(tailnetDefault, false);
+  assert.equal(result.tailnet, false);
+});
+
+test("Tailscale admin-token prompt describes the DNS settings it manages", async () => {
+  let firstHint = "";
+  const selected = await promptSecretServiceName({
+    config: {
+      managedInventory: { platform: { vpn: { id: "nc_vpn", service: "tailscale" }, dns: null }, services: [] },
+      connectionSecretReferences: { nc_vpn: "private/ref" }
+    },
+    state: { providerReferences: {} }
+  }, {
+    select: async (request) => {
+      firstHint = request.options[0]?.hint ?? "";
+      return request.options[0].value;
+    }
+  });
+
+  assert.equal(selected, "tailscaleAdmin");
+  assert.equal(firstHint, "tailnet DNS settings");
 });
 
 test("nomina service add technitium can prompt for the static IP", async () => {

@@ -275,6 +275,32 @@ test("production-style Tailscale provisioning configures gateway DNS after enrol
   assert.equal(configured.length, 2);
 });
 
+test("destroying Tailscale through the vpn platform alias restores DNS before clearing its snapshot", async () => {
+  const filesystem = new FakeFilesystem();
+  const statePath = seedProvisionedTailnet(filesystem);
+  const state = JSON.parse(filesystem.read(statePath));
+  state.providerReferences.nc_vpn_test = { vmid: 130, ip: "10.0.0.60" };
+  state.tailnetDnsSnapshot = { nameservers: ["192.0.2.53"], overrideLocalDNS: false };
+  filesystem.writeFile(statePath, JSON.stringify(state));
+  const restoreCalls = [];
+  const proxmox = createProxmoxAdapter();
+
+  await runCli(
+    ["service", "destroy", "vpn", "--yes", "--project-dir", "/projects/bunnyhome"],
+    {
+      filesystem,
+      runtime: proxmoxRootRuntime(),
+      proxmox,
+      providerAdapters: { tailscale: { restoreTailnetDns: (request) => restoreCalls.push(request) } }
+    }
+  );
+
+  assert.equal(restoreCalls.length, 1);
+  assert.equal(restoreCalls[0].vmid, 130);
+  assert.deepEqual(restoreCalls[0].snapshot, state.tailnetDnsSnapshot);
+  assert.equal(JSON.parse(filesystem.read(statePath)).tailnetDnsSnapshot, undefined);
+});
+
 test("Tailscale does not create an LXC when DNS or proxy is not provisioned", async () => {
   const filesystem = new FakeFilesystem();
   seedProject(filesystem);

@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { createCommandRunner, createHttpClient, createProductionAdapters } from '../../src/adapter-runtime.js';
 import { runCli } from '../../src/cli.js';
 import { loadProject } from '../../src/config.js';
+import { runIndependentCleanup } from './independent-cleanup.mjs';
 
 const projectDir = process.argv[2];
 assert.equal(process.env.NOMINA_READINESS, '1');
@@ -68,6 +69,7 @@ function leaf() {
   });
 }
 let published=false;
+let operationError;
 try {
   const config=JSON.parse(caOriginal);
   const provisioner=config.authority.provisioners.find(p=>p.type==='ACME' && p.name==='acme');
@@ -108,13 +110,26 @@ try {
   const result={hostname,initial:first,renewed,tlsVerified:true};
   fs.writeFileSync(`${projectDir}/.nomina/renewal-results.json`,JSON.stringify(result,null,2)+'\n',{mode:0o600});
   console.log(JSON.stringify({event:'automatic-renewal-verified',...result}));
+} catch (error) {
+  operationError = error;
+  throw error;
 } finally {
-  await writeCa(caOriginal);
-  await exec(caRef.vmid,'/bin/systemctl',['restart','step-ca']);
-  if(published) await runCli(['service','remove',name,'--project-dir',projectDir],adapters);
-  await caddy('POST','/load',caddyOriginal);
-  await exec(proxyRef.vmid,'/usr/bin/python3',['-c','import sys;open("/etc/caddy/caddy.json","w").write(sys.stdin.read())'],JSON.stringify(caddyOriginal));
-  await exec(proxyRef.vmid,'/bin/systemctl',['restart','caddy']);
+  const cleanupFailures = await runIndependentCleanup([
+    ['Restore the original CA configuration', () => writeCa(caOriginal)],
+    ['Restart step-ca', () => exec(caRef.vmid,'/bin/systemctl',['restart','step-ca'])],
+    ['Remove the temporary exposure', () => published
+      ? runCli(['service','remove',name,'--project-dir',projectDir],adapters)
+      : Promise.resolve()],
+    ['Restore Caddy through its admin API', () => caddy('POST','/load',caddyOriginal)],
+    ['Restore the Caddy configuration file', () => exec(proxyRef.vmid,'/usr/bin/python3',['-c','import sys;open("/etc/caddy/caddy.json","w").write(sys.stdin.read())'],JSON.stringify(caddyOriginal))],
+    ['Restart Caddy', () => exec(proxyRef.vmid,'/bin/systemctl',['restart','caddy'])]
+  ]);
+  if (cleanupFailures.length > 0) {
+    throw new AggregateError(
+      [...(operationError === undefined ? [] : [operationError]), ...cleanupFailures],
+      `Renewal-check cleanup is incomplete; inspect ${backupDir} before retrying.`
+    );
+  }
   fs.writeFileSync(`${backupDir}/restored`,'Original CA and Caddy settings restored; only temporary exposure removed.\n',{mode:0o600});
   console.log('Original CA duration and Caddy renewal settings restored. Main deployment retained.');
 }

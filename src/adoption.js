@@ -560,7 +560,9 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
           providerReferences: [hostname],
           connectionSecretReference: project.config.connectionSecretReferences?.[proxyService.id],
           ip: proxyRef.ip,
-          tailnetGatewayIp: project.state.providerReferences?.[project.config.managedInventory.platform.vpn?.id]?.ip,
+          tailnetGatewayIp: project.config.managedInventory.platform.vpn?.service === "tailscale"
+            ? project.state.providerReferences?.[project.config.managedInventory.platform.vpn.id]?.ip
+            : undefined,
           zone: project.config.baseLocalDomain
         };
         const proxyInspection = await withBoundedRetry(

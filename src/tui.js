@@ -726,7 +726,9 @@ export async function promptExposureOptions(project, existingOptions, prompts) {
   const name = existingOptions.name ?? await askPrompt(prompts, "Service name", "app");
   const suggestedHostname = `${name}.${project.config.baseLocalDomain}`;
   const hostname = existingOptions.hostname ?? await askPrompt(prompts, "Full hostname", suggestedHostname);
-  const tailnet = existingOptions.tailnet ?? await promptTailnetAccess(project, undefined, prompts);
+  const existingExposure = (project.config.managedInventory.services ?? [])
+    .find((service) => service.exposure?.hostname === hostname)?.exposure;
+  const tailnet = existingOptions.tailnet ?? await promptTailnetAccess(project, existingExposure?.tailnet, prompts);
   const isRedirect = existingOptions.redirectTo !== undefined && existingOptions.redirectTo !== ""
     ? true
     : await confirmPrompt(
@@ -923,7 +925,7 @@ export async function promptSecretServiceName(project, prompts) {
   const entries = [];
   if (project.config.managedInventory.platform.vpn?.service === "tailscale") {
     entries.push({ id: "tailscaleAdmin", service: "tailscale-admin", platformKey: "vpn",
-      label: "Tailscale admin API token", hint: "tailnet DNS and route approval" });
+      label: "Tailscale admin API token", hint: "tailnet DNS settings" });
   }
   for (const [platformKey, item] of Object.entries(project.config.managedInventory.platform ?? {})) {
     if (item && project.config.connectionSecretReferences[item.id] !== undefined) {

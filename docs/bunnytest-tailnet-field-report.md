@@ -1,6 +1,7 @@
 # bunnytest.internal Tailscale field test
 
-Date: October 7, 2026. PR: https://github.com/BunnyGamezsc/NominaConnect/pull/24.
+Test started: October 7, 2026; updated: October 8, 2026.
+PR: https://github.com/BunnyGamezsc/NominaConnect/pull/24.
 Branch: `feat/tailnet-exposures`, starting commit
 `b9d85984fc127f1ca98c2c19a577bdd39005361b` plus the certificate publication fix.
 

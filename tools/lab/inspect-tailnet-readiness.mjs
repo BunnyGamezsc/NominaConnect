@@ -3,6 +3,7 @@ import fs from "node:fs";
 import assert from "node:assert/strict";
 import { createHttpClient, createLocalSecretResolver, createProductionAdapters } from "../../src/adapter-runtime.js";
 import { loadProject } from "../../src/config.js";
+import { countAccessRules } from "./tailnet-policy.js";
 
 assert.equal(process.env.NOMINA_READINESS, "1");
 assert.equal(process.getuid(), 0);
@@ -41,7 +42,7 @@ const result = { time: new Date().toISOString(),
   technitiumDefaultAdminPassword: dnsSecret === "admin", technitiumCredentialVerified: true,
   dnsReadPermissionVerified: true, nameservers: nameservers.dns,
   advertisedRoutes: gatewayPreferences.AdvertiseRoutes ?? [],
-  accessRuleCount: policy.acls?.length ?? policy.grants?.length ?? null,
+  accessRuleCount: countAccessRules(policy),
   broadAllowRule: (policy.acls?.some(rule => rule.action === "accept" && (rule.src ?? rule.users)?.includes("*") && (rule.dst ?? rule.ports)?.includes("*:*") ) ?? false)
     || (policy.grants?.some(rule => rule.src?.includes("*") && rule.dst?.includes("*") && rule.ip?.includes("*")) ?? false),
   devices: devices.devices.map(device => ({ id: device.id, hostname: device.hostname,

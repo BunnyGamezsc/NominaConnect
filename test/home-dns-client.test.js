@@ -143,8 +143,10 @@ function New-Object {
 }
 & $env:NOMINA_HELPER setup 192.0.2.53 private.example.test
 $installed = Join-Path $env:LOCALAPPDATA 'Programs/NominaConnect/nomina-home-dns.ps1'
+$configPath = Join-Path $env:APPDATA 'NominaConnect/home-dns.json'
+Set-Content -Path $configPath -Value '{ damaged' -NoNewline
 & $installed setup 192.0.2.53 edited.example.test
-$config = Get-Content -Raw (Join-Path $env:APPDATA 'NominaConnect/home-dns.json') | ConvertFrom-Json
+$config = Get-Content -Raw $configPath | ConvertFrom-Json
 if ($config.probeHost -ne 'edited.example.test') { throw 'Updated probe hostname was not saved.' }
 `);
   const checked = spawnSync(powershell, ["-NoProfile", "-File", driver], {

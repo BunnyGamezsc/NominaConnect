@@ -1202,6 +1202,9 @@ async function destroyService(serviceName, rawOptions, adapters) {
     }
   }
 
+  const managedServiceType = matchedPlatform?.[1]?.service
+    ?? project.state.retainedServices?.[managedItemId]?.service;
+
   if (vmid === undefined) {
     throw new Error(`Service ${resolvedServiceName} not found or not provisioned/retained.`);
   }
@@ -1222,7 +1225,7 @@ async function destroyService(serviceName, rawOptions, adapters) {
     };
   }
 
-  if (resolvedServiceName === "tailscale" && project.state.providerReferences?.[managedItemId]) {
+  if (managedServiceType === "tailscale" && project.state.providerReferences?.[managedItemId]) {
     await restoreTailnetDns(project, { vmid }, adapters);
   }
   if (proxmox?.stopLxc) {
@@ -1260,7 +1263,7 @@ async function destroyService(serviceName, rawOptions, adapters) {
     providerReferences: updatedProviderRefs,
     retainedServices: updatedRetainedServices
   };
-  if (resolvedServiceName === "tailscale") delete updatedState.tailnetDnsSnapshot;
+  if (managedServiceType === "tailscale") delete updatedState.tailnetDnsSnapshot;
 
   writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
   writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);

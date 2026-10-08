@@ -234,7 +234,8 @@ function Show-Message {
 
 function Invoke-Setup {
     param([string]$HomeDns, [string]$ProbeHost)
-    $current = Get-SavedConfig
+    $current = $null
+    try { $current = Get-SavedConfig } catch { $current = $null }
     if (-not $HomeDns) { $HomeDns = Read-InputValue 'Technitium LAN IPv4 address' $current.homeDns }
     if ($null -eq $HomeDns) { return }
     if (-not $ProbeHost) { $ProbeHost = Read-InputValue 'Managed hostname, such as stats.bunny.internal' $current.probeHost }

@@ -93,8 +93,10 @@ not interchangeable:
   Prefer a short expiry and a tag if your tailnet uses them. The service LXC
   consumes it once for `tailscale up`.
 - **Admin API token** (`tskey-api-…`): lets NominaConnect call the Tailscale
-  control-plane API to set tailnet-wide DNS (split-DNS for the lab zone,
-  tailnet nameservers) and to restore the prior tailnet DNS on removal. Mint
+  control-plane API to set the gateway as the tailnet's sole nameserver, enable
+  **Override local DNS**, and restore the prior nameserver and override settings
+  on removal. Setup does not create split-DNS rules and refuses to continue when
+  an existing split-DNS rule points at another resolver. Mint
   at `https://login.tailscale.com/admin/settings/keys` under **API access
   tokens** (past the Auth keys section). Prefer a short expiry and revoke it
   after the run. It never enters the LXC; it stays in the local secret store.
