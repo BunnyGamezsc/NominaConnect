@@ -79,6 +79,7 @@ export function createLocalSecretStore(options = {}) {
   const isRoot = options.isRoot ?? (() => process.getuid?.() === 0);
   const locate = (reference) => resolveSecretPath(secretsDirectory, reference);
   return Object.freeze({
+    rootDirectory: path.dirname(secretsDirectory),
     locate,
     has(reference) {
       try {
@@ -329,6 +330,7 @@ function createProxmoxAdapter(commandRunner) {
           "--net0", net0.join(","),
           ...(spec.nameserver !== undefined ? ["--nameserver", spec.nameserver] : []),
           "--unprivileged", spec.unprivileged ? "1" : "0",
+          "--onboot", "1",
           "--start", "1"
         ],
         // Template extraction plus first boot on slow (e.g. nested-virtualized)

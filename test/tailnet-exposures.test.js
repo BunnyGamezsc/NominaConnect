@@ -208,6 +208,18 @@ test("gateway firewall rejects non-DNS input and non-web forwarding", () => {
   assert.match(script, /NOMINA_TAILNET_FORWARD -j REJECT/);
   assert.match(script, /DNAT --to-destination 192.168.1.86/);
   assert.match(script, /MASQUERADE/);
+  assert.match(script, /ip6tables-restore --noflush[^]*-A NOMINA_TAILNET_INPUT -j REJECT[^]*-A NOMINA_TAILNET_FORWARD -j REJECT[^]*COMMIT/);
+  assert.match(script, /iptables-restore --noflush/);
+  // Tailscale can move its accept-all INPUT hook ahead of ours on restart.
+  // The raw ingress guard must enforce the destination/port restriction first.
+  assert.match(script, /\*raw[^]*-A NOMINA_TAILNET_INGRESS -d 100\.70\.80\.90 -p udp --dport 53 -j RETURN[^]*-A NOMINA_TAILNET_INGRESS -d 100\.70\.80\.90 -p tcp -m multiport --dports 53,80,443 -j RETURN[^]*-A NOMINA_TAILNET_INGRESS -j DROP/);
+  assert.match(script, /ip6tables-restore --noflush[^]*\*raw[^]*-A NOMINA_TAILNET_INGRESS -j DROP/);
+  assert.match(script, /iptables -t raw -I PREROUTING 1 -i tailscale0 -j NOMINA_TAILNET_INGRESS/);
+  assert.match(script, /ip6tables -t raw -I PREROUTING 1 -i tailscale0 -j NOMINA_TAILNET_INGRESS/);
+  assert.doesNotMatch(script, /(?:ip6tables|iptables) -F NOMINA_TAILNET/);
+  assert.match(script, /ip6tables -I INPUT 1 -i tailscale0 -j NOMINA_TAILNET_INPUT/);
+  assert.match(script, /ip6tables -I FORWARD 1 -i tailscale0 -j NOMINA_TAILNET_FORWARD/);
+  assert.match(script, /Requires=nomina-tailnet-firewall.service/);
   assert.throws(() => firewallInstallScript("192.168.1.90; bad", "192.168.1.86", "100.70.80.90"), /IPv4/);
 });
 

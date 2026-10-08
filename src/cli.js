@@ -1108,12 +1108,20 @@ async function removeService(serviceName, rawOptions, adapters) {
   if (matchedService) {
     const hostname = matchedService.exposure?.hostname;
     if (hostname) {
-      if (providerAdapters.technitium?.unpublishRecord) {
-        await providerAdapters.technitium.unpublishRecord({ hostname });
-      }
+      const dnsService = project.config.managedInventory.platform.dns;
+      const dnsRef = project.state.providerReferences[dnsService?.id];
       const proxyService = project.config.managedInventory.platform.reverseProxy;
+      const proxyRef = project.state.providerReferences[proxyService?.id];
+      if (providerAdapters.technitium?.deleteRecord) {
+        await providerAdapters.technitium.deleteRecord({
+          hostname,
+          zone: project.config.baseLocalDomain,
+          ip: proxyRef?.ip,
+          endpoint: dnsRef?.ip ? `http://${dnsRef.ip}:5380` : undefined,
+          connectionSecretReference: project.config.connectionSecretReferences[dnsService?.id]
+        });
+      }
       if (proxyService && providerAdapters[proxyService.service]?.unpublishRoute) {
-        const proxyRef = project.state.providerReferences[proxyService.id];
         await providerAdapters[proxyService.service].unpublishRoute({
           hostname,
           ip: proxyRef?.ip,
@@ -1723,7 +1731,7 @@ async function uninstallEverything(options, adapters) {
   const projectDir = options.projectDir ?? adapters.cwd ?? ".";
   const configPath = path.posix.join(projectDir, "nomina.yaml");
   const statePath = path.posix.join(projectDir, ".nomina", "state.json");
-  const secretStorePath = "/var/lib/nominaconnect";
+  const secretStorePath = adapters.secretStore?.rootDirectory ?? "/var/lib/nominaconnect";
 
   // Only LXC vmids recorded in NominaConnect's own state are ever touched:
   // provider references (active) and retained services (previously removed).
@@ -1783,6 +1791,10 @@ async function uninstallEverything(options, adapters) {
     }
   }
 
+  if (failed.length > 0) {
+    throw new Error(`Refusing to uninstall while ${failed.join("; ")} All LXCs, configuration, recovery state, and secrets were retained.`);
+  }
+
   if (proxmox?.stopLxc !== undefined && proxmox?.destroyLxc !== undefined) {
     for (const vmid of targetList) {
       try {
@@ -1799,6 +1811,10 @@ async function uninstallEverything(options, adapters) {
     }
   } else if (targetList.length > 0) {
     throw new Error("Proxmox adapter is unavailable; refusing to leave managed LXC(s) behind. Destroy them manually with pct destroy.");
+  }
+
+  if (failed.length > 0) {
+    throw new Error(`Uninstall was incomplete: ${failed.join("; ")} Configuration, recovery state, and secrets were retained. Successfully destroyed LXC(s): ${destroyed.join(", ") || "none"}.`);
   }
 
   const removedPaths = [];

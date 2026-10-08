@@ -1,20 +1,22 @@
 # Proxmox field-test tools
 
-The VirtualBox test VM uses its existing Ethernet bridge: Windows' Realtek
-controller is `192.168.1.2/24`, Proxmox is `192.168.1.3/24` on `vmbr0`, and
-the Mac is the Ethernet gateway at `192.168.1.1` on `en8`. The Mac forwards
-outbound traffic through its Wi-Fi connection. No additional VirtualBox
-host-only adapter or Proxmox bridge is required to reach the VM.
+## Current retained lab
 
-The Windows VirtualBox Host-Only adapter named `Ethernet 4` was observed at
-`192.168.1.1`, duplicating the Mac gateway. Check its current state on Windows
-before testing; disable or readdress it if it still owns that address. The VM
-became reachable after its first NIC was re-bridged to the Realtek controller.
-These observations are in the [Muse field-test handoff](../../docs/muse-spark-proxmox-field-tests.md).
+The current `bunnytest` lab uses Windows Ethernet `192.168.1.2/24`, Proxmox
+`192.168.1.3/24` on `vmbr0`, and Mac Ethernet `192.168.1.20/24`. Windows uses
+its own Wi-Fi for internet. VirtualBox adapter 1 bridges the physical Ethernet
+for management; adapter 2 supplies independent NAT internet to Proxmox;
+adapter 3 is host-only at `192.168.56.0/24` for PC-to-VM access without the Mac.
+The old conflicting host-only address `192.168.1.1` was replaced.
 
-The four older service LXCs were present but stopped at the last check. Run
-`pct list` and inspect their configs before choosing addresses for a new test.
-Do not delete or reuse their addresses merely because they are stopped.
+Proxmox forwards container traffic through its NAT adapter. The Mac is no
+longer its internet gateway. The retained project and four LXCs must not be
+deleted as test cleanup. Keep Windows awake during unattended tests.
+
+The [current field report](../../docs/bunnytest-tailnet-field-report.md) records
+addresses, service IDs, validation and remaining failures. The older
+[Muse handoff](../../docs/muse-spark-proxmox-field-tests.md) describes the
+previous Mac-dependent arrangement and is historical context.
 
 ## Build on the Mac and copy the exact binary
 
@@ -35,8 +37,9 @@ modules directly and needs a matching source copy on the VM.
 on the Proxmox host with `node tools/lab/backend.mjs`; it listens on port
 8080 and returns `nomina lab backend ok`.
 
-## Temporary Mac gateway
+## Optional historical Mac gateway
 
+This is not needed for the current independent-internet lab.
 The earlier Mac setup used `en8` at `192.168.1.1` and PF NAT through the
 Mac's default-route interface. If that gateway is already working, leave it
 alone. For a fresh, repeatable setup after removing any old manual alias or

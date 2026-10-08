@@ -139,6 +139,9 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
         : buildManagedRoute(request.hostname, request.backendIp, request.backendPort, request.backendTls === true);
       restrictTailnetRoute(newRoute, request);
       const desiredPolicy = { subjects: [request.hostname], issuers: [issuerFor(request)] };
+      // Caddy starts automatic HTTPS on every accepted config write. Install
+      // the issuer before exposing a hostname, or it can cache an internal cert.
+      await upsertTlsPolicy(httpClient, endpoint, desiredPolicy);
       await upsertRoute(httpClient, endpoint, TLS_SERVER, request.hostname, [...tlsTailnetDenyRoutes(request), newRoute]);
       if (redirectTo !== undefined) {
         const httpRoute = buildHttpRedirectTargetRoute(request.hostname, redirectTo, redirectCode);
@@ -153,7 +156,6 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
       } else {
         await removeRedirect(httpClient, endpoint, request.hostname);
       }
-      await upsertTlsPolicy(httpClient, endpoint, desiredPolicy);
       const locator = { host: request.hostname, configPath: `/config/apps/http/servers/${TLS_SERVER}/routes/${request.hostname}` };
       return {
         id: request.hostname,
@@ -427,11 +429,15 @@ async function upsertTlsPolicy(httpClient, endpoint, desiredPolicy) {
   await replaceMapValue(httpClient, endpoint, "/config/apps/tls/automation/policies", remaining);
 }
 
-// Caddy's admin API refuses to PUT over an existing key (409), so replacing a
-// value requires deleting it first and putting the new value back.
+// PATCH replaces existing values without reloading an intermediate config
+// missing routes or issuer policies. PUT is only for a value not yet present.
 async function replaceMapValue(httpClient, endpoint, path, value) {
-  await apiDelete(httpClient, endpoint, path);
-  await apiPut(httpClient, endpoint, path, value);
+  try {
+    await apiCall(httpClient, endpoint, "PATCH", path, value);
+  } catch (error) {
+    if (!/status 404/.test(error.message)) throw error;
+    await apiPut(httpClient, endpoint, path, value);
+  }
 }
 
 async function tlsAppExists(httpClient, endpoint) {

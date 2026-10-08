@@ -24,12 +24,19 @@ and never runs by accident.
   tracking can resolve on a later pass.
 - With a VPN selected, the client reports an operational enrollment and the
   enrollment credential never reaches command output.
+- Managed LXCs have automatic startup enabled for host reboots.
+- With Tailscale and Caddy, opting out of tailnet access denies gateway requests
+  with forged forwarding headers while the exposure remains available locally.
+- Tailscale's gateway firewall rejects IPv6 and restricts ingress before its
+  own accept hooks. No LAN subnet is advertised.
+- Public uninstall restores the exact previous tailnet DNS settings and leaves
+  pre-existing LXCs and their global credentials intact.
 
 ## Running it
 
 Run as root on the Proxmox host (ADR-0031). Use a host you are willing to lose:
-the suite creates LXCs, and although teardown only destroys vmids it read back
-out of its own project state, a live homelab is the wrong place for it.
+the suite creates LXCs and changes tailnet-wide DNS during a Tailscale run.
+Reserve distinct test IPs. Teardown excludes every VMID present before the run.
 
 ```sh
 export NOMINA_ACCEPTANCE=1
@@ -57,6 +64,10 @@ export NOMINA_ACCEPTANCE_VPN_KEY=tskey-auth-…
 export NOMINA_ACCEPTANCE_FORWARDERS=1.1.1.1,8.8.8.8
 # Bootstrap resolver only if the gateway does not provide DNS.
 export NOMINA_ACCEPTANCE_TECHNITIUM_NAMESERVER=1.1.1.1
+# Optional resource overrides for a constrained lab.
+export NOMINA_ACCEPTANCE_CPUS=1
+export NOMINA_ACCEPTANCE_MEMORY_MB=512
+export NOMINA_ACCEPTANCE_DISK_GB=2
 ```
 
 `NOMINA_ACCEPTANCE_FORWARDERS` is only for labs whose network blocks direct
@@ -117,8 +128,11 @@ with the reason printed rather than doing anything to the host.
 
 ## Teardown
 
-Every LXC the run created is stopped and destroyed afterwards, chosen only from
-the vmids recorded in the run's own `.nomina/state.json`. A container that
-already existed on the host is never a teardown target. If the run is
-interrupted, its temporary project directory under `$TMPDIR` still holds the
-state file listing exactly what to remove.
+The suite uses an isolated credential store inside its temporary project.
+It invokes public uninstall to restore DNS before destroying the gateway.
+It also finds failed-provisioning orphans by reserved IP and expected hostname,
+excluding all pre-existing VMIDs. The teardown verifies that the original
+LXCs, global credential digest and live tailnet DNS settings are unchanged.
+If uninstall cannot restore DNS, teardown stops and retains the temporary
+project and credentials for recovery. An interrupted run likewise leaves its
+project under `$TMPDIR`.

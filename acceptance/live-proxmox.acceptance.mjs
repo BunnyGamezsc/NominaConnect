@@ -14,8 +14,8 @@
 // See docs/live-proxmox-acceptance.md for the full environment reference.
 //
 // Safety rules this file holds itself to:
-//   - It only ever destroys LXCs whose vmid it read back out of the project's
-//     own state file. A pre-existing container is never a teardown target.
+//   - It destroys project LXCs and failed-provisioning orphans at the reserved
+//     test IPs with the expected hostname. Pre-existing VMIDs are never targets.
 //   - It seeds one unmanaged DNS record and one unmanaged proxy route through
 //     each provider's own interface, then asserts both survived the run.
 //   - It never prints a resolved connection secret.
@@ -27,10 +27,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { createHash } from "node:crypto";
 
 import { runCli } from "../src/cli.js";
 import { loadProject } from "../src/config.js";
-import { createCommandRunner, createHttpClient, createProductionAdapters } from "../src/adapter-runtime.js";
+import { createCommandRunner, createHttpClient, createLocalSecretResolver, createLocalSecretStore, createProductionAdapters } from "../src/adapter-runtime.js";
 
 const REQUIRED = [
   "NOMINA_ACCEPTANCE_STORAGE",
@@ -129,7 +130,11 @@ const prompts = {
 
 test("live Proxmox acceptance", { skip, timeout: 45 * 60 * 1000 }, async (t) => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomina-acceptance-"));
-  const production = createProductionAdapters();
+  const secretsDirectory = path.join(projectDir, "credentials", "secrets");
+  const production = createProductionAdapters({
+    secretResolver: createLocalSecretResolver({ secretsDirectory }),
+    secretStore: createLocalSecretStore({ secretsDirectory })
+  });
   const commandRunner = createCommandRunner();
   const adapters = { filesystem, cwd: projectDir, runtime, ...production, prompts };
   const cli = (argumentsList) => runCli([...argumentsList, "--project-dir", projectDir], adapters);
@@ -147,6 +152,8 @@ test("live Proxmox acceptance", { skip, timeout: 45 * 60 * 1000 }, async (t) => 
   const initialVmids = new Set(initialInventory.stdout.split("\n").slice(1)
     .map((line) => line.trim().split(/\s+/)[0])
     .filter((vmid) => /^\d+$/.test(vmid)));
+  const secretDigestBefore = secretDigest("/var/lib/nominaconnect/secrets");
+  const tailnetDnsBefore = vpn === "tailscale" ? await tailnetDnsSettings() : undefined;
   const testServicesByIp = new Map([
     [process.env.NOMINA_ACCEPTANCE_DNS_IP, "technitium"],
     [process.env.NOMINA_ACCEPTANCE_PROXY_IP, proxy],
@@ -159,6 +166,11 @@ test("live Proxmox acceptance", { skip, timeout: 45 * 60 * 1000 }, async (t) => 
   // project state. Clean up a new test LXC by reserved IP and expected hostname
   // as well, but never a VMID that existed before this suite started.
   t.after(async () => {
+    // The public uninstall restores tailnet DNS before destroying its gateway.
+    // Its configured credential store is isolated from retained installations.
+    if (filesystem.exists(path.join(projectDir, "nomina.yaml"))) {
+      await cli(["uninstall", "--yes"]);
+    }
     const vmids = new Set(createdVmids());
     for (const [ip, expectedHostname] of testServicesByIp) {
       if (!initiallyAvailableTestIps.has(ip)) continue;
@@ -179,6 +191,12 @@ test("live Proxmox acceptance", { skip, timeout: 45 * 60 * 1000 }, async (t) => 
         await production.proxmox.destroyLxc(vmid);
       } catch {}
     }
+    assert.equal(secretDigest("/var/lib/nominaconnect/secrets"), secretDigestBefore,
+      "a disposable run must preserve the retained installation's credentials");
+    if (tailnetDnsBefore !== undefined) assert.deepEqual(await tailnetDnsSettings(),tailnetDnsBefore,
+      "uninstall must restore the exact previous live tailnet DNS settings");
+    const remaining = await commandRunner.run({binary:"/usr/sbin/pct",args:["list"]});
+    for (const vmid of initialVmids) assert.match(remaining.stdout, new RegExp(`^${vmid}\\s`, "m"));
     fs.rmSync(projectDir, { recursive: true, force: true });
   });
 
@@ -215,6 +233,8 @@ test("live Proxmox acceptance", { skip, timeout: 45 * 60 * 1000 }, async (t) => 
     assert.ok(Number.isFinite(dnsVmid), "the created LXC id was recorded in local state");
 
     const observed = await production.proxmox.inspectLxc(dnsVmid);
+    const config = await commandRunner.run({binary:"/usr/sbin/pct",args:["config",String(dnsVmid)]});
+    assert.match(config.stdout, /^onboot: 1$/m, "a managed service must start after a host reboot");
     assert.equal(observed.ip, process.env.NOMINA_ACCEPTANCE_DNS_IP, "the LXC has the requested static IP");
     assert.equal(observed.unprivileged, true, "service LXCs stay unprivileged (ADR-0030)");
     assert.equal(observed.bridge, process.env.NOMINA_ACCEPTANCE_BRIDGE);
@@ -336,13 +356,97 @@ test("live Proxmox acceptance", { skip, timeout: 45 * 60 * 1000 }, async (t) => 
         "an enrollment credential must never reach command output"
       );
     });
+    if (vpn === "tailscale") {
+      if (referenceFor("vpn") === undefined) return;
+      await t.test("tailnet opt-out blocks the gateway even with forged forwarding headers", {skip: proxy !== "caddy"}, async () => {
+        const gateway = referenceFor("vpn");
+        const proxyRef = referenceFor("reverseProxy");
+        let caPem;
+        if (ca === "step-ca") {
+          caPem = (await production.proxmox.pctExec(referenceFor("certificateAuthority").vmid,
+            {binary:"/bin/cat",args:["/var/lib/stepca/certs/root_ca.crt"]})).stdout;
+        } else {
+          const certs = await adminClient.request({method:"GET",url:`http://${proxyRef.ip}:2019/pki/ca/local/certificates`,headers:{}});
+          assert.equal(certs.status,200);
+          caPem = certs.body;
+        }
+        assert.match(caPem,/BEGIN CERTIFICATE/);
+        const helper = path.join(projectDir,"https-probe.py");
+        fs.writeFileSync(helper, HTTPS_PROBE);
+        await commandRunner.run({binary:"/usr/sbin/pct",args:["push",String(gateway.vmid),helper,"/tmp/nomina-https-probe.py"]});
+        const probe = async (fromGateway) => {
+          const request = {ip:proxyRef.ip,host:exposedHostname,ca:caPem};
+          const command = {binary:"/usr/bin/python3",args:[fromGateway?"/tmp/nomina-https-probe.py":helper],stdin:JSON.stringify(request)};
+          const result = fromGateway ? await production.proxmox.pctExec(gateway.vmid, command) : await commandRunner.run(command);
+          return JSON.parse(result.stdout);
+        };
+        const flags = ["exposure","publish","--name","photos","--hostname",exposedHostname,
+          "--backend-ip",backendIp,"--backend-port",backendPort];
+        await cli([...flags,"--tailnet","false"]);
+        assert.equal((await probe(true)).status,404,"gateway access must be denied independently of X-Forwarded-For");
+        assert.equal((await probe(false)).status,200,"the same exposure must still work on the LAN");
+        await cli([...flags,"--tailnet","true"]);
+        assert.equal((await probe(true)).status,200,"reenabling tailnet access must restore the route");
+      });
+      await t.test("gateway firewall closes IPv6 and advertises no LAN subnet", async () => {
+        const gateway = referenceFor("vpn");
+        const exec = (binary,args) => production.proxmox.pctExec(gateway.vmid,{binary,args});
+        await exec("/usr/sbin/ip6tables",["-C","INPUT","-i","tailscale0","-j","NOMINA_TAILNET_INPUT"]);
+        await exec("/usr/sbin/ip6tables",["-C","NOMINA_TAILNET_INPUT","-j","REJECT"]);
+        await exec("/usr/sbin/ip6tables",["-C","FORWARD","-i","tailscale0","-j","NOMINA_TAILNET_FORWARD"]);
+        await exec("/usr/sbin/iptables",["-t","raw","-C","PREROUTING","-i","tailscale0","-j","NOMINA_TAILNET_INGRESS"]);
+        await exec("/usr/sbin/iptables",["-t","raw","-C","NOMINA_TAILNET_INGRESS","-j","DROP"]);
+        await exec("/usr/sbin/ip6tables",["-t","raw","-C","PREROUTING","-i","tailscale0","-j","NOMINA_TAILNET_INGRESS"]);
+        await exec("/usr/sbin/ip6tables",["-t","raw","-C","NOMINA_TAILNET_INGRESS","-j","DROP"]);
+        const prefs = JSON.parse((await exec("/usr/bin/tailscale",["debug","prefs"])).stdout);
+        assert.deepEqual(prefs.AdvertiseRoutes??[],[]);
+        const dependencies = await exec("/bin/systemctl",["show","tailscaled","-p","Requires"]);
+        assert.match(dependencies.stdout,/nomina-tailnet-firewall.service/);
+      });
+    }
   }
 });
 
-function templateFlags() {
+const HTTPS_PROBE = `import json, socket, ssl, sys
+r=json.load(sys.stdin)
+ctx=ssl.create_default_context(cadata=r['ca'])
+with socket.create_connection((r['ip'],443),timeout=10) as peer:
+ with ctx.wrap_socket(peer,server_hostname=r['host']) as tls:
+  tls.sendall(('GET / HTTP/1.1\\r\\nHost: '+r['host']+'\\r\\nX-Forwarded-For: 192.168.1.3\\r\\nConnection: close\\r\\n\\r\\n').encode())
+  data=b''
+  while b'\\r\\n' not in data: data+=tls.recv(4096)
+  print(json.dumps({'status':int(data.split(b' ')[1]),'tlsVerified':True}))
+`;
+
+function secretDigest(directory) {
+  if (!fs.existsSync(directory)) return "absent";
+  const entries = fs.readdirSync(directory,{withFileTypes:true}).sort((a,b)=>a.name.localeCompare(b.name))
+    .map(entry=>{const target=path.join(directory,entry.name);return entry.isDirectory()?secretDigest(target):
+      `${entry.name}:${fs.readFileSync(target).toString('base64')}:${fs.statSync(target).mode}`;}).join("|");
+  return createHash('sha256').update(entries).digest('hex');
+}
+
+async function tailnetDnsSettings() {
+  const token = requireEnv("NOMINA_ACCEPTANCE_TAILSCALE_API_TOKEN");
+  const result = {};
+  for (const field of ["nameservers","preferences"]) {
+    const response = await fetch(`https://api.tailscale.com/api/v2/tailnet/-/dns/${field}`,{
+      headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(15000)
+    });
+    assert.equal(response.status,200,`tailnet DNS ${field} read failed`);
+    result[field] = await response.json();
+  }
+  return result;
+}
+
+  function templateFlags() {
   const flags = ["--template", process.env.NOMINA_ACCEPTANCE_TEMPLATE];
   if (process.env.NOMINA_ACCEPTANCE_GATEWAY) {
     flags.push("--gateway", process.env.NOMINA_ACCEPTANCE_GATEWAY);
+  }
+  for (const [variable, flag] of [["NOMINA_ACCEPTANCE_CPUS", "--cpus"],
+    ["NOMINA_ACCEPTANCE_MEMORY_MB", "--memory"], ["NOMINA_ACCEPTANCE_DISK_GB", "--disk"]]) {
+    if (process.env[variable]) flags.push(flag, process.env[variable]);
   }
   return flags;
 }

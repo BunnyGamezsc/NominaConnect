@@ -79,6 +79,9 @@ test("createLxc configures the container gateway, nameserver, and a provisioning
   assert.match(create.args.find((arg) => arg.startsWith("name=eth0")), /gw=10\.0\.0\.1/);
   const nameserverIndex = create.args.indexOf("--nameserver");
   assert.equal(create.args[nameserverIndex + 1], "10.0.0.1");
+  const onbootIndex = create.args.indexOf("--onboot");
+  assert.notEqual(onbootIndex, -1, "managed platform services must recover after a Proxmox reboot");
+  assert.equal(create.args[onbootIndex + 1], "1");
   assert.equal(create.timeoutMs, 600_000, "pct create may need time to extract a template on slow storage");
 });
 

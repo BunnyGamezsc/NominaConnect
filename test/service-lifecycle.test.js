@@ -608,7 +608,7 @@ connectionSecretReferences: {}
   const caddy = createCaddyAdapter();
   const technitium = {
     unpublishCalls: [],
-    unpublishRecord(req) {
+    deleteRecord(req) {
       this.unpublishCalls.push(req);
     },
     inspect: () => ({ resources: [] }),
@@ -628,6 +628,8 @@ connectionSecretReferences: {}
   assert.match(result.stdout, /Exposure myapp/i);
   assert.match(result.stdout, /removed/i);
   assert.equal(technitium.unpublishCalls.length, 1);
+  assert.equal(technitium.unpublishCalls[0].endpoint, "http://10.0.0.53:5380");
+  assert.equal(technitium.unpublishCalls[0].ip, "10.0.0.54");
   assert.equal(caddy.unpublishCalls.length, 1);
 
   const updatedConfig = filesystem.read(`${projectDir}/nomina.yaml`);

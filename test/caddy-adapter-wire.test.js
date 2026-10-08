@@ -24,6 +24,22 @@ class FakeCaddyAdmin {
       const value = this.#traverse(segments);
       return { status: 200, body: JSON.stringify(value ?? null) };
     }
+    if (method === "PATCH") {
+      const parentPath = segments.slice(0, -1);
+      const last = segments[segments.length - 1];
+      let parent;
+      try {
+        parent = this.#traverse(parentPath);
+      } catch {
+        return { status: 404, body: "not found" };
+      }
+      if (parent === null || !Object.hasOwn(parent, last)) {
+        return { status: 404, body: "not found" };
+      }
+      this.#validate(parentPath.join("/"), payload);
+      parent[last] = structuredClone(payload);
+      return { status: 200, body: "" };
+    }
     if (method === "PUT") {
       const parentPath = segments.slice(0, -1);
       const last = segments[segments.length - 1];
@@ -221,6 +237,39 @@ test("publishRoute bootstraps an empty Caddy config with a valid route and step-
   assert.deepEqual(policy.issuers, [
     { module: "acme", ca: "https://192.168.4.87:9000/acme/acme/directory" }
   ]);
+});
+
+test("publishing step-ca exposures never lets automatic HTTPS select an internal issuer", async () => {
+  const fake = new FakeCaddyAdmin(INSTALLER_CADDYFILE_CONFIG);
+  const internalCertificates = new Set();
+  const adapter = createCaddyAdapter({
+    httpClient: {
+      async request(options) {
+        const result = fake.request(options);
+        if (options.method !== "GET" && result.status < 400) {
+          // Every accepted Admin API mutation reloads Caddy. Automatic HTTPS
+          // sees these live routes and can start issuing before the next write.
+          const observedPolicies = fake.get("apps/tls/automation/policies");
+          const policies = Array.isArray(observedPolicies) ? observedPolicies : [];
+          const observedRoutes = fake.get("apps/http/servers/srv_https/routes");
+          for (const route of Array.isArray(observedRoutes) ? observedRoutes : []) {
+            for (const hostname of route.match?.flatMap((match) => match.host ?? []) ?? []) {
+              const policy = policies.find((entry) => entry.subjects?.includes(hostname));
+              if (policy?.issuers?.[0]?.module !== "acme") internalCertificates.add(hostname);
+            }
+          }
+        }
+        return result;
+      }
+    },
+    secretResolver: () => {}
+  });
+
+  await adapter.publishRoute(stepCaRequest());
+  await adapter.publishRoute(stepCaRequest({ hostname: "pve.bunny.home", backendPort: 8006, backendTls: true }));
+  await adapter.publishRoute(stepCaRequest({ backendPort: 5381 }));
+
+  assert.deepEqual([...internalCertificates], [], "a temporary policy gap can cache an untrusted certificate even when the final config is correct");
 });
 
 test("Caddy refuses the Tailscale gateway on opted-out HTTPS and HTTP routes", async () => {
