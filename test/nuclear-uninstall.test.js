@@ -98,15 +98,48 @@ function seed(filesystem) {
   filesystem.writeFile("/var/lib/nominaconnect/secrets/nc_dns_test", "secret");
 }
 
-function createProxmoxAdapter() {
+const TAILNET_YAML = PROJECT_YAML.replace("    vpn: null\n", `    vpn:
+      id: nc_vpn_test
+      service: tailscale
+`);
+
+// A project whose tailnet gateway is enrolled and whose DNS snapshot records
+// the resolver NominaConnect replaced.
+function seedTailnet(filesystem) {
+  seed(filesystem);
+  filesystem.writeFile("/projects/bunnyhome/nomina.yaml", TAILNET_YAML);
+  const statePath = "/projects/bunnyhome/.nomina/state.json";
+  const state = JSON.parse(filesystem.read(statePath));
+  state.providerReferences.nc_vpn_test = { vmid: 103, ip: "10.0.0.60" };
+  state.tailnetDnsSnapshot = { nameservers: ["192.168.1.1"], overrideLocalDNS: false };
+  filesystem.writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`);
+}
+
+function fakeTailnetDns(sequence, { fail = undefined } = {}) {
+  const requests = [];
+  return {
+    requests,
+    tailscale: {
+      async restoreTailnetDns(request) {
+        requests.push(request);
+        sequence.push("restore-dns");
+        if (fail !== undefined) throw new Error(fail);
+      }
+    }
+  };
+}
+
+function createProxmoxAdapter(sequence = []) {
   const calls = [];
   return {
     calls,
     async stopLxc(vmid) {
       calls.push(["stop", vmid]);
+      sequence.push(`stop:${vmid}`);
     },
     async destroyLxc(vmid) {
       calls.push(["destroy", vmid]);
+      sequence.push(`destroy:${vmid}`);
     }
   };
 }
@@ -159,6 +192,77 @@ test("nuclear uninstall refuses to proceed without confirmation and destroys not
   assert.equal(filesystem.exists("/projects/bunnyhome/nomina.yaml"), true);
 });
 
+test("uninstall removes the configured credential store and preserves a different installation", async () => {
+  const filesystem = new FakeFilesystem();
+  seed(filesystem);
+  filesystem.mkdir("/isolated/credentials/secrets");
+  filesystem.writeFile("/isolated/credentials/secrets/test", "isolated-secret");
+  await runCli(["uninstall", "--yes", "--project-dir", "/projects/bunnyhome"], {
+    filesystem, runtime: proxmoxRootRuntime(), proxmox: createProxmoxAdapter(),
+    secretStore: { rootDirectory: "/isolated/credentials" }
+  });
+  assert.equal(filesystem.exists("/isolated/credentials/secrets/test"), false);
+  assert.equal(filesystem.exists("/var/lib/nominaconnect/secrets/nc_dns_test"), true);
+});
+
+test("incomplete destruction preserves configuration and credentials for recovery", async () => {
+  const filesystem = new FakeFilesystem();
+  seed(filesystem);
+  const proxmox = createProxmoxAdapter();
+  proxmox.destroyLxc = async () => { throw new Error("storage unavailable"); };
+  await assert.rejects(runCli(["uninstall", "--yes", "--project-dir", "/projects/bunnyhome"], {
+    filesystem, runtime: proxmoxRootRuntime(), proxmox
+  }), /Uninstall was incomplete/);
+  assert.deepEqual(filesystem.deleted, []);
+  assert.equal(filesystem.exists("/projects/bunnyhome/.nomina/state.json"), true);
+  assert.equal(filesystem.exists("/var/lib/nominaconnect/secrets/nc_dns_test"), true);
+});
+
+test("uninstall completes when an already stopped LXC is successfully destroyed", async () => {
+  const filesystem = new FakeFilesystem();
+  seed(filesystem);
+  const proxmox = createProxmoxAdapter();
+  proxmox.stopLxc = async () => { throw new Error("CT is not running"); };
+  const result = await runCli(["uninstall", "--yes", "--project-dir", "/projects/bunnyhome"], {
+    filesystem, runtime: proxmoxRootRuntime(), proxmox
+  });
+  assert.deepEqual(result.destroyed, [100, 101, 102]);
+  assert.equal(filesystem.exists("/projects/bunnyhome/nomina.yaml"), false);
+});
+
+test("partial uninstall retries only survivors after the gateway and DNS snapshot are gone", async () => {
+  const filesystem = new FakeFilesystem();
+  seedTailnet(filesystem);
+  const sequence = [];
+  const tailnet = fakeTailnetDns(sequence);
+  const live = new Set([100, 101, 102, 103]);
+  let storageUnavailable = true;
+  const destroyed = [];
+  const proxmox = {
+    async stopLxc(vmid) { if (!live.has(vmid)) throw new Error("missing LXC"); },
+    async destroyLxc(vmid) {
+      assert.ok(live.has(vmid), "retry must not target a destroyed or reused VMID");
+      if (vmid === 101 && storageUnavailable) throw new Error("storage unavailable");
+      live.delete(vmid);
+      destroyed.push(vmid);
+    }
+  };
+  const adapters = { filesystem, runtime: proxmoxRootRuntime(), proxmox,
+    providerAdapters: { tailscale: tailnet.tailscale } };
+  await assert.rejects(runCli(["uninstall", "--yes", "--project-dir", "/projects/bunnyhome"], adapters), /Uninstall was incomplete/);
+  assert.deepEqual([...live], [101]);
+  assert.equal(filesystem.exists("/var/lib/nominaconnect/secrets/nc_dns_test"), true);
+  // Reuse a previously destroyed ID for an unrelated container. No second
+  // uninstall operation may touch it, or require the deleted gateway.
+  live.add(100);
+  tailnet.tailscale.restoreTailnetDns = async () => { throw new Error("gateway was destroyed; DNS was already restored"); };
+  storageUnavailable = false;
+  await runCli(["uninstall", "--yes", "--project-dir", "/projects/bunnyhome"], adapters);
+  assert.deepEqual(destroyed, [100, 102, 103, 101]);
+  assert.deepEqual([...live], [100]);
+  assert.equal(filesystem.exists("/projects/bunnyhome/nomina.yaml"), false);
+});
+
 test("nuclear uninstall without a project still clears the global secret store", async () => {
   const filesystem = new FakeFilesystem();
   filesystem.mkdir("/somewhere-else");
@@ -173,6 +277,74 @@ test("nuclear uninstall without a project still clears the global secret store",
 
   assert.equal(proxmox.calls.length, 0, "no LXC references means nothing to destroy");
   assert.equal(filesystem.exists("/var/lib/nominaconnect/secrets/leftover"), false);
+});
+
+test("nuclear uninstall restores tailnet DNS before it destroys the gateway or the snapshot", async () => {
+  const filesystem = new FakeFilesystem();
+  seedTailnet(filesystem);
+  const sequence = [];
+  const proxmox = createProxmoxAdapter(sequence);
+  const tailnet = fakeTailnetDns(sequence);
+
+  const result = await runCli(
+    ["uninstall", "--yes", "--project-dir", "/projects/bunnyhome"],
+    { filesystem, runtime: proxmoxRootRuntime(), proxmox, providerAdapters: { tailscale: tailnet.tailscale } }
+  );
+
+  assert.deepEqual(tailnet.requests, [{
+    vmid: 103,
+    adminSecretReference: "nominaconnect/tailscale-admin/nc_vpn_test",
+    snapshot: { nameservers: ["192.168.1.1"], overrideLocalDNS: false }
+  }]);
+  assert.ok(sequence.indexOf("restore-dns") < sequence.indexOf("stop:103"),
+    "tailnet DNS must be restored while the gateway LXC is still there to verify it");
+  assert.match(result.stdout, /Restored tailnet DNS: nameservers 192\.168\.1\.1, override local DNS false\./);
+  assert.equal(result.failed.length, 0);
+  assert.ok(proxmox.calls.some(([kind, vmid]) => kind === "destroy" && vmid === 103));
+  assert.equal(filesystem.exists("/projects/bunnyhome/.nomina/state.json"), false);
+});
+
+test("nuclear uninstall retains every resource and recovery file when tailnet DNS restoration fails", async () => {
+  const filesystem = new FakeFilesystem();
+  seedTailnet(filesystem);
+  const sequence = [];
+  const proxmox = createProxmoxAdapter(sequence);
+  const tailnet = fakeTailnetDns(sequence, { fail: "Tailnet DNS nameservers changed since NominaConnect configured them." });
+  const before = filesystem.read("/projects/bunnyhome/.nomina/state.json");
+
+  await assert.rejects(runCli(
+    ["uninstall", "--yes", "--project-dir", "/projects/bunnyhome"],
+    { filesystem, runtime: proxmoxRootRuntime(), proxmox, providerAdapters: { tailscale: tailnet.tailscale } }
+  ), /Refusing to uninstall.*tailnet DNS.*nameservers changed/);
+
+  assert.equal(tailnet.requests.length, 1);
+  assert.deepEqual(proxmox.calls, [], "DNS recovery must finish before any destructive action");
+  assert.deepEqual(filesystem.deleted, []);
+  assert.equal(filesystem.read("/projects/bunnyhome/.nomina/state.json"), before);
+  assert.equal(filesystem.exists("/projects/bunnyhome/nomina.yaml"), true);
+  assert.equal(filesystem.exists("/var/lib/nominaconnect/secrets/nc_dns_test"), true);
+});
+
+test("nuclear uninstall checks live tailnet DNS even when its recovery snapshot is missing", async () => {
+  const filesystem = new FakeFilesystem();
+  seedTailnet(filesystem);
+  const statePath = "/projects/bunnyhome/.nomina/state.json";
+  const state = JSON.parse(filesystem.read(statePath));
+  delete state.tailnetDnsSnapshot;
+  filesystem.writeFile(statePath, JSON.stringify(state));
+  const sequence = [];
+  const proxmox = createProxmoxAdapter(sequence);
+  const tailnet = fakeTailnetDns(sequence, {
+    fail: "Tailnet DNS still points at this gateway, but no previous DNS settings were saved."
+  });
+
+  await assert.rejects(runCli(
+    ["uninstall", "--yes", "--project-dir", "/projects/bunnyhome"],
+    { filesystem, runtime: proxmoxRootRuntime(), proxmox, providerAdapters: { tailscale: tailnet.tailscale } }
+  ), /Refusing to uninstall.*no previous DNS settings/);
+  assert.deepEqual(proxmox.calls, []);
+  assert.deepEqual(filesystem.deleted, []);
+  assert.equal(tailnet.requests[0].snapshot, undefined);
 });
 
 test("the interactive menu offers nuclear uninstall only when a project exists", () => {

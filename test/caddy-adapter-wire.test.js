@@ -24,6 +24,22 @@ class FakeCaddyAdmin {
       const value = this.#traverse(segments);
       return { status: 200, body: JSON.stringify(value ?? null) };
     }
+    if (method === "PATCH") {
+      const parentPath = segments.slice(0, -1);
+      const last = segments[segments.length - 1];
+      let parent;
+      try {
+        parent = this.#traverse(parentPath);
+      } catch {
+        return { status: 404, body: "not found" };
+      }
+      if (parent === null || !Object.hasOwn(parent, last)) {
+        return { status: 404, body: "not found" };
+      }
+      this.#validate(parentPath.join("/"), payload);
+      parent[last] = structuredClone(payload);
+      return { status: 200, body: "" };
+    }
     if (method === "PUT") {
       const parentPath = segments.slice(0, -1);
       const last = segments[segments.length - 1];
@@ -221,6 +237,93 @@ test("publishRoute bootstraps an empty Caddy config with a valid route and step-
   assert.deepEqual(policy.issuers, [
     { module: "acme", ca: "https://192.168.4.87:9000/acme/acme/directory" }
   ]);
+});
+
+test("publishing step-ca exposures never lets automatic HTTPS select an internal issuer", async () => {
+  const fake = new FakeCaddyAdmin(INSTALLER_CADDYFILE_CONFIG);
+  const internalCertificates = new Set();
+  const adapter = createCaddyAdapter({
+    httpClient: {
+      async request(options) {
+        const result = fake.request(options);
+        if (options.method !== "GET" && result.status < 400) {
+          // Every accepted Admin API mutation reloads Caddy. Automatic HTTPS
+          // sees these live routes and can start issuing before the next write.
+          const observedPolicies = fake.get("apps/tls/automation/policies");
+          const policies = Array.isArray(observedPolicies) ? observedPolicies : [];
+          const observedRoutes = fake.get("apps/http/servers/srv_https/routes");
+          for (const route of Array.isArray(observedRoutes) ? observedRoutes : []) {
+            for (const hostname of route.match?.flatMap((match) => match.host ?? []) ?? []) {
+              const policy = policies.find((entry) => entry.subjects?.includes(hostname));
+              if (policy?.issuers?.[0]?.module !== "acme") internalCertificates.add(hostname);
+            }
+          }
+        }
+        return result;
+      }
+    },
+    secretResolver: () => {}
+  });
+
+  await adapter.publishRoute(stepCaRequest());
+  await adapter.publishRoute(stepCaRequest({ hostname: "pve.bunny.home", backendPort: 8006, backendTls: true }));
+  await adapter.publishRoute(stepCaRequest({ backendPort: 5381 }));
+
+  assert.deepEqual([...internalCertificates], [], "a temporary policy gap can cache an untrusted certificate even when the final config is correct");
+});
+
+test("Caddy refuses the Tailscale gateway on opted-out HTTPS and HTTP routes", async () => {
+  const fake = new FakeCaddyAdmin();
+  const adapter = createCaddyAdapter({ httpClient: createHttpClient(fake), secretResolver: () => {} });
+  const request = stepCaRequest({ tailnet: false, tailnetGatewayIp: "192.168.4.91", httpRedirect: true });
+  await adapter.publishRoute(request);
+  const httpsRoute = fake.get("apps/http/servers/srv_https/routes").find((route) => route["@id"] === request.hostname);
+  const deniedHttps = fake.get("apps/http/servers/srv_https/routes").find((route) => route["@id"] === `${request.hostname}-tailnet-deny`);
+  const httpRoutes = fake.get("apps/http/servers/srv_http/routes");
+  const httpRoute = httpRoutes.find((route) => route["@id"] === `${request.hostname}-auto-http`);
+  const deniedHttp = httpRoutes.find((route) => route["@id"] === `${request.hostname}-tailnet-deny-auto-http`);
+  const denied = [{ remote_ip: { ranges: ["192.168.4.91"] } }];
+  assert.deepEqual(httpsRoute.match[0].not, denied);
+  assert.deepEqual(deniedHttps.match[0].remote_ip, { ranges: ["192.168.4.91"] });
+  assert.equal(deniedHttps.handle[0].status_code, 404);
+  assert.deepEqual(httpRoute.match[0].not, denied);
+  assert.deepEqual(deniedHttp.match[0].remote_ip, { ranges: ["192.168.4.91"] });
+  assert.equal(deniedHttp.handle[0].status_code, 404);
+  assert.equal((await adapter.healthCheckExposure(request)).status, "healthy");
+  await adapter.publishRoute({ ...request, tailnet: true });
+  const allowed = fake.get("apps/http/servers/srv_https/routes").find((route) => route["@id"] === request.hostname);
+  assert.equal(allowed.match[0].not, undefined);
+  assert.equal(fake.get("apps/http/servers/srv_https/routes").some((route) => route["@id"] === deniedHttps["@id"]), false);
+  assert.equal(fake.get("apps/http/servers/srv_http/routes").some((route) => route["@id"] === deniedHttp["@id"]), false);
+  assert.equal((await adapter.healthCheckExposure({ ...request, tailnet: true })).status, "healthy");
+});
+
+test("Caddy denies opted-out gateway traffic before an unmanaged wildcard route", async () => {
+  const wildcard = { "@id": "operator-wildcard", match: [{ host: ["*.bunny.home"] }],
+    handle: [{ handler: "static_response", status_code: 200 }], terminal: true };
+  const fake = new FakeCaddyAdmin({ admin: { listen: "0.0.0.0:2019" }, apps: { http: { servers: {
+    srv_https: { listen: [":443"], routes: [wildcard] },
+    srv_http: { listen: [":80"], routes: [wildcard] }
+  } } } });
+  const adapter = createCaddyAdapter({ httpClient: createHttpClient(fake), secretResolver: () => {} });
+  const request = stepCaRequest({ tailnet: false, tailnetGatewayIp: "192.168.4.91", httpRedirect: true });
+  await adapter.publishRoute(request);
+  for (const server of ["srv_https", "srv_http"]) {
+    const routes = fake.get(`apps/http/servers/${server}/routes`);
+    assert.equal(routes[0].handle[0].status_code, 404, "a terminal wildcard must not serve gateway requests before denial");
+    assert.deepEqual(routes.find((route) => route["@id"] === "operator-wildcard"), wildcard);
+  }
+  assert.equal((await adapter.healthCheckExposure(request)).status, "healthy");
+});
+
+test("Caddy reports an opted-out exposure unhealthy when a wildcard shadows its denial", async () => {
+  const fake = new FakeCaddyAdmin();
+  const adapter = createCaddyAdapter({ httpClient: createHttpClient(fake), secretResolver: () => {} });
+  const request = stepCaRequest({ tailnet: false, tailnetGatewayIp: "192.168.4.91", httpRedirect: true });
+  await adapter.publishRoute(request);
+  fake.get("apps/http/servers/srv_http/routes").unshift({ match: [{ host: ["*.bunny.home"] }],
+    handle: [{ handler: "static_response", status_code: 200 }], terminal: true });
+  assert.equal((await adapter.healthCheckExposure(request)).status, "unhealthy");
 });
 
 test("publishRoute prefers the step-ca hostname over the bare IP for the ACME directory URL", async () => {

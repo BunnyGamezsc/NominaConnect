@@ -1,5 +1,13 @@
 # Testing NominaConnect on a Proxmox host
 
+This is the historical September 2026 walkthrough. The acceptance suite has
+since run on real Proxmox; see [the run report](proxmox-test-run-report.md).
+The VM still uses the Ethernet lab and Mac gateway described below, but the
+commands and runtime workarounds are historical. Use the
+[current lab guide](../tools/lab/README.md) and the
+historical [Muse Spark field test handoff](muse-spark-proxmox-field-tests.md)
+for context on the earlier Mac-dependent network setup.
+
 A worked first-run against a disposable Proxmox host, using a Proxmox VM at
 `192.168.1.3` bridged onto the same ethernet LAN as the workstation.
 

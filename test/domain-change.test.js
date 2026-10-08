@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { runCli } from "../src/cli.js";
+import { createTailnetController } from "../src/tailscale-tailnet.js";
 import { buildMenuOptions, runInteractiveApp } from "../src/tui.js";
 
 const proxmoxRootRuntime = () => ({ isRoot: () => true, isProxmoxHost: () => true });
@@ -220,6 +221,56 @@ test("nomina domain change migrates exposures, DNS records, routes, and step-ca 
 
   const state = JSON.parse(filesystem.read("/projects/bunnyhome/.nomina/state.json"));
   assert.ok(state.providerReferences.nc_exp_test !== undefined);
+});
+
+test("nomina domain change preserves DNS recovery and warns when the tailnet cannot report DNS override", async () => {
+  const filesystem = new FakeFilesystem();
+  seed(filesystem);
+  const configPath = "/projects/bunnyhome/nomina.yaml";
+  const statePath = "/projects/bunnyhome/.nomina/state.json";
+  filesystem.writeFile(configPath, filesystem.read(configPath).replace(
+    "    vpn: null",
+    "    vpn:\n      id: nc_vpn_test\n      service: tailscale"
+  ));
+  const snapshot = { nameservers: ["9.9.9.9"], overrideLocalDNS: false };
+  const state = createState();
+  state.providerReferences.nc_vpn_test = { vmid: 130, ip: "10.0.0.60" };
+  state.tailnetDnsSnapshot = snapshot;
+  filesystem.writeFile(statePath, JSON.stringify(state));
+  const controller = createTailnetController({
+    secretResolver: { resolve: () => "test" },
+    exec: async () => ({ stdout: "100.64.0.5" }),
+    httpClient: {
+      async request({ url }) {
+        const pathname = new URL(url).pathname;
+        const body = pathname.endsWith("/split-dns") ? {}
+          : pathname.endsWith("/nameservers") ? { dns: ["100.64.0.5"] }
+          : { magicDNS: true };
+        return { status: 200, body: JSON.stringify(body) };
+      }
+    }
+  });
+  const technitium = createTechnitiumAdapter();
+  const caddy = createCaddyAdapter();
+
+  const result = await runCli(
+    ["domain", "change", "bunny.home.arpa", "--project-dir", "/projects/bunnyhome"],
+    {
+      filesystem,
+      runtime: proxmoxRootRuntime(),
+      proxmox: createProxmoxAdapter(),
+      secretStore: { has: () => true },
+      providerAdapters: { technitium, caddy, tailscale: { configureTailnet: controller.configure } }
+    }
+  );
+
+  assert.equal(result.domain, "bunny.home.arpa");
+  assert.match(filesystem.read(configPath), /baseLocalDomain: bunny\.home\.arpa/);
+  assert.equal(technitium.publishCalls.at(-1)?.hostname, "dns.bunny.home.arpa");
+  assert.equal(caddy.publishCalls.at(-1)?.hostname, "dns.bunny.home.arpa");
+  assert.deepEqual(JSON.parse(filesystem.read(statePath)).tailnetDnsSnapshot, snapshot);
+  assert.match(result.stdout, /Warning: This tailnet does not report its DNS override setting/);
+  assert.match(result.warnings[0], /could not verify/);
 });
 
 test("nomina domain change rejects an invalid domain", async () => {

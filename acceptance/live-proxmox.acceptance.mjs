@@ -14,8 +14,8 @@
 // See docs/live-proxmox-acceptance.md for the full environment reference.
 //
 // Safety rules this file holds itself to:
-//   - It only ever destroys LXCs whose vmid it read back out of the project's
-//     own state file. A pre-existing container is never a teardown target.
+//   - It destroys project LXCs and failed-provisioning orphans at the reserved
+//     test IPs with the expected hostname. Pre-existing VMIDs are never targets.
 //   - It seeds one unmanaged DNS record and one unmanaged proxy route through
 //     each provider's own interface, then asserts both survived the run.
 //   - It never prints a resolved connection secret.
@@ -27,10 +27,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { createHash } from "node:crypto";
 
 import { runCli } from "../src/cli.js";
 import { loadProject } from "../src/config.js";
-import { createHttpClient, createProductionAdapters } from "../src/adapter-runtime.js";
+import { createCommandRunner, createHttpClient, createLocalSecretResolver, createLocalSecretStore, createProductionAdapters } from "../src/adapter-runtime.js";
 
 const REQUIRED = [
   "NOMINA_ACCEPTANCE_STORAGE",
@@ -74,6 +75,15 @@ const unmanagedRouteHost = `operator.${domain}`;
 // changes it. NominaConnect authenticates with whatever is in the secret
 // store; it never sets the password itself.
 const dnsPassword = process.env.NOMINA_ACCEPTANCE_DNS_PASSWORD ?? "admin";
+// A fresh Technitium LXC cannot resolve through itself before its DNS service
+// is installed. Some lab gateways also do not provide DNS, so allow the suite
+// to set an explicit bootstrap resolver for that first container only.
+const technitiumNameserver = (process.env.NOMINA_ACCEPTANCE_TECHNITIUM_NAMESERVER ?? "").trim();
+// Restricted labs (this one included) may block direct root-server DNS while
+// allowing public recursors. When set, the suite points the fresh Technitium
+// at these forwarders through its own API before any downstream LXC needs
+// managed DNS. Unset by default: no behavior change on open networks.
+const dnsForwarders = (process.env.NOMINA_ACCEPTANCE_FORWARDERS ?? "").trim();
 
 const filesystem = {
   exists: fs.existsSync,
@@ -99,6 +109,15 @@ const prompts = {
       return dnsPassword;
     }
     if (/tailscale|netbird/i.test(question)) {
+      // The tailnet admin API token (tailnet DNS/nameserver administration)
+      // is a different credential from the enrollment auth key. An operator
+      // mints both in the admin console; the suite keeps them in separate
+      // variables so a test can never confuse one for the other.
+      if (/admin/i.test(question)) {
+        const token = process.env.NOMINA_ACCEPTANCE_TAILSCALE_API_TOKEN;
+        assert.ok(token, "a VPN acceptance run needs NOMINA_ACCEPTANCE_TAILSCALE_API_TOKEN for the admin question");
+        return token;
+      }
       const key = process.env.NOMINA_ACCEPTANCE_VPN_KEY;
       assert.ok(key, "a VPN acceptance run needs NOMINA_ACCEPTANCE_VPN_KEY");
       return key;
@@ -111,20 +130,60 @@ const prompts = {
 
 test("live Proxmox acceptance", { skip, timeout: 45 * 60 * 1000 }, async (t) => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomina-acceptance-"));
-  const production = createProductionAdapters();
+  const secretsDirectory = path.join(projectDir, "credentials", "secrets");
+  const production = createProductionAdapters({
+    secretResolver: createLocalSecretResolver({ secretsDirectory }),
+    secretStore: createLocalSecretStore({ secretsDirectory })
+  });
+  const commandRunner = createCommandRunner();
   const adapters = { filesystem, cwd: projectDir, runtime, ...production, prompts };
   const cli = (argumentsList) => runCli([...argumentsList, "--project-dir", projectDir], adapters);
 
   const project = () => loadProject(filesystem, projectDir);
   const platformId = (key) => project().config.managedInventory.platform[key]?.id;
   const referenceFor = (key) => project().state.providerReferences[platformId(key)];
-  const createdVmids = () => Object.values(project().state.providerReferences ?? {})
-    .map((reference) => reference?.vmid)
-    .filter((vmid) => vmid !== undefined);
+  const createdVmids = () => {
+    if (!filesystem.exists(path.join(projectDir, "nomina.yaml"))) return [];
+    return Object.values(project().state.providerReferences ?? {})
+      .map((reference) => reference?.vmid)
+      .filter((vmid) => vmid !== undefined);
+  };
+  const initialInventory = await commandRunner.run({ binary: "/usr/sbin/pct", args: ["list"] });
+  const initialVmids = new Set(initialInventory.stdout.split("\n").slice(1)
+    .map((line) => line.trim().split(/\s+/)[0])
+    .filter((vmid) => /^\d+$/.test(vmid)));
+  const secretDigestBefore = secretDigest("/var/lib/nominaconnect/secrets");
+  const tailnetDnsBefore = vpn === "tailscale" ? await tailnetDnsSettings() : undefined;
+  const testServicesByIp = new Map([
+    [process.env.NOMINA_ACCEPTANCE_DNS_IP, "technitium"],
+    [process.env.NOMINA_ACCEPTANCE_PROXY_IP, proxy],
+    ...(ca === "step-ca" ? [[process.env.NOMINA_ACCEPTANCE_CA_IP, "step-ca"]] : []),
+    ...(vpn !== "none" ? [[process.env.NOMINA_ACCEPTANCE_VPN_IP, vpn]] : [])
+  ].filter(([ip]) => typeof ip === "string" && ip !== ""));
+  const initiallyAvailableTestIps = new Set();
 
-  // Teardown destroys only what this run recorded in its own state file.
+  // A provider setup can fail after pct create but before its VMID is saved to
+  // project state. Clean up a new test LXC by reserved IP and expected hostname
+  // as well, but never a VMID that existed before this suite started.
   t.after(async () => {
-    for (const vmid of createdVmids()) {
+    // The public uninstall restores tailnet DNS before destroying its gateway.
+    // Its configured credential store is isolated from retained installations.
+    if (filesystem.exists(path.join(projectDir, "nomina.yaml"))) {
+      await cli(["uninstall", "--yes"]);
+    }
+    const vmids = new Set(createdVmids());
+    for (const [ip, expectedHostname] of testServicesByIp) {
+      if (!initiallyAvailableTestIps.has(ip)) continue;
+      try {
+        const availability = await production.proxmox.checkIpAvailability(ip);
+        if (availability.status !== "known-collision") continue;
+        const vmid = String(availability.conflictWith ?? "").match(/(?:lxc\/)?(\d+)/)?.[1];
+        if (vmid === undefined || initialVmids.has(vmid)) continue;
+        const observed = await production.proxmox.inspectLxc(Number(vmid));
+        if (observed.ip === ip && observed.hostname === expectedHostname) vmids.add(Number(vmid));
+      } catch {}
+    }
+    for (const vmid of vmids) {
       try {
         await production.proxmox.stopLxc(vmid);
       } catch {}
@@ -132,8 +191,19 @@ test("live Proxmox acceptance", { skip, timeout: 45 * 60 * 1000 }, async (t) => 
         await production.proxmox.destroyLxc(vmid);
       } catch {}
     }
+    assert.equal(secretDigest("/var/lib/nominaconnect/secrets"), secretDigestBefore,
+      "a disposable run must preserve the retained installation's credentials");
+    if (tailnetDnsBefore !== undefined) assert.deepEqual(await tailnetDnsSettings(),tailnetDnsBefore,
+      "uninstall must restore the exact previous live tailnet DNS settings");
+    const remaining = await commandRunner.run({binary:"/usr/sbin/pct",args:["list"]});
+    for (const vmid of initialVmids) assert.match(remaining.stdout, new RegExp(`^${vmid}\\s`, "m"));
     fs.rmSync(projectDir, { recursive: true, force: true });
   });
+
+  for (const ip of testServicesByIp.keys()) {
+    const availability = await production.proxmox.checkIpAvailability(ip);
+    if (availability.status === "available") initiallyAvailableTestIps.add(ip);
+  }
 
   await t.test("initialises a project against this node", async () => {
     await cli([
@@ -156,15 +226,21 @@ test("live Proxmox acceptance", { skip, timeout: 45 * 60 * 1000 }, async (t) => 
   let dnsVmid;
 
   await t.test("creates a real unprivileged Debian LXC for Technitium", async () => {
-    await cli(["service", "add", "technitium", "--ip", process.env.NOMINA_ACCEPTANCE_DNS_IP, ...templateFlags()]);
+    const dnsFlags = technitiumNameserver === "" ? [] : ["--nameserver", technitiumNameserver];
+    await cli(["service", "add", "technitium", "--ip", process.env.NOMINA_ACCEPTANCE_DNS_IP, ...templateFlags(), ...dnsFlags]);
 
     dnsVmid = referenceFor("dns").vmid;
     assert.ok(Number.isFinite(dnsVmid), "the created LXC id was recorded in local state");
 
     const observed = await production.proxmox.inspectLxc(dnsVmid);
+    const config = await commandRunner.run({binary:"/usr/sbin/pct",args:["config",String(dnsVmid)]});
+    assert.match(config.stdout, /^onboot: 1$/m, "a managed service must start after a host reboot");
     assert.equal(observed.ip, process.env.NOMINA_ACCEPTANCE_DNS_IP, "the LXC has the requested static IP");
     assert.equal(observed.unprivileged, true, "service LXCs stay unprivileged (ADR-0030)");
     assert.equal(observed.bridge, process.env.NOMINA_ACCEPTANCE_BRIDGE);
+    if (technitiumNameserver !== "") {
+      assert.equal(observed.nameserver, technitiumNameserver, "the explicitly requested bootstrap resolver is installed");
+    }
   });
 
   await t.test("blocks a requested IP that is already in use", async () => {
@@ -175,6 +251,25 @@ test("live Proxmox acceptance", { skip, timeout: 45 * 60 * 1000 }, async (t) => 
       () => cli(["service", "add", proxy, "--ip", process.env.NOMINA_ACCEPTANCE_DNS_IP, ...templateFlags()]),
       /already in use/i,
       "a known collision blocks provisioning instead of creating a second LXC"
+    );
+  });
+
+  await t.test("points Technitium at lab forwarders when configured", async () => {
+    if (dnsForwarders === "") {
+      return;
+    }
+    // Provider-native, like the unmanaged seeds below: an operator on a
+    // root-blocking network would configure forwarders, so the suite adopts
+    // the same explicit lab setting instead of failing downstream installs.
+    const token = await technitiumSession(referenceFor("dns").ip);
+    await technitiumCall(referenceFor("dns").ip, "/api/settings/set", {
+      forwarders: dnsForwarders
+    }, token);
+    const settings = await technitiumCall(referenceFor("dns").ip, "/api/settings/get", {}, token);
+    const active = settings.response?.forwarders ?? [];
+    assert.ok(
+      active.some((entry) => dnsForwarders.split(",").map((part) => part.trim()).includes(String(entry))),
+      `forwarders did not take effect (want ${dnsForwarders}, have ${JSON.stringify(active)})`
     );
   });
 
@@ -261,13 +356,130 @@ test("live Proxmox acceptance", { skip, timeout: 45 * 60 * 1000 }, async (t) => 
         "an enrollment credential must never reach command output"
       );
     });
+    if (vpn === "tailscale") {
+      if (referenceFor("vpn") === undefined) return;
+      await t.test("tailnet opt-out blocks the gateway even with forged forwarding headers", {skip: proxy !== "caddy"}, async () => {
+        const gateway = referenceFor("vpn");
+        const proxyRef = referenceFor("reverseProxy");
+        let caPem;
+        if (ca === "step-ca") {
+          caPem = (await production.proxmox.pctExec(referenceFor("certificateAuthority").vmid,
+            {binary:"/bin/cat",args:["/var/lib/stepca/certs/root_ca.crt"]})).stdout;
+        } else {
+          const certs = await adminClient.request({method:"GET",url:`http://${proxyRef.ip}:2019/pki/ca/local/certificates`,headers:{}});
+          assert.equal(certs.status,200);
+          caPem = certs.body;
+        }
+        assert.match(caPem,/BEGIN CERTIFICATE/);
+        const helper = path.join(projectDir,"https-probe.py");
+        fs.writeFileSync(helper, HTTPS_PROBE);
+        await commandRunner.run({binary:"/usr/sbin/pct",args:["push",String(gateway.vmid),helper,"/tmp/nomina-https-probe.py"]});
+        const probe = async (fromGateway, tls = true) => {
+          const request = {ip:proxyRef.ip,host:exposedHostname,ca:caPem,tls};
+          const command = {binary:"/usr/bin/python3",args:[fromGateway?"/tmp/nomina-https-probe.py":helper],stdin:JSON.stringify(request)};
+          const result = fromGateway ? await production.proxmox.pctExec(gateway.vmid, command) : await commandRunner.run(command);
+          return JSON.parse(result.stdout);
+        };
+        const flags = ["exposure","publish","--name","photos","--hostname",exposedHostname,
+          "--backend-ip",backendIp,"--backend-port",backendPort];
+        const capture = async (phase) => {
+          const evidenceDir = process.env.NOMINA_ACCEPTANCE_EVIDENCE_DIR;
+          if (!evidenceDir) return;
+          fs.mkdirSync(evidenceDir, { recursive: true, mode: 0o700 });
+          const evidence = { phase, at: new Date().toISOString(), proxyVmid: proxyRef.vmid };
+          for (const [name, command] of [
+            ["sockets", { binary: "/usr/bin/ss", args: ["-lntp"] }],
+            ["service", { binary: "/bin/systemctl", args: ["status", "caddy", "--no-pager"] }],
+            ["journal", { binary: "/bin/journalctl", args: ["-u", "caddy", "-n", "80", "--no-pager"] }]
+          ]) {
+            try { evidence[name] = (await production.proxmox.pctExec(proxyRef.vmid, command)).stdout; }
+            catch (error) { evidence[name] = error.message; }
+          }
+          try { evidence.config = (await adminClient.request({ method: "GET", url: `http://${proxyRef.ip}:2019/config/` })).body; }
+          catch (error) { evidence.config = error.message; }
+          fs.writeFileSync(path.join(evidenceDir, `optout-${phase}.json`), JSON.stringify(evidence), { mode: 0o600 });
+        };
+        await capture("enabled");
+        assert.equal((await probe(true)).status,200,"gateway HTTPS must work before opting out");
+        await cli([...flags,"--tailnet","false"]);
+        await capture("disabled");
+        try {
+          assert.equal((await probe(true)).status,404,"gateway access must be denied independently of X-Forwarded-For");
+        } catch (error) {
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          await capture("disabled-settled");
+          try { await probe(true); } catch {}
+          throw error;
+        }
+        assert.equal((await probe(false)).status,200,"the same exposure must still work on the LAN");
+        await cli([...flags,"--tailnet","true"]);
+        assert.equal((await probe(true)).status,200,"reenabling tailnet access must restore the route");
+        await cli(["caddy", "redirect", "on"]);
+        await cli([...flags,"--tailnet","false"]);
+        assert.equal((await probe(true, false)).status,404,"gateway HTTP must not bypass the opt-out rule");
+        assert.equal((await probe(false, false)).status,308,"LAN HTTP must still redirect to HTTPS");
+        await cli([...flags,"--tailnet","true"]);
+        assert.equal((await probe(true)).status,200,"gateway HTTPS must recover after the redirect check");
+      });
+      await t.test("gateway firewall closes IPv6 and advertises no LAN subnet", async () => {
+        const gateway = referenceFor("vpn");
+        const exec = (binary,args) => production.proxmox.pctExec(gateway.vmid,{binary,args});
+        await exec("/usr/sbin/ip6tables",["-C","INPUT","-i","tailscale0","-j","NOMINA_TAILNET_INPUT"]);
+        await exec("/usr/sbin/ip6tables",["-C","NOMINA_TAILNET_INPUT","-j","REJECT"]);
+        await exec("/usr/sbin/ip6tables",["-C","FORWARD","-i","tailscale0","-j","NOMINA_TAILNET_FORWARD"]);
+        await exec("/usr/sbin/iptables",["-t","raw","-C","PREROUTING","-i","tailscale0","-j","NOMINA_TAILNET_INGRESS"]);
+        await exec("/usr/sbin/iptables",["-t","raw","-C","NOMINA_TAILNET_INGRESS","-j","DROP"]);
+        await exec("/usr/sbin/ip6tables",["-t","raw","-C","PREROUTING","-i","tailscale0","-j","NOMINA_TAILNET_INGRESS"]);
+        await exec("/usr/sbin/ip6tables",["-t","raw","-C","NOMINA_TAILNET_INGRESS","-j","DROP"]);
+        const prefs = JSON.parse((await exec("/usr/bin/tailscale",["debug","prefs"])).stdout);
+        assert.deepEqual(prefs.AdvertiseRoutes??[],[]);
+        const dependencies = await exec("/bin/systemctl",["show","tailscaled","-p","Requires"]);
+        assert.match(dependencies.stdout,/nomina-tailnet-firewall.service/);
+      });
+    }
   }
 });
 
-function templateFlags() {
+const HTTPS_PROBE = `import json, socket, ssl, sys
+r=json.load(sys.stdin)
+ctx=ssl.create_default_context(cadata=r['ca'])
+with socket.create_connection((r['ip'],443 if r.get('tls',True) else 80),timeout=10) as peer:
+ with (ctx.wrap_socket(peer,server_hostname=r['host']) if r.get('tls',True) else peer) as tls:
+  tls.sendall(('GET / HTTP/1.1\\r\\nHost: '+r['host']+'\\r\\nX-Forwarded-For: 192.168.1.3\\r\\nConnection: close\\r\\n\\r\\n').encode())
+  data=b''
+  while b'\\r\\n' not in data: data+=tls.recv(4096)
+  print(json.dumps({'status':int(data.split(b' ')[1]),'tlsVerified':r.get('tls',True)}))
+`;
+
+function secretDigest(directory) {
+  if (!fs.existsSync(directory)) return "absent";
+  const entries = fs.readdirSync(directory,{withFileTypes:true}).sort((a,b)=>a.name.localeCompare(b.name))
+    .map(entry=>{const target=path.join(directory,entry.name);return entry.isDirectory()?secretDigest(target):
+      `${entry.name}:${fs.readFileSync(target).toString('base64')}:${fs.statSync(target).mode}`;}).join("|");
+  return createHash('sha256').update(entries).digest('hex');
+}
+
+async function tailnetDnsSettings() {
+  const token = requireEnv("NOMINA_ACCEPTANCE_TAILSCALE_API_TOKEN");
+  const result = {};
+  for (const field of ["nameservers","preferences"]) {
+    const response = await fetch(`https://api.tailscale.com/api/v2/tailnet/-/dns/${field}`,{
+      headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(15000)
+    });
+    assert.equal(response.status,200,`tailnet DNS ${field} read failed`);
+    result[field] = await response.json();
+  }
+  return result;
+}
+
+  function templateFlags() {
   const flags = ["--template", process.env.NOMINA_ACCEPTANCE_TEMPLATE];
   if (process.env.NOMINA_ACCEPTANCE_GATEWAY) {
     flags.push("--gateway", process.env.NOMINA_ACCEPTANCE_GATEWAY);
+  }
+  for (const [variable, flag] of [["NOMINA_ACCEPTANCE_CPUS", "--cpus"],
+    ["NOMINA_ACCEPTANCE_MEMORY_MB", "--memory"], ["NOMINA_ACCEPTANCE_DISK_GB", "--disk"]]) {
+    if (process.env[variable]) flags.push(flag, process.env[variable]);
   }
   return flags;
 }
@@ -367,7 +579,7 @@ async function seedUnmanagedRoute(production, proxyReference) {
     headers: {}
   });
   assert.ok(serverProbe.status < 500, `could not read the Caddy config: ${serverProbe.status} ${serverProbe.body}`);
-  if (serverProbe.status === 404) {
+  if (serverProbe.status === 404 || serverProbe.body.trim() === "null") {
     const created = await adminClient.request({
       method: "PUT",
       url: `${adminBase}/config/apps/http/servers/srv_https`,
@@ -376,8 +588,8 @@ async function seedUnmanagedRoute(production, proxyReference) {
     });
     assert.ok(created.status >= 200 && created.status < 300, `could not create the Caddy srv_https server: ${created.status} ${created.body}`);
   }
-  // Routes are replaced as a whole array (PUT), the same way the product
-  // publishes: Caddy rejects POST traversal for a fresh server's routes.
+  // Replace existing arrays with PATCH, like the product adapter. PUT only
+  // creates a missing map value and rejects an existing routes field with 409.
   const unmanagedRoute = {
     "@id": unmanagedRouteHost,
     match: [{ host: [unmanagedRouteHost] }],
@@ -399,12 +611,19 @@ async function seedUnmanagedRoute(production, proxyReference) {
     `could not read Caddy routes: ${routesProbe.status} ${routesProbe.body}`
   );
   const existingRoutes = noRoutesYet || routesProbe.status === 404 ? [] : (JSON.parse(routesProbe.body || "null") ?? []);
-  const seeded = await adminClient.request({
-    method: "PUT",
+  let seeded = await adminClient.request({
+    method: "PATCH",
     url: `${adminBase}/config/apps/http/servers/srv_https/routes`,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify([...existingRoutes, unmanagedRoute])
   });
+  if (seeded.status === 404) {
+    seeded = await adminClient.request({
+      method: "PUT", url: `${adminBase}/config/apps/http/servers/srv_https/routes`,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify([...existingRoutes, unmanagedRoute])
+    });
+  }
   assert.ok(seeded.status >= 200 && seeded.status < 300, `could not seed an unmanaged Caddy route: ${seeded.status} ${seeded.body}`);
 }
 

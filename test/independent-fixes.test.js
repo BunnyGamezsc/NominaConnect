@@ -92,7 +92,8 @@ class FakeCaddyAdmin {
       if (method === "GET") {
         return { status: 200, headers: {}, body: JSON.stringify(this.#traverse(segments)) };
       }
-      if (method === "PUT") {
+      if (method === "PUT" || method === "PATCH") {
+        if (method === "PATCH") this.#traverse(segments);
         const parsed = body === undefined || body === "" ? undefined : JSON.parse(body);
         if (segments.length === 0) {
           this.config = parsed ?? {};

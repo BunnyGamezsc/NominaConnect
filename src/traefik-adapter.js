@@ -69,7 +69,7 @@ export function createTraefikAdapter({ httpClient, secretResolver, exec, sleep =
       ]);
       const resources = routers
         .filter((router) => !isRedirectRouter(router) && hostForRouter(router) !== undefined)
-        .map((router) => toManagedResource(router, services, middlewares));
+        .map((router) => toManagedResource(router, services, middlewares, request.tailnetGatewayIp));
       return { resources };
     },
     async adopt(request) {
@@ -239,7 +239,9 @@ export function createTraefikAdapter({ httpClient, secretResolver, exec, sleep =
         httpRedirect: request.httpRedirect === true,
         certResolver: trust.resolver,
         redirectTo,
-        redirectCode
+        redirectCode,
+        tailnet: request.tailnet,
+        tailnetGatewayIp: request.tailnetGatewayIp
       });
       await runInLxc(writeFragmentCommand(hostname, fragment));
 
@@ -321,6 +323,20 @@ export function createTraefikAdapter({ httpClient, secretResolver, exec, sleep =
           https: "unreachable",
           reason: `Traefik has no router for ${request.hostname}.`
         });
+      }
+      if (request.tailnetGatewayIp !== undefined) {
+        const denied = `!ClientIP(\`${request.tailnetGatewayIp}\`)`;
+        if (Boolean(router.rule?.includes(denied)) !== (request.tailnet === false)) {
+          return exposureHealth({ https: "reachable", reason: "Traefik's tailnet access rule does not match this exposure." });
+        }
+        if (request.httpRedirect === true) {
+          const httpRouter = routers.find((candidate) =>
+            hostForRouter(candidate) === request.hostname && candidate.entryPoints?.includes("web"));
+          if (httpRouter === undefined ||
+              Boolean(httpRouter.rule?.includes(denied)) !== (request.tailnet === false)) {
+            return exposureHealth({ https: "reachable", reason: "Traefik's HTTP tailnet access rule does not match this exposure." });
+          }
+        }
       }
       const tls = tlsSummaryFor(router, request.caStrategy);
       const base = { https: "reachable", tls: tls.trusted ? "valid" : "untrusted", issuer: tls.issuer };
@@ -513,8 +529,12 @@ export function routerNameFor(hostname) {
 
 // A managed exposure is one file per hostname, so a publish or removal can
 // never reach configuration that another fragment owns.
-export function buildFragment({ hostname, backendIp = undefined, backendPort = undefined, backendTls = false, httpRedirect = false, certResolver = undefined, redirectTo = undefined, redirectCode = 308 }) {
+export function buildFragment({ hostname, backendIp = undefined, backendPort = undefined, backendTls = false, httpRedirect = false, certResolver = undefined, redirectTo = undefined, redirectCode = 308, tailnet = true, tailnetGatewayIp = undefined }) {
   const name = routerNameFor(hostname);
+  if (tailnet === false && tailnetGatewayIp === undefined) {
+    throw new Error(`Cannot protect ${hostname} from tailnet access without the Tailscale gateway IP.`);
+  }
+  const hostRule = `Host(\`${hostname}\`)${tailnet === false ? ` && !ClientIP(\`${tailnetGatewayIp}\`)` : ""}`;
   const normalizedRedirect = redirectTo !== undefined && redirectTo !== ""
     ? normalizeRedirectTarget(redirectTo)
     : undefined;
@@ -534,7 +554,7 @@ export function buildFragment({ hostname, backendIp = undefined, backendPort = u
       "http:",
       "  routers:",
       `    ${name}:`,
-      `      rule: "Host(\`${hostname}\`)"`,
+      `      rule: "${hostRule}"`,
       "      entryPoints:",
       "        - websecure",
       `      service: noop@internal`,
@@ -544,7 +564,7 @@ export function buildFragment({ hostname, backendIp = undefined, backendPort = u
       "      middlewares:",
       `        - ${middleware}`,
       `    ${name}${REDIRECT_SUFFIX}:`,
-      `      rule: "Host(\`${hostname}\`)"`,
+      `      rule: "${hostRule}"`,
       "      entryPoints:",
       "        - web",
       `      service: noop@internal`,
@@ -565,7 +585,7 @@ export function buildFragment({ hostname, backendIp = undefined, backendPort = u
     "http:",
     "  routers:",
     `    ${name}:`,
-    `      rule: "Host(\`${hostname}\`)"`,
+    `      rule: "${hostRule}"`,
     "      entryPoints:",
     "        - websecure",
     `      service: ${name}`,
@@ -581,7 +601,7 @@ export function buildFragment({ hostname, backendIp = undefined, backendPort = u
   if (httpRedirect) {
     lines.push(
       `    ${name}${REDIRECT_SUFFIX}:`,
-      `      rule: "Host(\`${hostname}\`)"`,
+      `      rule: "${hostRule}"`,
       "      entryPoints:",
       "        - web",
       `      service: ${name}`,
@@ -1048,7 +1068,7 @@ function locatorFor(hostname) {
   return { router: routerNameFor(hostname), fragmentPath: fragmentPathFor(hostname) };
 }
 
-function toManagedResource(router, services, middlewares = []) {
+function toManagedResource(router, services, middlewares = [], tailnetGatewayIp = undefined) {
   const host = hostForRouter(router);
   const service = serviceForRouter(router, services);
   const middleware = middlewareForRouter(router, middlewares);
@@ -1058,6 +1078,7 @@ function toManagedResource(router, services, middlewares = []) {
   // cannot tell a configured trust anchor from Traefik's generated one, and
   // inspection feeds adoption (ADR-0005), so a guess would be persisted.
   const tls = tlsSummaryFor(router);
+  const tailnet = observedTailnetAccess(router, host, tailnetGatewayIp);
   if (redirect !== undefined) {
     return {
       id: host,
@@ -1074,6 +1095,7 @@ function toManagedResource(router, services, middlewares = []) {
       redirect,
       redirectTo: redirect.to,
       redirectCode: redirect.code,
+      ...(tailnet === undefined ? {} : { tailnet }),
       rData: { redirect, tls }
     };
   }
@@ -1098,8 +1120,16 @@ function toManagedResource(router, services, middlewares = []) {
     backendIp,
     backendPort,
     ...(backendIp !== undefined && backendPort !== undefined ? { backend: { ip: backendIp, port: backendPort } } : {}),
+    ...(tailnet === undefined ? {} : { tailnet }),
     rData: { url, tls }
   };
+}
+
+function observedTailnetAccess(router, hostname, gatewayIp) {
+  if (gatewayIp === undefined) return undefined;
+  const hostRule = `Host(\`${hostname}\`)`;
+  if (router.rule === hostRule) return true;
+  return router.rule === `${hostRule} && !ClientIP(\`${gatewayIp}\`)` ? false : undefined;
 }
 
 // One shape for every outcome, so a caller reading `tls` or `reason` never has

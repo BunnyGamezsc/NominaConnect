@@ -226,6 +226,94 @@ test("nomina service add tailscale provisions an unprivileged Debian LXC with de
   assert.deepEqual(result.inspection.unmanaged.length, 1);
 });
 
+test("production-style Tailscale provisioning configures gateway DNS after enrollment", async () => {
+  const filesystem = new FakeFilesystem();
+  seedProject(filesystem);
+  const statePath = "/projects/bunnyhome/.nomina/state.json";
+  const state = JSON.parse(filesystem.read(statePath));
+  state.providerReferences.nc_dns_test = { vmid: 120, ip: "10.0.0.53" };
+  state.providerReferences.nc_proxy_test = { vmid: 121, ip: "10.0.0.54" };
+  filesystem.writeFile(statePath, JSON.stringify(state));
+  const proxmox = createProxmoxAdapter();
+  const configured = [];
+  const tailscale = {
+    ...createTailscaleAdapter({ resources: [
+      { id: "node-self", self: true, locator: { id: "node-self" }, tailscaleIps: ["100.64.0.5"] }
+    ] }),
+    async configureTailnet(request) {
+      configured.push(request);
+      await request.saveDnsSnapshot({ nameservers: ["9.9.9.9"], overrideLocalDNS: false }, "100.64.0.5");
+    },
+    restoreTailnetDns(request) { configured.push({ restore: request }); }
+  };
+  await runCli(
+    ["service", "add", "tailscale", "--project-dir", "/projects/bunnyhome", "--ip", "10.0.0.60"],
+    { filesystem, runtime: proxmoxRootRuntime(), proxmox, providerAdapters: { tailscale },
+      secretStore: { has: () => true } }
+  );
+  assert.equal(configured.length, 1);
+  const { saveDnsSnapshot, ...configuredRequest } = configured[0];
+  assert.equal(typeof saveDnsSnapshot, "function");
+  assert.deepEqual(configuredRequest, {
+    vmid: 130, dnsIp: "10.0.0.53", proxyIp: "10.0.0.54", zone: "bunnyhome.test",
+    adminSecretReference: "nominaconnect/tailscale-admin/nc_vpn_test"
+  });
+  const saved = JSON.parse(filesystem.read(statePath));
+  assert.deepEqual(saved.tailnetDnsSnapshot, { nameservers: ["9.9.9.9"], overrideLocalDNS: false });
+  await runCli(
+    ["service", "remove", "tailscale", "--project-dir", "/projects/bunnyhome"],
+    { filesystem, runtime: proxmoxRootRuntime(), proxmox, providerAdapters: { tailscale },
+      secretStore: { has: () => true } }
+  );
+  assert.deepEqual(configured[1].restore.snapshot, saved.tailnetDnsSnapshot);
+  assert.equal(JSON.parse(filesystem.read(statePath)).tailnetDnsSnapshot, undefined);
+  await runCli(
+    ["service", "destroy", "tailscale", "--yes", "--project-dir", "/projects/bunnyhome"],
+    { filesystem, runtime: proxmoxRootRuntime(), proxmox, providerAdapters: { tailscale },
+      secretStore: { has: () => true } }
+  );
+  assert.equal(configured.length, 2);
+});
+
+test("destroying Tailscale through the vpn platform alias restores DNS before clearing its snapshot", async () => {
+  const filesystem = new FakeFilesystem();
+  const statePath = seedProvisionedTailnet(filesystem);
+  const state = JSON.parse(filesystem.read(statePath));
+  state.providerReferences.nc_vpn_test = { vmid: 130, ip: "10.0.0.60" };
+  state.tailnetDnsSnapshot = { nameservers: ["192.0.2.53"], overrideLocalDNS: false };
+  filesystem.writeFile(statePath, JSON.stringify(state));
+  const restoreCalls = [];
+  const proxmox = createProxmoxAdapter();
+
+  await runCli(
+    ["service", "destroy", "vpn", "--yes", "--project-dir", "/projects/bunnyhome"],
+    {
+      filesystem,
+      runtime: proxmoxRootRuntime(),
+      proxmox,
+      providerAdapters: { tailscale: { restoreTailnetDns: (request) => restoreCalls.push(request) } }
+    }
+  );
+
+  assert.equal(restoreCalls.length, 1);
+  assert.equal(restoreCalls[0].vmid, 130);
+  assert.deepEqual(restoreCalls[0].snapshot, state.tailnetDnsSnapshot);
+  assert.equal(JSON.parse(filesystem.read(statePath)).tailnetDnsSnapshot, undefined);
+});
+
+test("Tailscale does not create an LXC when DNS or proxy is not provisioned", async () => {
+  const filesystem = new FakeFilesystem();
+  seedProject(filesystem);
+  const proxmox = createProxmoxAdapter();
+  const tailscale = { ...createTailscaleAdapter(), configureTailnet() {} };
+  await assert.rejects(
+    () => runCli(["service", "add", "tailscale", "--project-dir", "/projects/bunnyhome", "--ip", "10.0.0.60"],
+      { filesystem, runtime: proxmoxRootRuntime(), proxmox, providerAdapters: { tailscale } }),
+    /Provision Technitium and Caddy or Traefik/
+  );
+  assert.equal(proxmox.created.length, 0);
+});
+
 test("nomina service add netbird provisions an unprivileged Debian LXC with defaults", async () => {
   const filesystem = new FakeFilesystem();
   seedNetbirdProject(filesystem);
@@ -612,4 +700,176 @@ test("nomina init with VPN provider selects the VPN in the managed inventory", a
   const config = filesystem.read("/projects/home/nomina.yaml");
   assert.match(config, /service: tailscale/);
   assert.ok(!config.includes("vpn: null"));
+});
+
+function seedProvisionedTailnet(filesystem) {
+  seedProject(filesystem);
+  const statePath = "/projects/bunnyhome/.nomina/state.json";
+  const state = JSON.parse(filesystem.read(statePath));
+  state.providerReferences.nc_dns_test = { vmid: 120, ip: "10.0.0.53" };
+  state.providerReferences.nc_proxy_test = { vmid: 121, ip: "10.0.0.54" };
+  filesystem.writeFile(statePath, JSON.stringify(state));
+  return statePath;
+}
+
+const SELF_ENROLLED = [{ id: "node-self", self: true, locator: { id: "node-self" }, tailscaleIps: ["100.64.0.5"] }];
+
+test("a failed tailnet setup keeps the enrolled LXC recorded so it can be taken back", async () => {
+  const filesystem = new FakeFilesystem();
+  const statePath = seedProvisionedTailnet(filesystem);
+  const proxmox = createProxmoxAdapter();
+  const configured = [];
+  const tailscale = {
+    ...createTailscaleAdapter({ resources: SELF_ENROLLED }),
+    async configureTailnet(request) {
+      configured.push(request);
+      throw new Error("Tailscale API returned 503");
+    },
+    restoreTailnetDns(request) { configured.push({ restore: request }); }
+  };
+  const adapters = { filesystem, runtime: proxmoxRootRuntime(), proxmox, providerAdapters: { tailscale },
+    secretStore: { has: () => true } };
+
+  await assert.rejects(
+    () => runCli(["service", "add", "tailscale", "--project-dir", "/projects/bunnyhome", "--ip", "10.0.0.60"], adapters),
+    /tailnet setup failed: Tailscale API returned 503[\s\S]*nomina service destroy tailscale --yes/
+  );
+  assert.equal(proxmox.created.length, 1);
+
+  const enrolledRef = JSON.parse(filesystem.read(statePath)).providerReferences.nc_vpn_test;
+  assert.equal(enrolledRef.vmid, 130);
+  assert.equal(enrolledRef.ip, "10.0.0.60",
+    "an enrolled LXC has to be recorded even when tailnet setup fails, or nothing can find it again");
+  assert.equal(JSON.parse(filesystem.read(statePath)).tailnetDnsSnapshot, undefined);
+
+  // The recovery loop the message promises: restore what DNS allows, then destroy.
+  await runCli(["service", "destroy", "tailscale", "--yes", "--project-dir", "/projects/bunnyhome"], adapters);
+  assert.equal(configured[1].restore.snapshot, undefined);
+  const after = JSON.parse(filesystem.read(statePath));
+  assert.equal(after.providerReferences.nc_vpn_test, undefined);
+  assert.equal(after.retainedServices?.nc_vpn_test, undefined);
+});
+
+test("a tailnet setup warning is reported to the operator", async () => {
+  const filesystem = new FakeFilesystem();
+  const statePath = seedProvisionedTailnet(filesystem);
+  const proxmox = createProxmoxAdapter();
+  const tailscale = {
+    ...createTailscaleAdapter({ resources: SELF_ENROLLED }),
+    async configureTailnet(request) {
+      await request.saveDnsSnapshot({ nameservers: ["9.9.9.9"], overrideLocalDNS: false }, "100.64.0.5",
+        { overrideUnsupported: true });
+      return {
+        nameserver: "100.64.0.5",
+        overrideLocalDNS: false,
+        warnings: ["This tailnet does not report its DNS override setting."]
+      };
+    }
+  };
+
+  const result = await runCli(
+    ["service", "add", "tailscale", "--project-dir", "/projects/bunnyhome", "--ip", "10.0.0.60"],
+    { filesystem, runtime: proxmoxRootRuntime(), proxmox, providerAdapters: { tailscale },
+      secretStore: { has: () => true } }
+  );
+
+  assert.match(result.stdout, /Warning: This tailnet does not report its DNS override setting\./);
+  assert.deepEqual(result.warnings, ["This tailnet does not report its DNS override setting."]);
+  assert.deepEqual(JSON.parse(filesystem.read(statePath)).tailnetDnsSnapshot,
+    { nameservers: ["9.9.9.9"], overrideLocalDNS: false });
+});
+
+
+function seedStaleTailnet(filesystem) {
+  const statePath = seedProvisionedTailnet(filesystem);
+  const state = JSON.parse(filesystem.read(statePath));
+  state.tailnetDnsSnapshot = { nameservers: ["192.168.1.1"], overrideLocalDNS: false };
+  filesystem.writeFile(statePath, JSON.stringify(state));
+  return {
+    statePath,
+    adapters: (tailscale) => ({
+      filesystem,
+      runtime: proxmoxRootRuntime(),
+      proxmox: createProxmoxAdapter({
+        ipAvailability: () => ({ status: "known-collision", conflictWith: "lxc/130" })
+      }),
+      providerAdapters: { tailscale },
+      secretStore: { has: () => true }
+    })
+  };
+}
+
+test("a failed gateway recheck leaves DNS recovery able to destroy the adopted LXC", async () => {
+  const filesystem = new FakeFilesystem();
+  const { adapters } = seedStaleTailnet(filesystem);
+  const snapshot = { nameservers: ["192.168.1.1"], overrideLocalDNS: false };
+  const restored = [];
+  const tailscale = {
+    ...createTailscaleAdapter({ resources: SELF_ENROLLED }),
+    async configureTailnet(request) {
+      await request.saveDnsSnapshot({ nameservers: ["100.64.0.5"], overrideLocalDNS: true }, "100.64.0.5");
+      throw new Error("Tailscale API returned 503 after DNS changed");
+    },
+    async restoreTailnetDns(request) { restored.push(request); }
+  };
+  const dependencies = adapters(tailscale);
+  await assert.rejects(() => runCli(
+    ["service", "recheck", "tailscale", "--project-dir", "/projects/bunnyhome", "--ip", "10.0.0.60"],
+    dependencies
+  ), /503 after DNS changed/);
+
+  await runCli(["service", "destroy", "tailscale", "--yes", "--project-dir", "/projects/bunnyhome"], dependencies);
+  assert.equal(restored[0]?.vmid, 130);
+  assert.deepEqual(restored[0]?.snapshot, snapshot);
+});
+
+test("rechecking a tailscale gateway keeps a snapshot its tailnet cannot hold the override for", async () => {
+  const filesystem = new FakeFilesystem();
+  const { statePath, adapters } = seedStaleTailnet(filesystem);
+  const tailscale = {
+    ...createTailscaleAdapter({ resources: SELF_ENROLLED }),
+    async configureTailnet(request) {
+      await request.saveDnsSnapshot({ nameservers: ["100.64.0.5"], overrideLocalDNS: false }, "100.64.0.5",
+        { overrideUnsupported: true });
+      return {
+        nameserver: "100.64.0.5",
+        overrideLocalDNS: false,
+        warnings: ["This tailnet does not report its DNS override setting."]
+      };
+    }
+  };
+
+  const result = await runCli(
+    ["service", "recheck", "tailscale", "--project-dir", "/projects/bunnyhome", "--ip", "10.0.0.60"],
+    adapters(tailscale)
+  );
+
+  assert.deepEqual(JSON.parse(filesystem.read(statePath)).tailnetDnsSnapshot,
+    { nameservers: ["192.168.1.1"], overrideLocalDNS: false },
+    "the resolver NominaConnect replaced is the one that has to survive a re-run");
+  assert.match(result.stdout, /^Warning: This tailnet does not report its DNS override setting\./);
+});
+
+test("rechecking still refuses a tailnet whose DNS changed outside NominaConnect", async () => {
+  const filesystem = new FakeFilesystem();
+  const { statePath, adapters } = seedStaleTailnet(filesystem);
+  const tailscale = {
+    ...createTailscaleAdapter({ resources: SELF_ENROLLED }),
+    async configureTailnet(request) {
+      // A tailnet that can report the flag but answers false: NominaConnect put
+      // it on and it is off again, which only an outside change explains.
+      await request.saveDnsSnapshot({ nameservers: ["100.64.0.5"], overrideLocalDNS: false }, "100.64.0.5",
+        { overrideUnsupported: false });
+    }
+  };
+
+  await assert.rejects(
+    () => runCli(
+      ["service", "recheck", "tailscale", "--project-dir", "/projects/bunnyhome", "--ip", "10.0.0.60"],
+      adapters(tailscale)
+    ),
+    /refusing to overwrite/
+  );
+  assert.deepEqual(JSON.parse(filesystem.read(statePath)).tailnetDnsSnapshot,
+    { nameservers: ["192.168.1.1"], overrideLocalDNS: false });
 });
