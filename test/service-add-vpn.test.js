@@ -773,6 +773,30 @@ function seedStaleTailnet(filesystem) {
   };
 }
 
+test("a failed gateway recheck leaves DNS recovery able to destroy the adopted LXC", async () => {
+  const filesystem = new FakeFilesystem();
+  const { adapters } = seedStaleTailnet(filesystem);
+  const snapshot = { nameservers: ["192.168.1.1"], overrideLocalDNS: false };
+  const restored = [];
+  const tailscale = {
+    ...createTailscaleAdapter({ resources: SELF_ENROLLED }),
+    async configureTailnet(request) {
+      await request.saveDnsSnapshot({ nameservers: ["100.64.0.5"], overrideLocalDNS: true }, "100.64.0.5");
+      throw new Error("Tailscale API returned 503 after DNS changed");
+    },
+    async restoreTailnetDns(request) { restored.push(request); }
+  };
+  const dependencies = adapters(tailscale);
+  await assert.rejects(() => runCli(
+    ["service", "recheck", "tailscale", "--project-dir", "/projects/bunnyhome", "--ip", "10.0.0.60"],
+    dependencies
+  ), /503 after DNS changed/);
+
+  await runCli(["service", "destroy", "tailscale", "--yes", "--project-dir", "/projects/bunnyhome"], dependencies);
+  assert.equal(restored[0]?.vmid, 130);
+  assert.deepEqual(restored[0]?.snapshot, snapshot);
+});
+
 test("rechecking a tailscale gateway keeps a snapshot its tailnet cannot hold the override for", async () => {
   const filesystem = new FakeFilesystem();
   const { statePath, adapters } = seedStaleTailnet(filesystem);
@@ -823,4 +847,3 @@ test("rechecking still refuses a tailnet whose DNS changed outside NominaConnect
   assert.deepEqual(JSON.parse(filesystem.read(statePath)).tailnetDnsSnapshot,
     { nameservers: ["192.168.1.1"], overrideLocalDNS: false });
 });
-

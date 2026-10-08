@@ -210,6 +210,7 @@ export async function publishManagedExposure({
       backendPort,
       tailnet: routeRequest.tailnet,
       tailnetGatewayIp,
+      httpRedirect: proxyService.httpRedirect === true,
       redirectTo,
       redirectCode,
       caStrategy,

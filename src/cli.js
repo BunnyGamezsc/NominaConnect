@@ -1379,6 +1379,11 @@ async function recheckService(serviceName, rawOptions, adapters) {
   };
   const tailnetWarnings = [];
   if (managedItem.service === "tailscale" && typeof providerAdapter.configureTailnet === "function") {
+    // Tailnet setup can change DNS before it fails. Keep the verified gateway
+    // identity available to restoration and destruction even on that path.
+    project.state = updatedState;
+    writeAtomically(filesystem, project.statePath, `${JSON.stringify(project.state, null, 2)}\n`);
+    filesystem.chmod(project.statePath, 0o600);
     const tailnetSync = await syncTailscaleTailnet(project, updatedState.providerReferences[managedItem.id], providerAdapter, adapters);
     Object.assign(updatedState.providerReferences, tailnetSync.references);
     tailnetWarnings.push(...tailnetSync.warnings);
@@ -1629,14 +1634,15 @@ async function changeBaseDomain(options, adapters) {
     await ensureConnectionSecret(adapters, "Tailscale admin API token", adminSecretReference, {
       secret: process.env.NOMINA_TAILSCALE_API_TOKEN
     });
-    await providerAdapters.tailscale.configureTailnet({
+    const tailnetResult = await providerAdapters.tailscale.configureTailnet({
       vmid: vpnRef.vmid,
       dnsIp: dnsRef.ip,
       proxyIp: proxyRef.ip,
       zone: newDomain,
       adminSecretReference,
-      saveDnsSnapshot: (snapshot, gatewayIp) => saveTailnetDnsSnapshot(project, adapters, snapshot, gatewayIp)
+      saveDnsSnapshot: (snapshot, gatewayIp, options) => saveTailnetDnsSnapshot(project, adapters, snapshot, gatewayIp, options)
     });
+    warnings.push(...(tailnetResult?.warnings ?? []));
   }
 
   writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(workingProject.config));
@@ -1774,22 +1780,30 @@ async function uninstallEverything(options, adapters) {
   // deleted below, and the adapter verifies against a gateway address it reads
   // from the LXC destroyed here.
   let dnsLine = "";
-  if (project !== null && project.state.tailnetDnsSnapshot !== undefined) {
+  const vpn = project?.config.managedInventory?.platform?.vpn;
+  const vpnReference = project?.state.providerReferences?.[vpn?.id];
+  if (project !== null && (project.state.tailnetDnsSnapshot !== undefined ||
+      (vpn?.service === "tailscale" && vpnReference?.vmid !== undefined))) {
     const snapshot = project.state.tailnetDnsSnapshot;
-    const manual = `Set tailnet DNS by hand: nameservers ${snapshot.nameservers.join(", ") || "none"}, override local DNS ${snapshot.overrideLocalDNS}.`;
-    const vpnId = project.config.managedInventory?.platform?.vpn?.id;
-    const vpnReference = project.state.providerReferences?.[vpnId];
+    const manual = snapshot === undefined
+      ? "Change tailnet DNS manually so it no longer depends on this gateway before removing Tailscale."
+      : `Set tailnet DNS by hand: nameservers ${snapshot.nameservers.join(", ") || "none"}, override local DNS ${snapshot.overrideLocalDNS}.`;
     if (vpnReference?.vmid === undefined) {
       failed.push(`tailnet DNS: the gateway LXC is no longer recorded, so tailnet DNS was not restored. ${manual}`);
     } else {
       try {
+        if (typeof adapters.providerAdapters?.tailscale?.restoreTailnetDns !== "function") {
+          throw new Error("Tailscale DNS recovery is unavailable; the gateway was left running.");
+        }
         await restoreTailnetDns(project, vpnReference, adapters);
         // Persist completion before any container is destroyed. A retry may
         // run after the gateway is gone and must not restore DNS a second time.
         delete project.state.tailnetDnsSnapshot;
         writeAtomically(filesystem, project.statePath, `${JSON.stringify(project.state, null, 2)}\n`);
         filesystem.chmod(project.statePath, 0o600);
-        dnsLine = `Restored tailnet DNS: nameservers ${snapshot.nameservers.join(", ") || "none"}, override local DNS ${snapshot.overrideLocalDNS}.`;
+        dnsLine = snapshot === undefined
+          ? "Verified tailnet DNS no longer depends on this gateway."
+          : `Restored tailnet DNS: nameservers ${snapshot.nameservers.join(", ") || "none"}, override local DNS ${snapshot.overrideLocalDNS}.`;
       } catch (error) {
         failed.push(`tailnet DNS: ${error.message} ${manual}`);
       }

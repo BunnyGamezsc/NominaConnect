@@ -149,7 +149,11 @@ function Invoke-Tick {
 
 function Install-Task {
     New-Item -ItemType Directory -Path $script:InstallDir -Force | Out-Null
-    Copy-Item -Path $PSCommandPath -Destination $script:InstalledScript -Force
+    $sourcePath = [System.IO.Path]::GetFullPath($PSCommandPath)
+    $installedPath = [System.IO.Path]::GetFullPath($script:InstalledScript)
+    if (![System.String]::Equals($sourcePath, $installedPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Copy-Item -LiteralPath $sourcePath -Destination $installedPath -Force
+    }
 
     $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$($script:InstalledScript)`" tick"

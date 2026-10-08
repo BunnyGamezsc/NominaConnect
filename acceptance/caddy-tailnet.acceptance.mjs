@@ -20,15 +20,18 @@ test("Caddy preserves trusted HTTPS when tailnet access is toggled", {
 }, async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "nomina-caddy-wire-"));
   const endpoint = "http://127.0.0.1:22019";
+  // An explicit high port permits a disposable, unprivileged local process.
+  // The default retains coverage of the routes-only listener repair at :443.
+  const httpsPort = Number(process.env.NOMINA_CADDY_HTTPS_PORT ?? 443);
   const config = {
     admin: { listen: "127.0.0.1:22019" },
     apps: {
       pki: { certificate_authorities: { local: { install_trust: false } } },
-      http: { http_port: 22080, https_port: 443, servers: {
+      http: { http_port: 22080, https_port: httpsPort, servers: {
         srv_http: { listen: ["127.0.0.1:22080"], routes: [] },
         // Traversing a missing Caddy path with PUT can leave a server that
         // has routes but no listener, as the live suite's unmanaged seed did.
-        srv_https: { routes: [] }
+        srv_https: { ...(httpsPort === 443 ? {} : { listen: [`127.0.0.1:${httpsPort}`] }), routes: [] }
       } }
     }
   };
@@ -71,7 +74,7 @@ test("Caddy preserves trusted HTTPS when tailnet access is toggled", {
   const ca = (await httpClient.request({ method: "GET", url: `${endpoint}/pki/ca/local/certificates` })).body;
   const probe = (gateway, tls = true) => new Promise((resolve, reject) => {
     const transport = tls ? https : http;
-    const req = transport.request({ hostname: "127.0.0.1", port: tls ? 443 : 22080,
+    const req = transport.request({ hostname: "127.0.0.1", port: tls ? httpsPort : 22080,
       servername: request.hostname, ca, rejectUnauthorized: true, agent: false,
       localAddress: gateway ? "127.0.0.2" : "127.0.0.1", timeout: 2000,
       headers: { Host: request.hostname, "X-Forwarded-For": "127.0.0.1" }
@@ -84,11 +87,27 @@ test("Caddy preserves trusted HTTPS when tailnet access is toggled", {
     try { assert.equal(await probe(true), 200); break; }
     catch (error) { if (attempt === 40) throw error; await delay(100); }
   }
+  // Preserve an operator wildcard which would otherwise serve gateway traffic
+  // before a denial appended after it. LAN traffic still uses managed routes.
+  const wildcard = { "@id": "operator-wildcard", match: [{ host: ["*.productioncheck.internal"],
+    remote_ip: { ranges: ["127.0.0.2"] } }],
+    handle: [{ handler: "static_response", status_code: 200, body: "operator wildcard" }], terminal: true };
+  for (const server of ["srv_https", "srv_http"]) {
+    const url = `${endpoint}/config/apps/http/servers/${server}/routes`;
+    const observed = JSON.parse((await httpClient.request({ method: "GET", url })).body);
+    assert.equal((await httpClient.request({ method: "PATCH", url,
+      body: JSON.stringify([wildcard, ...observed]) })).status, 200);
+  }
   await adapter.publishRoute({ ...request, tailnet: false });
   assert.equal(await probe(true), 404, "gateway HTTPS must deny forged forwarding headers");
   assert.equal(await probe(false), 200, "LAN HTTPS must survive opting out");
   assert.equal(await probe(true, false), 404, "gateway HTTP must not bypass denial");
   assert.equal(await probe(false, false), 308, "LAN HTTP must keep its redirect");
+  for (const server of ["srv_https", "srv_http"]) {
+    const observed = JSON.parse((await httpClient.request({ method: "GET",
+      url: `${endpoint}/config/apps/http/servers/${server}/routes` })).body);
+    assert.deepEqual(observed.find((route) => route["@id"] === wildcard["@id"]), wildcard);
+  }
   await adapter.publishRoute({ ...request, tailnet: true });
   assert.equal(await probe(true), 200, "reenabling must restore gateway HTTPS");
 });

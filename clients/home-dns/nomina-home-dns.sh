@@ -138,7 +138,9 @@ setup() {
   umask 077
   mkdir -p "$CONFIG_DIR" "$HOME/.local/bin"
   printf '%s\n%s\n%s\n%s\n%s\n' "$HOME_DNS" "$PROBE_HOST" "$EXPECTED_IP" "$ROUTER_IP" "$ROUTER_MAC" > "$CONFIG"
-  cp "$0" "$INSTALLED"
+  if [ ! "$0" -ef "$INSTALLED" ]; then
+    cp "$0" "$INSTALLED"
+  fi
   chmod 0700 "$INSTALLED"
   if [ "$OS" = Darwin ]; then
     install_macos
@@ -262,6 +264,11 @@ uninstall() {
     rm -f "$PLIST"
   elif [ "$OS" = Linux ]; then
     systemctl --user disable --now nomina-home-dns.timer >/dev/null 2>&1 || true
+    if ! systemctl --user stop nomina-home-dns.service >/dev/null 2>&1; then
+      LOAD_STATE="$(systemctl --user show nomina-home-dns.service --property=LoadState --value 2>/dev/null)" ||
+        die "Could not confirm that the scheduled DNS helper stopped. Retry uninstall when the user service manager is available."
+      [ "$LOAD_STATE" = not-found ] || die "The scheduled DNS helper could not be stopped. Retry uninstall before changing Tailscale DNS."
+    fi
     rm -f "$HOME/.config/systemd/user/nomina-home-dns.service" "$HOME/.config/systemd/user/nomina-home-dns.timer"
     systemctl --user daemon-reload
   fi

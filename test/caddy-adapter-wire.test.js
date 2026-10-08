@@ -298,6 +298,34 @@ test("Caddy refuses the Tailscale gateway on opted-out HTTPS and HTTP routes", a
   assert.equal((await adapter.healthCheckExposure({ ...request, tailnet: true })).status, "healthy");
 });
 
+test("Caddy denies opted-out gateway traffic before an unmanaged wildcard route", async () => {
+  const wildcard = { "@id": "operator-wildcard", match: [{ host: ["*.bunny.home"] }],
+    handle: [{ handler: "static_response", status_code: 200 }], terminal: true };
+  const fake = new FakeCaddyAdmin({ admin: { listen: "0.0.0.0:2019" }, apps: { http: { servers: {
+    srv_https: { listen: [":443"], routes: [wildcard] },
+    srv_http: { listen: [":80"], routes: [wildcard] }
+  } } } });
+  const adapter = createCaddyAdapter({ httpClient: createHttpClient(fake), secretResolver: () => {} });
+  const request = stepCaRequest({ tailnet: false, tailnetGatewayIp: "192.168.4.91", httpRedirect: true });
+  await adapter.publishRoute(request);
+  for (const server of ["srv_https", "srv_http"]) {
+    const routes = fake.get(`apps/http/servers/${server}/routes`);
+    assert.equal(routes[0].handle[0].status_code, 404, "a terminal wildcard must not serve gateway requests before denial");
+    assert.deepEqual(routes.find((route) => route["@id"] === "operator-wildcard"), wildcard);
+  }
+  assert.equal((await adapter.healthCheckExposure(request)).status, "healthy");
+});
+
+test("Caddy reports an opted-out exposure unhealthy when a wildcard shadows its denial", async () => {
+  const fake = new FakeCaddyAdmin();
+  const adapter = createCaddyAdapter({ httpClient: createHttpClient(fake), secretResolver: () => {} });
+  const request = stepCaRequest({ tailnet: false, tailnetGatewayIp: "192.168.4.91", httpRedirect: true });
+  await adapter.publishRoute(request);
+  fake.get("apps/http/servers/srv_http/routes").unshift({ match: [{ host: ["*.bunny.home"] }],
+    handle: [{ handler: "static_response", status_code: 200 }], terminal: true });
+  assert.equal((await adapter.healthCheckExposure(request)).status, "unhealthy");
+});
+
 test("publishRoute prefers the step-ca hostname over the bare IP for the ACME directory URL", async () => {
   const fake = new FakeCaddyAdmin();
   const adapter = createCaddyAdapter({ httpClient: createHttpClient(fake), secretResolver: () => {} });

@@ -89,7 +89,8 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
         }
         throw error;
       }
-      const resources = routes.filter((route) => !isImplementationRoute(route)).map((route) => toManagedResource(route, policies));
+      const resources = routes.filter((route) => !isImplementationRoute(route)).map((route) =>
+        toManagedResource(route, policies, request.tailnetGatewayIp));
       return { resources };
     },
     async adopt(request) {
@@ -225,14 +226,14 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
         }
         const deny = routes.find((route) => route["@id"] === `${request.hostname}${TAILNET_TLS_DENY_SUFFIX}`);
         if (request.tailnet === false
-          ? deny?.match?.[0]?.remote_ip?.ranges?.[0] !== request.tailnetGatewayIp
+          ? !effectiveTailnetDeny(routes, deny, request)
           : deny !== undefined) {
           return { https: "reachable", status: "unhealthy", reason: "Caddy's tailnet denial route does not match this exposure." };
         }
         const httpRoutes = await listRoutes(httpClient, endpoint, HTTP_SERVER);
         const httpDeny = httpRoutes.find((route) => route["@id"] === `${request.hostname}${TAILNET_DENY_SUFFIX}`);
         if (request.tailnet === false
-          ? httpDeny?.match?.[0]?.remote_ip?.ranges?.[0] !== request.tailnetGatewayIp
+          ? !effectiveTailnetDeny(httpRoutes, httpDeny, request)
           : httpDeny !== undefined) {
           return { https: "reachable", status: "unhealthy", reason: "Caddy's HTTP tailnet denial route does not match this exposure." };
         }
@@ -405,13 +406,19 @@ async function upsertRoute(httpClient, endpoint, server, hostname, additions) {
   const path = `/config/apps/http/servers/${server}/routes`;
   const routes = await listRoutes(httpClient, endpoint, server);
   const remaining = routes.filter((r) => !isManagedRouteFor(r, hostname));
+  const denies = additions.filter((route) => route["@id"] === `${hostname}${TAILNET_DENY_SUFFIX}` ||
+    route["@id"] === `${hostname}${TAILNET_TLS_DENY_SUFFIX}`);
+  const serving = additions.filter((route) => !denies.includes(route));
   const catchAllIndex = remaining.findIndex((r) => !hasHostMatcher(r));
   if (catchAllIndex === -1) {
-    remaining.push(...additions);
+    remaining.push(...serving);
   } else {
     // Host-specific routes must precede hostless catch-alls or they are shadowed
-    remaining.splice(catchAllIndex, 0, ...additions);
+    remaining.splice(catchAllIndex, 0, ...serving);
   }
+  // An operator's wildcard can also match this hostname. The narrow gateway
+  // denial must run before it, without changing the operator's route itself.
+  remaining.unshift(...denies);
   await replaceMapValue(httpClient, endpoint, path, remaining);
 }
 
@@ -558,6 +565,21 @@ function tailnetDenyRoute(request, suffix) {
 const httpTailnetDenyRoutes = (request) => tailnetDenyRoute(request, TAILNET_DENY_SUFFIX);
 const tlsTailnetDenyRoutes = (request) => tailnetDenyRoute(request, TAILNET_TLS_DENY_SUFFIX);
 
+function effectiveTailnetDeny(routes, deny, request) {
+  if (deny === undefined || deny.terminal !== true ||
+      JSON.stringify(deny.match) !== JSON.stringify([{ host: [request.hostname],
+        remote_ip: { ranges: [request.tailnetGatewayIp] } }]) ||
+      JSON.stringify(deny.handle) !== JSON.stringify([{ handler: "static_response", status_code: 404 }])) {
+    return false;
+  }
+  // A preceding exact, different hostname cannot shadow this denial. Hostless
+  // and wildcard matchers can, so do not claim isolation with one ahead of it.
+  return !routes.slice(0, routes.indexOf(deny)).some((route) =>
+    !route.match?.length || route.match.some((match) =>
+      !match.host?.length || match.host.some((host) =>
+        host.toLowerCase() === request.hostname.toLowerCase() || host.includes("*"))));
+}
+
 // A managed redirect exposure answers :443 with a 307/308 to an explicit
 // target (e.g. apex bunny.internal -> https://home.bunny.internal), preserving
 // the request URI. The :80 route goes straight to the same target instead of
@@ -687,7 +709,7 @@ function hostForRoute(route) {
   return undefined;
 }
 
-function toManagedResource(route, policies = []) {
+function toManagedResource(route, policies = [], tailnetGatewayIp = undefined) {
   const host = hostForRoute(route) ?? route["@id"] ?? "unknown";
   const locator = { host, configPath: `/config/apps/http/servers/${TLS_SERVER}/routes/${host}` };
   const redirect = parseRedirectTargetRoute(route);
@@ -697,6 +719,7 @@ function toManagedResource(route, policies = []) {
   // caddy-internal-ca from no-CA, and inspection feeds adoption (ADR-0005),
   // so guessing trusted here would propagate a wrong value into nomina.yaml.
   const tls = tlsSummaryFor(policy?.issuers?.[0]);
+  const tailnet = observedTailnetAccess(route, tailnetGatewayIp);
   if (redirect !== undefined) {
     return {
       id: host,
@@ -709,6 +732,9 @@ function toManagedResource(route, policies = []) {
       redirect,
       redirectTo: redirect.to,
       redirectCode: redirect.code,
+      backendIp: undefined,
+      backendPort: undefined,
+      ...(tailnet === undefined ? {} : { tailnet }),
       rData: { redirect, tls }
     };
   }
@@ -728,8 +754,18 @@ function toManagedResource(route, policies = []) {
     backendIp,
     backendPort,
     backend,
+    ...(tailnet === undefined ? {} : { tailnet }),
     rData: { dial, tls }
   };
+}
+
+function observedTailnetAccess(route, gatewayIp) {
+  if (gatewayIp === undefined) return undefined;
+  const restriction = route.match?.[0]?.not;
+  if (restriction === undefined) return true;
+  return JSON.stringify(restriction) === JSON.stringify([{ remote_ip: { ranges: [gatewayIp] } }])
+    ? false
+    : undefined;
 }
 
 function formatRoute(host, route) {

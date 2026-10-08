@@ -363,9 +363,7 @@ def upstream(query, tcp):
     if tcp:
         with socket.create_connection((upstream_ip, 53), timeout=5) as peer:
             peer.sendall(struct.pack("!H", len(query)) + query)
-            size = peer.recv(2)
-            if len(size) != 2:
-                raise ValueError("short TCP DNS length")
+            size = receive_exact(peer, 2)
             remaining = struct.unpack("!H", size)[0]
             chunks = []
             while remaining:
@@ -395,12 +393,20 @@ class TCP(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
+def receive_exact(peer, size):
+    chunks = []
+    while size:
+        part = peer.recv(size)
+        if not part:
+            raise ValueError("short TCP DNS frame")
+        chunks.append(part)
+        size -= len(part)
+    return b"".join(chunks)
+
 class TCPHandler(socketserver.BaseRequestHandler):
     def handle(self):
         try:
-            header = self.request.recv(2)
-            if len(header) != 2:
-                return
+            header = receive_exact(self.request, 2)
             remaining = struct.unpack("!H", header)[0]
             chunks = []
             while remaining:

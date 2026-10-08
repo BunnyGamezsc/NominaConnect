@@ -560,6 +560,7 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
           providerReferences: [hostname],
           connectionSecretReference: project.config.connectionSecretReferences?.[proxyService.id],
           ip: proxyRef.ip,
+          tailnetGatewayIp: project.state.providerReferences?.[project.config.managedInventory.platform.vpn?.id]?.ip,
           zone: project.config.baseLocalDomain
         };
         const proxyInspection = await withBoundedRetry(
@@ -615,16 +616,19 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
             : undefined;
           const storedProxyIdentity = exposureIdentity(project.state, service.id, "reverseProxy");
           const proxyIdentityDrifted = providerIdentityDrifted(providerIdentityOf(matchedRoute), storedProxyIdentity);
+          const tailnetChanged = typeof matchedRoute.tailnet === "boolean" &&
+            matchedRoute.tailnet !== (service.exposure.tailnet ?? true);
+          const observedTailnet = tailnetChanged ? matchedRoute.tailnet : service.exposure.tailnet ?? true;
 
           // One health check answers both adoptions: an adopted route and an
           // adopted provider reference are only "verified" once the exposure
           // itself still serves (ADR-0029).
           let health = { status: "healthy" };
-          if ((backendChanged || redirectChanged || proxyIdentityDrifted) && proxyAdapter.healthCheckExposure !== undefined) {
+          if ((backendChanged || redirectChanged || proxyIdentityDrifted || tailnetChanged) && proxyAdapter.healthCheckExposure !== undefined) {
             // vmid travels with the request so a proxy that verifies
             // certificates inside its LXC can still do so from tracking.
             health = await withBoundedRetry(
-              () => proxyAdapter.healthCheckExposure({ hostname, backendIp: newBackend.ip, backendPort: newBackend.port, redirectTo: newRedirect?.to, redirectCode: newRedirect?.code, caStrategy: service.exposure.certificateAuthority, ip: proxyRef.ip, vmid: proxyRef.vmid }),
+              () => proxyAdapter.healthCheckExposure({ hostname, backendIp: newBackend.ip, backendPort: newBackend.port, redirectTo: newRedirect?.to, redirectCode: newRedirect?.code, caStrategy: service.exposure.certificateAuthority, tailnet: observedTailnet, tailnetGatewayIp: proxyInspectionContext.tailnetGatewayIp, httpRedirect: proxyService.httpRedirect === true, ip: proxyRef.ip, vmid: proxyRef.vmid }),
               retryOptions
             );
             if (health.status === "unhealthy") {
@@ -635,11 +639,14 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
               });
             }
           }
+          const adoptTailnet = tailnetChanged && health.status === "healthy";
+          const adoptedTailnet = adoptTailnet ? observedTailnet : service.exposure.tailnet;
 
           if (redirectChanged) {
             const updatedExposure = {
               ...service.exposure
             };
+            if (adoptTailnet) updatedExposure.tailnet = adoptedTailnet;
             if (newRedirect === undefined) {
               delete updatedExposure.redirect;
             } else {
@@ -654,7 +661,7 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
               serviceName: service.name ?? hostname,
               platformKey: "reverseProxy",
               kind: "exposure-changed",
-              changes: newRedirect === undefined ? { redirectRemoved: true } : { redirect: newRedirect },
+              changes: { ...(newRedirect === undefined ? { redirectRemoved: true } : { redirect: newRedirect }), ...(adoptTailnet ? { tailnet: adoptedTailnet } : {}) },
               before: { ...service.exposure },
               after: updatedExposure,
               verified: health.status === "healthy",
@@ -665,6 +672,7 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
           if (backendChanged) {
             const updatedExposure = {
               ...service.exposure,
+              ...(adoptTailnet ? { tailnet: adoptedTailnet } : {}),
               backend: newBackend
             };
             if (!observedIsRedirect) {
@@ -676,7 +684,22 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
               serviceName: service.name ?? hostname,
               platformKey: "reverseProxy",
               kind: "exposure-changed",
-              changes: { backend: newBackend },
+              changes: { backend: newBackend, ...(adoptTailnet ? { tailnet: adoptedTailnet } : {}) },
+              before: { ...service.exposure },
+              after: updatedExposure,
+              verified: health.status === "healthy",
+              timestamp: new Date().toISOString()
+            });
+          }
+
+          if (adoptTailnet && !backendChanged && !redirectChanged) {
+            const updatedExposure = { ...service.exposure, tailnet: adoptedTailnet };
+            changes.push({
+              serviceId: service.id,
+              serviceName: service.name ?? hostname,
+              platformKey: "reverseProxy",
+              kind: "exposure-changed",
+              changes: { tailnet: adoptedTailnet },
               before: { ...service.exposure },
               after: updatedExposure,
               verified: health.status === "healthy",

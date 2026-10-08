@@ -325,6 +325,28 @@ test("nuclear uninstall retains every resource and recovery file when tailnet DN
   assert.equal(filesystem.exists("/var/lib/nominaconnect/secrets/nc_dns_test"), true);
 });
 
+test("nuclear uninstall checks live tailnet DNS even when its recovery snapshot is missing", async () => {
+  const filesystem = new FakeFilesystem();
+  seedTailnet(filesystem);
+  const statePath = "/projects/bunnyhome/.nomina/state.json";
+  const state = JSON.parse(filesystem.read(statePath));
+  delete state.tailnetDnsSnapshot;
+  filesystem.writeFile(statePath, JSON.stringify(state));
+  const sequence = [];
+  const proxmox = createProxmoxAdapter(sequence);
+  const tailnet = fakeTailnetDns(sequence, {
+    fail: "Tailnet DNS still points at this gateway, but no previous DNS settings were saved."
+  });
+
+  await assert.rejects(runCli(
+    ["uninstall", "--yes", "--project-dir", "/projects/bunnyhome"],
+    { filesystem, runtime: proxmoxRootRuntime(), proxmox, providerAdapters: { tailscale: tailnet.tailscale } }
+  ), /Refusing to uninstall.*no previous DNS settings/);
+  assert.deepEqual(proxmox.calls, []);
+  assert.deepEqual(filesystem.deleted, []);
+  assert.equal(tailnet.requests[0].snapshot, undefined);
+});
+
 test("the interactive menu offers nuclear uninstall only when a project exists", () => {
   const withProject = {
     config: {
