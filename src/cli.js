@@ -1784,6 +1784,11 @@ async function uninstallEverything(options, adapters) {
     } else {
       try {
         await restoreTailnetDns(project, vpnReference, adapters);
+        // Persist completion before any container is destroyed. A retry may
+        // run after the gateway is gone and must not restore DNS a second time.
+        delete project.state.tailnetDnsSnapshot;
+        writeAtomically(filesystem, project.statePath, `${JSON.stringify(project.state, null, 2)}\n`);
+        filesystem.chmod(project.statePath, 0o600);
         dnsLine = `Restored tailnet DNS: nameservers ${snapshot.nameservers.join(", ") || "none"}, override local DNS ${snapshot.overrideLocalDNS}.`;
       } catch (error) {
         failed.push(`tailnet DNS: ${error.message} ${manual}`);
@@ -1799,12 +1804,22 @@ async function uninstallEverything(options, adapters) {
     for (const vmid of targetList) {
       try {
         await proxmox.stopLxc(vmid);
-      } catch (error) {
-        failed.push(`stop ${vmid}: ${error.message}`);
+      } catch {
+        // An already stopped LXC can still be destroyed. Destruction below
+        // determines whether a resource survives and requires recovery.
       }
       try {
         await proxmox.destroyLxc(vmid);
         destroyed.push(vmid);
+        // Forget each completed target immediately, including duplicate
+        // retained references. Retrying must never destroy a reused VMID.
+        for (const references of [project.state.providerReferences, project.state.retainedServices]) {
+          for (const [id, reference] of Object.entries(references ?? {})) {
+            if (reference?.vmid === vmid) delete references[id];
+          }
+        }
+        writeAtomically(filesystem, project.statePath, `${JSON.stringify(project.state, null, 2)}\n`);
+        filesystem.chmod(project.statePath, 0o600);
       } catch (error) {
         failed.push(`destroy ${vmid}: ${error.message}`);
       }

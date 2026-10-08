@@ -344,6 +344,12 @@ async function ensureServers(httpClient, endpoint) {
 
   const existingHttps = servers[TLS_SERVER];
   const existingHttp = servers[HTTP_SERVER];
+  // Admin API traversal can create a routes-only server. Caddy defaults an
+  // absent listen field to HTTP, so routes and issuer policies alone do not
+  // prove that HTTPS is available. Repair it without replacing operator routes.
+  if (existingHttps !== undefined && !existingHttps.listen?.length) {
+    await replaceMapValue(httpClient, endpoint, `/config/apps/http/servers/${TLS_SERVER}/listen`, [":443"]);
+  }
 
   const legacyRoutes = Array.isArray(servers.srv0?.routes) ? servers.srv0.routes : [];
   if (legacyRoutes.length > 0) {

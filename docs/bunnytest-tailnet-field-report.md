@@ -65,7 +65,7 @@ Both exposures were republished. Caddy restarted using its saved ACME policies,
 which cleared the previously cached certificate selection. The local and remote
 probes then verified both step-ca certificate chains and hostnames.
 
-Validation: 499 unit tests passed, zero failures. Typecheck and diff whitespace
+Initial validation: 499 unit tests passed, zero failures. Typecheck and diff whitespace
 checks passed. The source fix and regression tests are present in this checkout.
 
 ## Disconnected evidence
@@ -104,78 +104,117 @@ The retained deployment has not been uninstalled. The project, credentials,
 four containers, Mac public-root trust and tailnet DNS remain configured.
 Disposable acceptance containers were created and removed separately.
 
-## Production checks in progress
+## Final production verification
 
-- Full Proxmox reboot passed. Boot ID changed from
-  `34b4fdee-7e80-46c1-8617-87f7b9984beb` to
-  `af4785cd-24b7-4412-9554-2e2c91731689`. All four LXCs started automatically
-  within about 64 seconds. Managed provisioning now sets `--onboot 1`.
-- IPv6 exposed the gateway's SSH port despite its IPv4 firewall. The product
-  now rejects gateway IPv6 input and forwarding, and requires the firewall
-  service before starting Tailscale. Live verification closed IPv6 ports
-  22, 53 and 443 while intended IPv4 DNS and HTTPS continued to work.
-  Atomic updates were applied twice and preserved an unrelated firewall chain.
-  Restarting Tailscale exposed a second defect: its accept hooks precede the
-  filter restrictions. A raw-table ingress allowlist now blocks undesired
-  destinations and ports before those hooks. After restart, both IPv4 and IPv6
-  SSH probes timed out while intended HTTPS still returned HTTP 200.
-- Uninstall now stops before destruction if restoring tailnet DNS fails, and
-  preserves recovery state and secrets if container destruction fails. An
-  explicitly configured secret store is used instead of deleting another
-  installation's global store. Regression tests passed.
-- Exposure removal now calls the real Technitium `deleteRecord` adapter with
-  its endpoint and credential reference. The previous adapter method did not
-  exist, leaving stale DNS records. Its regression passed.
-- The final disposable acceptance run passed nine subtests and failed one.
-  Enrollment, unmanaged configuration preservation, recorded locators,
-  IP collision checks, on-boot configuration and gateway firewall assertions
-  passed. The opt-out test received connection refused on proxy TCP 443 instead
-  of the expected verified HTTPS 404. LAN availability and reenablement in that
-  subtest remain unverified. The suite's cleanup hook completed without error,
-  including exact previous tailnet DNS restoration, original credential-digest
-  preservation and pre-existing VMID preservation. Final `pct list` contained
-  only the retained VMIDs 100 through 103, all running.
-  Earlier attempts exposed test-helper mistakes in certificate-response parsing
-  and an unsupported exposure flag; both were corrected. An initial package
-  install failure was not reproduced after cache cleanup and storage trimming.
-- Caddy automatically renewed the temporary short-lived certificate.
-  Its initial serial `BA541868F4F554151CCAD99460178769`, expiring at
-  2026-10-08 00:14:36 UTC, changed to
-  `8FFB7EA93D6CED7F5FFA42F6DE0B663E`, expiring at 00:19:30 UTC.
-  A fresh Mac TLS handshake verified the new certificate and HTTP 200.
-  The polling helper reused a TLS session and kept observing the old leaf;
-  fresh connections are now required. Its corrected rerun was not started
-  after the operator requested a quick wrap-up. Original CA and Caddy settings
-  were restored, confirmed by the private recovery marker. Proxmox was
-  measured about 12 minutes behind the Mac, with NTP reachable but the system
-  clock unsynchronized. The clock was corrected, and chrony was configured
-  to step after VM clock jumps beyond its initial startup samples.
-  `NTPSynchronized=yes` was verified before the new renewal run.
-  The renewal helper now requires synchronization before
-  changing CA settings. Existing recovery backups remain on Proxmox.
-- Both-on checks passed 30 DNS requests, followed by verified HTTP 200 from
-  both URLs. Tailscale ping preferred Ethernet `192.168.1.57:41641` at 3 ms.
-  A subsequent outage reproduced DNS timeouts while the PC, Proxmox and local
-  DNS all became unreachable; the gateway was reported offline. Ethernet
-  remained active and the Mac default route still pointed at Proxmox.
-  The operator confirmed waking the PC after it had slept. Both-on DNS
-  and HTTPS passed again after recovery. The stable Tailscale answer
-  was routed through Ethernet locally, without a Mac DNS override.
-- Final service inspection found the DNS relay failed after a Tailscale
-  restart: binding the not-yet-present gateway address failed, and rapid
-  retries hit systemd's start limit. Restarting the relay restored live DNS.
-  The product now uses five-second retries without the start-rate cutoff.
-  The regression failed before the fix; all 14 tailnet tests passed after it.
-  The same unit settings were applied to the retained gateway. A full reboot
-  with this final change remains a follow-up.
-- Read-only tailnet policy inspection found a broad allow rule.
-  The operator chose access for trusted tailnet members;
-  the existing policy remains in place.
+The final disposable acceptance run passed all 11 tests with no failures or
+skips. It verified enrollment, preservation of unmanaged DNS/proxy settings,
+locators, IP collisions, automatic startup and gateway firewall rules. The
+opt-out test verified trusted gateway HTTPS 404 with forged forwarding headers,
+LAN HTTPS 200, reenablement to gateway 200, HTTP denial and the LAN redirect.
+Cleanup restored exact prior tailnet DNS and preserved the retained credential
+digest and every pre-existing VMID. Only running VMIDs 100–103 remained.
 
-The final acceptance suite did not pass. This report does not declare production
-readiness. See [the remaining fix and verification plan](production-check-followups.md).
-PR #24 remains unmerged. No live tests were left running at the final host check.
+The earlier connection refusal was not caused by the access matcher. Caddy's
+HTTPS server already lacked a listener before opt-out. The unmanaged-route
+seed treated a missing path's `200 null` response as an existing server, then
+created a routes-only server through API traversal. The adapter now repairs an
+absent/empty HTTPS listener while preserving operator routes. A real-process
+regression reproduced TCP refusal before the fix and passed afterward. The
+seed now creates the complete server and uses PATCH to replace existing arrays;
+PUT had returned 409 once the full server existed. One other retry stopped at
+an external package-site DNS failure; it did not exercise opt-out. The final
+full run passed after these helper corrections.
+
+Partial-uninstall CLI tests also exposed two defects. An already stopped LXC
+incorrectly blocked completion even after successful destruction. A partial
+retry still targeted destroyed VMIDs and attempted DNS restoration through a
+deleted gateway. Successful DNS restoration and every destroyed VMID are now
+checkpointed. The retry regression includes reuse of a destroyed ID by an
+unrelated LXC and leaves it untouched. Failed destruction retains recovery
+configuration and credentials. The full unit/wire/conformance suite passed
+501 tests; typecheck and whitespace checks passed.
+
+The corrected certificate-renewal helper completed with fresh connections.
+Serial `D0C0E03544868D95B6195283D3269DD2`, expiring at October 8 00:51:16 UTC,
+changed to `35CF5EA2CB8D82DB05DC8E4D2E2B0EC4`, expiring at 00:53:18 UTC.
+Both observations used trusted HTTPS with HTTP 200. Original CA duration and
+active/persisted Caddy settings were restored, the private restoration marker
+exists, and only the original dns/pve exposures remain.
+
+Current firewall and DNS installer settings were applied to the retained
+gateway. The installed DNS unit retried six times over a 35-second synthetic
+missing bind-address interval, then recovered automatically after its original
+address setting was restored. The final unit and recovery marker were restored
+and cleaned up. No interface or route settings were changed by this test.
+
+A full Proxmox reboot changed boot ID
+`af4785cd-24b7-4412-9554-2e2c91731689` to
+`7d45cb84-e45b-467a-8f6c-e94e6eb03ed4`. VMIDs 100–103 started automatically.
+`NTPSynchronized=yes` and active Tailscale, DNS relay and firewall services were
+verified. No manual service recovery was needed. After reboot, fresh trusted
+native-DNS HTTPS returned 200 for both retained URLs. Direct gateway UDP/TCP
+DNS answered internal and unique public queries. The public negative response
+was NOERROR/NODATA with an upstream SOA, matching a direct public-recursive
+query. IPv4 ports 22, 2019, 5380 and 8006 stayed blocked; gateway IPv6 ports
+22, 53 and 443 stayed blocked. Both raw-ingress firewall hooks survived reboot.
+
+Local-only native DNS returned `192.168.1.54`, and both URLs passed trusted
+HTTPS with Tailscale off. The client was reenabled afterward. Both-on native
+DNS returned `100.109.138.62`; the route used `utun5`, while Tailscale ping used
+local Ethernet `192.168.1.57:41641` at 2 ms. Resolver cache clearing was used
+for fresh checks; no DNS configuration, hosts entries or switching helpers
+were added. Final physical-disconnection verification passed at October 8 01:24 UTC.
+Ethernet was inactive; both native names resolved to `100.109.138.62` and
+returned fresh trusted HTTPS 200. Gateway UDP/TCP DNS answered internal and
+unique public queries. Restricted IPv4/IPv6 ports and direct LAN HTTPS were
+unreachable. The gateway route used `utun5`; Tailscale ping used DERP(sfo)
+at 45 ms. This verifies relay access; a direct peer path was not established.
+
+Backup/restore verified provider archives for Technitium, Caddy, step-ca and
+Tailscale plus a project/credential archive through extraction and content
+comparison. A full step-ca LXC backup was restored into disposable VMID 104
+with its network link disabled. CA private keys, certificates and configuration
+matched, and step-ca started successfully. The clone was removed. Private
+archives remain only on Proxmox under
+`/root/nomina-production-check-backups/recovery-1791420929261`, with results and
+an explicit `cleaned` marker. This demonstrates CA startup and provider-file
+recovery, not a complete replacement homelab operating online. Two earlier
+helper attempts failed before restore because of an incorrect vzdump path and
+unprivileged access to its temporary directory; their recovery directories
+remain separate. Snapshot cleanup completed.
+
+## Security review and readiness limits
+
+The read-only audit authenticated successfully with Technitium's default admin
+password. Rotate the provider account and update Nomina's stored credential
+before production use. Account rotation was outside the credential-review
+scope of this session.
+
+The T3 console showed the existing API token and reusable enrollment key,
+both described as ProxmoxDev1, created September 26 and expiring December 25,
+2026. Private host files were matched to their public IDs without printing
+values. The token is a fully permitted Tailscale API access token; DNS writes
+and device/policy reads were verified. It is not a DNS-scoped trust credential.
+[Tailscale API permission model](https://tailscale.com/docs/reference/tailscale-api).
+Plan rotation before expiry. The retained gateway device key expires April 5,
+2027. The operator's broad policy for trusted tailnet members was verified
+and preserved.
+
+Old offline test-device registrations remain in the Tailscale control plane,
+including an expired entry. The audit records their metadata on Proxmox.
+Destroying the test LXCs did not remove those registrations. Review ownership
+before control-plane cleanup. Windows home-DNS UI behavior remains outside
+this Mac field run.
+
+Technical acceptance passed. Production approval still requires operator
+security sign-off and manual review of PR #24. The retained installation,
+credentials, CA and Mac root trust remain intact. PR #24 remains unmerged.
 
 Final deployed native binary SHA-256:
-`5f26f6f0602787d4ede9c3768e0d2744055deaf1866de8404966e1aa3951b6cc`.
-Mac-to-Proxmox clock difference was about one second after synchronization.
+`49cffa79e99340afa361f0ad3413f7663d5c55395c775fdc86fe8294d7db5777`.
+
+Latest local evidence includes `acceptance-final.log`, `renewal-results.json`,
+`gateway-recovery-results.json`, `backup-restore-results.json`,
+`reboot-results.json`, `readiness-local-only.json`, `readiness-both-on.json`,
+`readiness-disconnected.json` and `token-metadata.json` under `/Users/shridhar/Desktop/bunnytest-lab`.
+See [the sign-off and recovery plan](production-check-followups.md).

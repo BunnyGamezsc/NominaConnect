@@ -37,6 +37,32 @@ modules directly and needs a matching source copy on the VM.
 on the Proxmox host with `node tools/lab/backend.mjs`; it listens on port
 8080 and returns `nomina lab backend ok`.
 
+## Retained-lab readiness helpers
+
+These helpers are scoped to the current bunnytest addresses and VMIDs.
+Read them before reuse. Proxmox helpers require root and `NOMINA_READINESS=1`.
+
+- `check-certificate-renewal.mjs /root/nomina-bunnytest` creates one short-lived
+  exposure, verifies automatic renewal with fresh trusted TLS, and restores
+  CA/Caddy settings. Check `.nomina/renewal-check/restored` after interruptions.
+- `check-backup-restore.mjs /root/nomina-bunnytest` stores root-only provider,
+  project and secret archives on Proxmox. It restores step-ca into a disconnected
+  temporary LXC, compares private keys/configuration and checks service startup.
+  It removes only that clone. Check storage first. `clone.json` records recovery
+  state if interrupted; `cleaned` marks successful clone cleanup.
+- `check-gateway-recovery.mjs /root/nomina-bunnytest` applies current firewall
+  and DNS units. It briefly uses an absent bind address, verifies repeated DNS
+  retries and automatic recovery after restoring the original unit, then cleans
+  up. Follow `.nomina/gateway-recovery-pending` if interrupted.
+- `inspect-tailnet-readiness.mjs /root/nomina-bunnytest` performs a read-only
+  credential-default, device and DNS audit without printing secrets. API-token
+  expiry still needs operator or console verification.
+- On the Mac, `check-client-readiness.mjs <mode> <evidence-directory>` checks
+  native DNS, fresh trusted HTTPS, direct DNS and gateway port restrictions.
+  Modes are `local-only`, `both-on` and `disconnected`. The directory must contain
+  `step-ca-root.crt`. Client toggles and physical Ethernet disconnection are
+  separate actions; this helper does not change client networking.
+
 ## Optional historical Mac gateway
 
 This is not needed for the current independent-internet lab.

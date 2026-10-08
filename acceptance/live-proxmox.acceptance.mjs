@@ -374,19 +374,52 @@ test("live Proxmox acceptance", { skip, timeout: 45 * 60 * 1000 }, async (t) => 
         const helper = path.join(projectDir,"https-probe.py");
         fs.writeFileSync(helper, HTTPS_PROBE);
         await commandRunner.run({binary:"/usr/sbin/pct",args:["push",String(gateway.vmid),helper,"/tmp/nomina-https-probe.py"]});
-        const probe = async (fromGateway) => {
-          const request = {ip:proxyRef.ip,host:exposedHostname,ca:caPem};
+        const probe = async (fromGateway, tls = true) => {
+          const request = {ip:proxyRef.ip,host:exposedHostname,ca:caPem,tls};
           const command = {binary:"/usr/bin/python3",args:[fromGateway?"/tmp/nomina-https-probe.py":helper],stdin:JSON.stringify(request)};
           const result = fromGateway ? await production.proxmox.pctExec(gateway.vmid, command) : await commandRunner.run(command);
           return JSON.parse(result.stdout);
         };
         const flags = ["exposure","publish","--name","photos","--hostname",exposedHostname,
           "--backend-ip",backendIp,"--backend-port",backendPort];
+        const capture = async (phase) => {
+          const evidenceDir = process.env.NOMINA_ACCEPTANCE_EVIDENCE_DIR;
+          if (!evidenceDir) return;
+          fs.mkdirSync(evidenceDir, { recursive: true, mode: 0o700 });
+          const evidence = { phase, at: new Date().toISOString(), proxyVmid: proxyRef.vmid };
+          for (const [name, command] of [
+            ["sockets", { binary: "/usr/bin/ss", args: ["-lntp"] }],
+            ["service", { binary: "/bin/systemctl", args: ["status", "caddy", "--no-pager"] }],
+            ["journal", { binary: "/bin/journalctl", args: ["-u", "caddy", "-n", "80", "--no-pager"] }]
+          ]) {
+            try { evidence[name] = (await production.proxmox.pctExec(proxyRef.vmid, command)).stdout; }
+            catch (error) { evidence[name] = error.message; }
+          }
+          try { evidence.config = (await adminClient.request({ method: "GET", url: `http://${proxyRef.ip}:2019/config/` })).body; }
+          catch (error) { evidence.config = error.message; }
+          fs.writeFileSync(path.join(evidenceDir, `optout-${phase}.json`), JSON.stringify(evidence), { mode: 0o600 });
+        };
+        await capture("enabled");
+        assert.equal((await probe(true)).status,200,"gateway HTTPS must work before opting out");
         await cli([...flags,"--tailnet","false"]);
-        assert.equal((await probe(true)).status,404,"gateway access must be denied independently of X-Forwarded-For");
+        await capture("disabled");
+        try {
+          assert.equal((await probe(true)).status,404,"gateway access must be denied independently of X-Forwarded-For");
+        } catch (error) {
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          await capture("disabled-settled");
+          try { await probe(true); } catch {}
+          throw error;
+        }
         assert.equal((await probe(false)).status,200,"the same exposure must still work on the LAN");
         await cli([...flags,"--tailnet","true"]);
         assert.equal((await probe(true)).status,200,"reenabling tailnet access must restore the route");
+        await cli(["caddy", "redirect", "on"]);
+        await cli([...flags,"--tailnet","false"]);
+        assert.equal((await probe(true, false)).status,404,"gateway HTTP must not bypass the opt-out rule");
+        assert.equal((await probe(false, false)).status,308,"LAN HTTP must still redirect to HTTPS");
+        await cli([...flags,"--tailnet","true"]);
+        assert.equal((await probe(true)).status,200,"gateway HTTPS must recover after the redirect check");
       });
       await t.test("gateway firewall closes IPv6 and advertises no LAN subnet", async () => {
         const gateway = referenceFor("vpn");
@@ -410,12 +443,12 @@ test("live Proxmox acceptance", { skip, timeout: 45 * 60 * 1000 }, async (t) => 
 const HTTPS_PROBE = `import json, socket, ssl, sys
 r=json.load(sys.stdin)
 ctx=ssl.create_default_context(cadata=r['ca'])
-with socket.create_connection((r['ip'],443),timeout=10) as peer:
- with ctx.wrap_socket(peer,server_hostname=r['host']) as tls:
+with socket.create_connection((r['ip'],443 if r.get('tls',True) else 80),timeout=10) as peer:
+ with (ctx.wrap_socket(peer,server_hostname=r['host']) if r.get('tls',True) else peer) as tls:
   tls.sendall(('GET / HTTP/1.1\\r\\nHost: '+r['host']+'\\r\\nX-Forwarded-For: 192.168.1.3\\r\\nConnection: close\\r\\n\\r\\n').encode())
   data=b''
   while b'\\r\\n' not in data: data+=tls.recv(4096)
-  print(json.dumps({'status':int(data.split(b' ')[1]),'tlsVerified':True}))
+  print(json.dumps({'status':int(data.split(b' ')[1]),'tlsVerified':r.get('tls',True)}))
 `;
 
 function secretDigest(directory) {
@@ -546,7 +579,7 @@ async function seedUnmanagedRoute(production, proxyReference) {
     headers: {}
   });
   assert.ok(serverProbe.status < 500, `could not read the Caddy config: ${serverProbe.status} ${serverProbe.body}`);
-  if (serverProbe.status === 404) {
+  if (serverProbe.status === 404 || serverProbe.body.trim() === "null") {
     const created = await adminClient.request({
       method: "PUT",
       url: `${adminBase}/config/apps/http/servers/srv_https`,
@@ -555,8 +588,8 @@ async function seedUnmanagedRoute(production, proxyReference) {
     });
     assert.ok(created.status >= 200 && created.status < 300, `could not create the Caddy srv_https server: ${created.status} ${created.body}`);
   }
-  // Routes are replaced as a whole array (PUT), the same way the product
-  // publishes: Caddy rejects POST traversal for a fresh server's routes.
+  // Replace existing arrays with PATCH, like the product adapter. PUT only
+  // creates a missing map value and rejects an existing routes field with 409.
   const unmanagedRoute = {
     "@id": unmanagedRouteHost,
     match: [{ host: [unmanagedRouteHost] }],
@@ -578,12 +611,19 @@ async function seedUnmanagedRoute(production, proxyReference) {
     `could not read Caddy routes: ${routesProbe.status} ${routesProbe.body}`
   );
   const existingRoutes = noRoutesYet || routesProbe.status === 404 ? [] : (JSON.parse(routesProbe.body || "null") ?? []);
-  const seeded = await adminClient.request({
-    method: "PUT",
+  let seeded = await adminClient.request({
+    method: "PATCH",
     url: `${adminBase}/config/apps/http/servers/srv_https/routes`,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify([...existingRoutes, unmanagedRoute])
   });
+  if (seeded.status === 404) {
+    seeded = await adminClient.request({
+      method: "PUT", url: `${adminBase}/config/apps/http/servers/srv_https/routes`,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify([...existingRoutes, unmanagedRoute])
+    });
+  }
   assert.ok(seeded.status >= 200 && seeded.status < 300, `could not seed an unmanaged Caddy route: ${seeded.status} ${seeded.body}`);
 }
 

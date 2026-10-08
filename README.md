@@ -201,8 +201,8 @@ nomina exposure publish --name dns --hostname dns.bunny.internal \
 
 The intended behavior is HTTP 404 through the gateway and normal direct LAN
 access. The hostname still resolves. A local client using Tailscale DNS also
-uses the gateway and its restriction. The current live opt-out acceptance
-failure is recorded in the field report. The tailnet access policy separately
+uses the gateway and its restriction. Live acceptance verifies gateway denial,
+continued LAN HTTPS and reenablement. The tailnet access policy separately
 controls which members can reach the gateway; Nomina does not tighten it.
 
 Use `--hostname` when provisioning to name the LXC. To rename an existing
@@ -240,8 +240,15 @@ adopted; unrelated configuration remains outside the managed inventory.
 ## Maintenance and removal
 
 Back up the project, private state, credential store, provider data and CA
-keys. A public root certificate cannot restore the CA. Backup and disaster
-recovery still need operator verification.
+keys. A public root certificate cannot restore the CA. The field check restored
+CA keys/configuration into a disconnected LXC and compared provider-file copies.
+Verify a complete replacement deployment against your recovery requirements.
+
+A fresh Technitium installation uses its default `admin` password. Nomina
+stores the connection password but does not change the provider's account.
+Change the password in Technitium and update Nomina's stored connection secret
+before production use. Review the Tailscale admin token's permissions and
+expiry, gateway device-key expiry, and old test-device registrations as well.
 
 Use `nomina service upgrade <name>` for explicit upgrades. A pre-upgrade
 snapshot is optional when the storage supports it. Removal and destruction
@@ -252,6 +259,9 @@ operator changed DNS settings, resolve the conflict first. `nomina uninstall`
 is destructive: it destroys recorded managed/retained LXCs and deletes project
 configuration, state and credentials. It stops before destruction if DNS
 restoration fails and retains recovery files if destruction is incomplete.
+Completed DNS restoration and each destroyed VMID are recorded immediately,
+so a retry targets only surviving containers and does not require a deleted
+gateway. A successfully destroyed stopped container does not block completion.
 Do not use uninstall to update the binary.
 
 ## Providers and development

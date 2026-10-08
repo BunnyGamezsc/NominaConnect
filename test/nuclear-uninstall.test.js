@@ -218,6 +218,51 @@ test("incomplete destruction preserves configuration and credentials for recover
   assert.equal(filesystem.exists("/var/lib/nominaconnect/secrets/nc_dns_test"), true);
 });
 
+test("uninstall completes when an already stopped LXC is successfully destroyed", async () => {
+  const filesystem = new FakeFilesystem();
+  seed(filesystem);
+  const proxmox = createProxmoxAdapter();
+  proxmox.stopLxc = async () => { throw new Error("CT is not running"); };
+  const result = await runCli(["uninstall", "--yes", "--project-dir", "/projects/bunnyhome"], {
+    filesystem, runtime: proxmoxRootRuntime(), proxmox
+  });
+  assert.deepEqual(result.destroyed, [100, 101, 102]);
+  assert.equal(filesystem.exists("/projects/bunnyhome/nomina.yaml"), false);
+});
+
+test("partial uninstall retries only survivors after the gateway and DNS snapshot are gone", async () => {
+  const filesystem = new FakeFilesystem();
+  seedTailnet(filesystem);
+  const sequence = [];
+  const tailnet = fakeTailnetDns(sequence);
+  const live = new Set([100, 101, 102, 103]);
+  let storageUnavailable = true;
+  const destroyed = [];
+  const proxmox = {
+    async stopLxc(vmid) { if (!live.has(vmid)) throw new Error("missing LXC"); },
+    async destroyLxc(vmid) {
+      assert.ok(live.has(vmid), "retry must not target a destroyed or reused VMID");
+      if (vmid === 101 && storageUnavailable) throw new Error("storage unavailable");
+      live.delete(vmid);
+      destroyed.push(vmid);
+    }
+  };
+  const adapters = { filesystem, runtime: proxmoxRootRuntime(), proxmox,
+    providerAdapters: { tailscale: tailnet.tailscale } };
+  await assert.rejects(runCli(["uninstall", "--yes", "--project-dir", "/projects/bunnyhome"], adapters), /Uninstall was incomplete/);
+  assert.deepEqual([...live], [101]);
+  assert.equal(filesystem.exists("/var/lib/nominaconnect/secrets/nc_dns_test"), true);
+  // Reuse a previously destroyed ID for an unrelated container. No second
+  // uninstall operation may touch it, or require the deleted gateway.
+  live.add(100);
+  tailnet.tailscale.restoreTailnetDns = async () => { throw new Error("gateway was destroyed; DNS was already restored"); };
+  storageUnavailable = false;
+  await runCli(["uninstall", "--yes", "--project-dir", "/projects/bunnyhome"], adapters);
+  assert.deepEqual(destroyed, [100, 102, 103, 101]);
+  assert.deepEqual([...live], [100]);
+  assert.equal(filesystem.exists("/projects/bunnyhome/nomina.yaml"), false);
+});
+
 test("nuclear uninstall without a project still clears the global secret store", async () => {
   const filesystem = new FakeFilesystem();
   filesystem.mkdir("/somewhere-else");

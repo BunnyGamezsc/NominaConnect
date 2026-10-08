@@ -27,6 +27,8 @@ and never runs by accident.
 - Managed LXCs have automatic startup enabled for host reboots.
 - With Tailscale and Caddy, opting out of tailnet access denies gateway requests
   with forged forwarding headers while the exposure remains available locally.
+- The gateway must serve HTTPS before opt-out, and reenablement must restore
+  it. HTTP denial and the LAN HTTPS redirect are verified separately.
 - Tailscale's gateway firewall rejects IPv6 and restricts ingress before its
   own accept hooks. No LAN subnet is advertised.
 - Public uninstall restores the exact previous tailnet DNS settings and leaves
@@ -136,3 +138,19 @@ LXCs, global credential digest and live tailnet DNS settings are unchanged.
 If uninstall cannot restore DNS, teardown stops and retains the temporary
 project and credentials for recovery. An interrupted run likewise leaves its
 project under `$TMPDIR`.
+
+## Fast Caddy process regression
+
+`acceptance/caddy-tailnet.acceptance.mjs` drives the production Caddy adapter
+against a real Caddy process. It starts from a routes-only HTTPS server with
+no listener, then verifies trusted gateway denial, LAN availability, HTTP
+redirect behavior and reenablement. It does not provision LXCs or change DNS.
+It is skipped unless `NOMINA_CADDY_BINARY` points at a Caddy executable.
+
+Run as root inside a separate Linux network namespace, with loopback enabled:
+
+```sh
+unshare --net sh -c 'ip link set lo up; NOMINA_CADDY_BINARY=/usr/bin/caddy node --test acceptance/caddy-tailnet.acceptance.mjs'
+```
+
+The test uses temporary CA storage and does not install client trust.
