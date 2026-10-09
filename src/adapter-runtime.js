@@ -81,6 +81,12 @@ export function createLocalSecretStore(options = {}) {
   return Object.freeze({
     rootDirectory: path.dirname(secretsDirectory),
     locate,
+    remove(reference) {
+      if (!isRoot()) {
+        throw new Error("Connection secrets can only be removed from the Proxmox root shell.");
+      }
+      filesystem.rmSync(locate(reference), { force: true });
+    },
     has(reference) {
       try {
         filesystem.statSync(locate(reference));

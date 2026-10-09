@@ -112,11 +112,13 @@ export async function provisionPlatformService({
   options,
   proxmox,
   providerAdapter,
+  onCreated = undefined,
   retryOptions = {}
 }) {
   const warnings = await runIpPreflight(proxmox, options.ip);
   const lxcSpec = resolveServiceDeployment(project, serviceName, options);
   const created = await proxmox.createLxc(lxcSpec);
+  await onCreated?.({ created, lxcSpec });
   if (typeof proxmox.inspectLxc === "function") {
     await proxmox.inspectLxc(created.vmid);
   }

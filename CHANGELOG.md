@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.3.1] - 2026-10-08
+
+### Fixed
+- Record the Tailscale LXC before setup so rejected or expired enrollment keys
+  leave recovery options available instead of offering to create another LXC.
+- After updating the connection secret, recheck retries enrollment in the same
+  LXC. Recheck also recovers untracked containers left by earlier versions.
+- Confirmed Tailscale destruction clears its locally stored enrollment key and
+  admin API token. An unenrolled gateway requires no tailnet DNS restoration
+  unless a recovery snapshot exists.
+
 ## [2.3.0] - 2026-10-07
 
 ### Added

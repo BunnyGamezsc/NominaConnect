@@ -163,6 +163,21 @@ test("local secret store reports existing references and rejects unsafe stores",
   assert.throws(() => rootedStore.store("nominaconnect/provider/nc_dns", "   "), /non-empty string/i);
 });
 
+test("local secret removal targets only the reference and requires root", () => {
+  const removed = [];
+  let root = true;
+  const store = createLocalSecretStore({
+    isRoot: () => root,
+    filesystem: { rmSync: (path, options) => removed.push([path, options]) }
+  });
+  store.remove("nominaconnect/provider/nc_vpn");
+  assert.deepEqual(removed, [["/var/lib/nominaconnect/secrets/nominaconnect/provider/nc_vpn", { force: true }]]);
+  assert.throws(() => store.remove("../outside"), /relative secret reference/i);
+  root = false;
+  assert.throws(() => store.remove("nominaconnect/provider/nc_vpn"), /root shell/i);
+  assert.equal(removed.length, 1);
+});
+
 test("production composition includes the local secret store", () => {
   const { secretStore } = createProductionAdapters({
     commandRunner: { async run() { return { exitCode: 0, stdout: "", stderr: "" }; } }

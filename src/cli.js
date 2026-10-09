@@ -730,6 +730,21 @@ async function addVpnService(serviceName, serviceLabel, promptOptions, options, 
     options: resolvedOptions,
     proxmox,
     providerAdapter,
+    onCreated: serviceName === "tailscale" ? ({ created, lxcSpec }) => {
+      project.state = {
+        ...project.state,
+        providerReferences: {
+          ...project.state.providerReferences,
+          [vpnService.id]: { vmid: created.vmid, ip: resolvedOptions.ip, provisioningPending: true }
+        }
+      };
+      // Persist ownership before setup can reject the enrollment key.
+      writeAtomically(filesystem, project.statePath, `${JSON.stringify(project.state, null, 2)}\n`);
+      filesystem.chmod(project.statePath, 0o600);
+      const deployment = { ...lxcSpec, ip: resolvedOptions.ip };
+      project.config = updatePlatformDeployment(project.config, "vpn", deployment);
+      writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(project.config));
+    } : undefined,
     retryOptions: adapters.retryOptions
   });
 
@@ -1213,7 +1228,7 @@ async function destroyService(serviceName, rawOptions, adapters) {
   if (!confirmed) {
     confirmed = await confirmPrompt(
       prompts,
-      `Are you sure you want to permanently destroy LXC ${vmid} for ${resolvedServiceName} and delete all data?`,
+      `Are you sure you want to permanently destroy LXC ${vmid} for ${resolvedServiceName} and delete all data${managedServiceType === "tailscale" ? " and locally stored Tailscale keys" : ""}?`,
       false
     );
   }
@@ -1225,7 +1240,8 @@ async function destroyService(serviceName, rawOptions, adapters) {
     };
   }
 
-  if (managedServiceType === "tailscale" && project.state.providerReferences?.[managedItemId]) {
+  if (managedServiceType === "tailscale" && project.state.providerReferences?.[managedItemId] &&
+      (project.state.providerReferences[managedItemId].provisioningPending !== true || project.state.tailnetDnsSnapshot !== undefined)) {
     await restoreTailnetDns(project, { vmid }, adapters);
   }
   if (proxmox?.stopLxc) {
@@ -1233,6 +1249,14 @@ async function destroyService(serviceName, rawOptions, adapters) {
   }
   if (proxmox?.destroyLxc) {
     await proxmox.destroyLxc(vmid);
+    if (managedServiceType === "tailscale") {
+      for (const reference of [
+        project.config.connectionSecretReferences[managedItemId],
+        project.config.connectionSecretReferences.tailscaleAdmin ?? `nominaconnect/tailscale-admin/${managedItemId}`
+      ]) {
+        if (reference !== undefined) adapters.secretStore?.remove?.(reference);
+      }
+    }
   }
 
   let updatedConfig = project.config;
@@ -1284,7 +1308,7 @@ async function recheckService(serviceName, rawOptions, adapters) {
   let resolvedServiceName = serviceName;
   if (resolvedServiceName === undefined) {
     const loaded = loadProject(filesystem, options.projectDir);
-    resolvedServiceName = await promptServiceName(loaded, prompts);
+    resolvedServiceName = await promptServiceName(loaded, prompts, { recheck: true });
   }
   const platformEntries = Object.entries(project.config.managedInventory.platform);
   const matchedPlatform = platformEntries.find(
@@ -1295,10 +1319,10 @@ async function recheckService(serviceName, rawOptions, adapters) {
   }
   const [platformKey, managedItem] = matchedPlatform;
   const existingRef = project.state.providerReferences?.[managedItem.id];
-  if (existingRef !== undefined) {
+  if (existingRef !== undefined && existingRef.provisioningPending !== true) {
     throw new Error(`Service ${resolvedServiceName} is already provisioned (vmid ${existingRef.vmid}). Use 'nomina service upgrade' or check health.`);
   }
-  let ip = options.ip;
+  let ip = options.ip ?? existingRef?.ip;
   if (ip === undefined) {
     if (prompts?.ask === undefined) {
       throw new Error("Static IP is required. Pass --ip <address> or run from an interactive terminal.");
@@ -1317,7 +1341,9 @@ async function recheckService(serviceName, rawOptions, adapters) {
   if (proxmox === undefined || typeof proxmox.checkIpAvailability !== "function") {
     throw new Error("Proxmox adapter is unavailable.");
   }
-  const availability = await proxmox.checkIpAvailability(ip);
+  const availability = existingRef?.provisioningPending === true
+    ? { status: "known-collision", conflictWith: `lxc/${existingRef.vmid}` }
+    : await proxmox.checkIpAvailability(ip);
   if (availability.status !== "known-collision") {
     throw new Error(`No existing LXC found at ${ip}. Run 'nomina service add ${resolvedServiceName} --ip ${ip}' to create a new one.`);
   }
@@ -1342,6 +1368,34 @@ async function recheckService(serviceName, rawOptions, adapters) {
     zone: project.config.baseLocalDomain
   };
   const plugin = getPlatformProvider(managedItem.service);
+  if (managedItem.service === "tailscale" && typeof providerAdapter.configure === "function") {
+    if (existingRef === undefined) {
+      // Recover containers left untracked by older versions before retrying
+      // their credentials, so another rejection still permits destruction.
+      project.state = {
+        ...project.state,
+        providerReferences: {
+          ...project.state.providerReferences,
+          [managedItem.id]: { vmid, ip, provisioningPending: true }
+        }
+      };
+      writeAtomically(filesystem, project.statePath, `${JSON.stringify(project.state, null, 2)}\n`);
+      filesystem.chmod(project.statePath, 0o600);
+    }
+    // Setup repairs interrupted installs; configure uses the current stored
+    // key and leaves already enrolled clients alone.
+    if (existingRef?.provisioningPending === true) {
+      const setup = await plugin.setup(providerAdapter, managedItem, providerContext);
+      for (const command of setup.lxcCommands ?? setup.operations ?? []) {
+        await proxmox.pctExec(vmid, command);
+      }
+    }
+    const initialHealth = await plugin.healthCheck(providerAdapter, managedItem, providerContext);
+    if (existingRef?.provisioningPending === true || initialHealth.process === "running") {
+      await withBoundedRetry(() => providerAdapter.configure(providerContext),
+        { maxRetries: 8, baseDelayMs: 3000, backoffFactor: 1.5, ...(adapters.retryOptions ?? {}) });
+    }
+  }
   // Same settling window as provisioning: an adapter reports "not ready yet" as
   // an unhealthy result, not a thrown error, so retrying on the status is what
   // keeps recheck from failing a provider that is merely still starting.

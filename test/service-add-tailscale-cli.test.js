@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 
 import { runCli } from "../src/cli.js";
 import { createTailscaleAdapter } from "../src/tailscale-adapter.js";
+import { loadProject } from "../src/config.js";
+import { buildMenuOptions } from "../src/tui.js";
 
 const AUTH_KEY = "tskey-auth-kbNq7CNTRL-3rZ8pXvVaLid";
 const AUTH_KEY_PATH = "/run/nomina-tailscale.authkey";
@@ -237,6 +239,7 @@ function createAdapters(lxc, { proxmox = createProxmox(lxc), storedSecret = AUTH
       proxmox,
       secretStore: {
         has: (reference) => secrets.has(reference),
+        remove: (reference) => secrets.delete(reference),
         store: (reference, value) => secrets.set(reference, value)
       },
       prompts: {
@@ -265,6 +268,88 @@ function createAdapters(lxc, { proxmox = createProxmox(lxc), storedSecret = AUTH
     }
   };
 }
+
+test("rejected Tailscale enrollment keeps the LXC recoverable and recheck uses the replacement key", async () => {
+  const lxc = new FakeTailscaleLxc();
+  const rejectedKey = "tskey-auth-expiredTestKey";
+  const { adapters, filesystem, proxmox, secrets } = createAdapters(lxc, { storedSecret: rejectedKey });
+  adapters.retryOptions = { maxRetries: 0, maxAttempts: 1 };
+  const exec = proxmox.pctExec;
+  proxmox.pctExec = async (vmid, command) => {
+    if (command.binary === "/usr/bin/tailscale" && command.args[0] === "up") {
+      assert.equal(lxc.files.get(AUTH_KEY_PATH), rejectedKey);
+      throw new Error("backend error: invalid key");
+    }
+    return exec(vmid, command);
+  };
+  await assert.rejects(runCli(
+    ["service", "add", "tailscale", "--project-dir", "/projects/bunnyhome", "--ip", "10.0.0.60"], adapters
+  ), /invalid key/);
+  const state = JSON.parse(filesystem.read("/projects/bunnyhome/.nomina/state.json"));
+  assert.equal(state.providerReferences.nc_vpn_test?.vmid, 130);
+  assert.equal(state.providerReferences.nc_vpn_test?.provisioningPending, true);
+  const menu = buildMenuOptions(loadProject(filesystem, "/projects/bunnyhome")).map((item) => item.value);
+  assert.ok(menu.includes("recheck-service"));
+  assert.ok(menu.includes("destroy-service"));
+  assert.ok(menu.includes("update-secret"));
+  assert.ok(!menu.includes("provision-tailscale"));
+  assert.equal(lxc.files.has(AUTH_KEY_PATH), false);
+
+  await runCli(["secret", "change", "--service", "tailscale", "--project-dir", "/projects/bunnyhome", "--secret", AUTH_KEY], adapters);
+  assert.equal(secrets.get(SECRET_REFERENCE), AUTH_KEY);
+  proxmox.pctExec = exec;
+  const result = await runCli(["service", "recheck", "--project-dir", "/projects/bunnyhome"], adapters);
+  assert.equal(result.health.status, "healthy");
+  assert.equal(proxmox.created.length, 1);
+  assert.equal(JSON.parse(filesystem.read("/projects/bunnyhome/.nomina/state.json")).providerReferences.nc_vpn_test.provisioningPending, undefined);
+});
+
+test("destroying a pending Tailscale LXC clears its local auth keys after confirmation", async () => {
+  const lxc = new FakeTailscaleLxc();
+  const { adapters, filesystem, proxmox, secrets } = createAdapters(lxc);
+  filesystem.writeFile("/projects/bunnyhome/.nomina/state.json", JSON.stringify({ version: 1, providerReferences: {
+    nc_vpn_test: { vmid: 130, ip: "10.0.0.60", provisioningPending: true }
+  } }));
+  const adminReference = "nominaconnect/tailscale-admin/nc_vpn_test";
+  secrets.set(adminReference, "test-admin-token");
+  const destroyed = [];
+  adapters.providerAdapters.tailscale = {
+    ...adapters.providerAdapters.tailscale,
+    restoreTailnetDns: async () => {
+      throw new Error("An unenrolled LXC must not require tailnet DNS restoration");
+    }
+  };
+  proxmox.stopLxc = async () => {};
+  proxmox.destroyLxc = async (vmid) => destroyed.push(vmid);
+  await runCli(["service", "destroy", "tailscale", "--project-dir", "/projects/bunnyhome"], adapters);
+  assert.equal(secrets.has(SECRET_REFERENCE), true);
+  assert.deepEqual(destroyed, []);
+  await runCli(["service", "destroy", "tailscale", "--project-dir", "/projects/bunnyhome", "--yes"], adapters);
+  assert.deepEqual(destroyed, [130]);
+  assert.equal(secrets.has(SECRET_REFERENCE), false);
+  assert.equal(secrets.has(adminReference), false);
+});
+
+test("recheck records an older untracked Tailscale LXC even if its key is rejected again", async () => {
+  const lxc = new FakeTailscaleLxc();
+  lxc.installed = true;
+  lxc.daemonActive = true;
+  lxc.backendState = "NeedsLogin";
+  const { adapters, filesystem, proxmox } = createAdapters(lxc);
+  adapters.retryOptions = { maxRetries: 0, maxAttempts: 1 };
+  proxmox.checkIpAvailability = async () => ({ status: "known-collision", conflictWith: "lxc/130" });
+  const exec = proxmox.pctExec;
+  proxmox.pctExec = async (vmid, command) => {
+    if (command.binary === "/usr/bin/tailscale" && command.args[0] === "up") {
+      throw new Error("backend error: invalid key");
+    }
+    return exec(vmid, command);
+  };
+  await assert.rejects(runCli(["service", "recheck", "tailscale", "--project-dir", "/projects/bunnyhome", "--ip", "10.0.0.60"], adapters), /invalid key/);
+  assert.deepEqual(JSON.parse(filesystem.read("/projects/bunnyhome/.nomina/state.json")).providerReferences.nc_vpn_test,
+    { vmid: 130, ip: "10.0.0.60", provisioningPending: true });
+  assert.equal(proxmox.created.length, 0);
+});
 
 test("nomina service add tailscale enrolls a real client and reports its tailnet address", async () => {
   const lxc = new FakeTailscaleLxc();
@@ -333,7 +418,7 @@ test("a container without a TUN device is repaired from the Proxmox host before 
   assert.equal(result.health.status, "healthy");
 });
 
-test("a container that cannot get a TUN device fails with remediation and changes nothing", async () => {
+test("a container that cannot get a TUN device fails with remediation and retains LXC ownership", async () => {
   const lxc = new FakeTailscaleLxc({ tun: false });
   const proxmox = createProxmox(lxc, {
     enableTunDevice: () => {
@@ -354,8 +439,8 @@ test("a container that cannot get a TUN device fails with remediation and change
 
   assert.equal(lxc.installed, false);
   const state = JSON.parse(filesystem.read("/projects/bunnyhome/.nomina/state.json"));
-  assert.deepEqual(state.providerReferences, {});
-  assert.equal(filesystem.read("/projects/bunnyhome/nomina.yaml"), TAILSCALE_PROJECT);
+  assert.deepEqual(state.providerReferences.nc_vpn_test, { vmid: 130, ip: "10.0.0.60", provisioningPending: true });
+  assert.match(filesystem.read("/projects/bunnyhome/nomina.yaml"), /ip: 10\.0\.0\.60/);
 });
 
 test("nomina service upgrade tailscale upgrades the client without re-enrolling it", async () => {

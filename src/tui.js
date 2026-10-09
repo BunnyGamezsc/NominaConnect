@@ -89,7 +89,8 @@ export function canRecheckProvisioning(project) {
     return false;
   }
   for (const item of Object.values(project.config.managedInventory.platform ?? {})) {
-    if (item && project.config.connectionSecretReferences[item.id] !== undefined && project.state.providerReferences?.[item.id] === undefined) {
+    if (item && project.config.connectionSecretReferences[item.id] !== undefined &&
+        (project.state.providerReferences?.[item.id] === undefined || project.state.providerReferences?.[item.id]?.provisioningPending === true)) {
       return true;
     }
   }
@@ -170,8 +171,8 @@ const MENU_ENTRIES = Object.freeze([
   { value: "upgrade-service", label: "Upgrade a managed service", hint: "explicit service upgrade with snapshot", when: hasProvisionedServices },
   { value: "remove-service", label: "Remove a managed service", hint: "disconnect integrations and retain data", when: hasProvisionedServices },
   { value: "destroy-service", label: "Destroy a service LXC", hint: "permanently delete LXC container and data", when: hasProvisionedOrRetainedServices },
-  { value: "update-secret", label: "Update connection secret", hint: "change stored provider password", when: canUpdateConnectionSecret },
-  { value: "recheck-service", label: "Recheck provisioning", hint: "adopt existing LXC if healthy", when: canRecheckProvisioning },
+  { value: "update-secret", label: "Update connection secret", hint: "change stored provider credential", when: canUpdateConnectionSecret },
+  { value: "recheck-service", label: "Recheck provisioning", hint: "retry pending setup or adopt an existing LXC", when: canRecheckProvisioning },
   {
     value: "view-changes",
     label: "View changes",
@@ -518,8 +519,10 @@ const PROVISIONABLE_SERVICES = Object.freeze([
   { value: "netbird", label: "NetBird VPN", category: "vpn", fallback: "VPN service", when: (project) => canProvisionVpn(project, "netbird") }
 ]);
 
-export async function promptServiceName(project, prompts) {
-  const choices = PROVISIONABLE_SERVICES.filter((service) => service.when(project)).map((service) => ({
+export async function promptServiceName(project, prompts, { recheck = false } = {}) {
+  const choices = PROVISIONABLE_SERVICES.filter((service) => service.when(project) || (recheck &&
+    Object.values(project.config.managedInventory.platform).some((item) => item?.service === service.value &&
+      project.state.providerReferences?.[item.id]?.provisioningPending === true))).map((service) => ({
     value: service.value,
     label: service.label,
     hint: INITIAL_PLATFORM_CATALOG[service.category].find((option) => option.name === service.value)?.description

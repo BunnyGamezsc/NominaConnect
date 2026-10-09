@@ -264,6 +264,13 @@ so a retry targets only surviving containers and does not require a deleted
 gateway. A successfully destroyed stopped container does not block completion.
 Do not use uninstall to update the binary.
 
+If Tailscale enrollment rejects an auth key, choose **Update connection secret**
+and then **Recheck provisioning** to retry in the same LXC. Alternatively,
+**Destroy a service LXC** deletes the container and its locally stored Tailscale
+auth key and admin API token after confirmation. For an untracked container left
+by an older version, run `nomina service recheck tailscale --ip <LXC-IP>` first.
+These actions do not revoke keys in the Tailscale admin console.
+
 ## Providers and development
 
 Supported providers: Technitium; Caddy or Traefik; step-ca or Caddy Internal CA;

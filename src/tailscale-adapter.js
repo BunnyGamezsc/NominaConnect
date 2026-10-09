@@ -352,7 +352,7 @@ async function isUnitActive(run) {
 
 function describeEnrollmentFailure(status) {
   if (status.backendState === "NeedsLogin") {
-    return "Tailscale is installed but not enrolled: the tailnet auth key was rejected, already used, or expired. Store a fresh key with 'nomina secret change' and run this command again.";
+    return "Tailscale is installed but not enrolled: the tailnet auth key was rejected, already used, or expired. Store a fresh key with 'nomina secret change', then run 'nomina service recheck tailscale'. To discard the LXC and its stored Tailscale keys, run 'nomina service destroy tailscale'.";
   }
   if (status.backendState === "Stopped") {
     return "Tailscale is installed but the tunnel is stopped. Start it with 'tailscale up' in the managed LXC and run this command again.";
