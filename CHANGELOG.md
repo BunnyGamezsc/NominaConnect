@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.2] - 2026-10-09
+
+### Added
+- Per-service `--force` destruction for Tailscale gateways when DNS recovery
+  cannot proceed. The saved DNS settings are retained for manual recovery, and
+  ordinary service destruction and full uninstall keep their recovery guards.
+
 ## [2.3.1] - 2026-10-08
 
 ### Fixed

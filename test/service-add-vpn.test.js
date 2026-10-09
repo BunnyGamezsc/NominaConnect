@@ -301,6 +301,71 @@ test("destroying Tailscale through the vpn platform alias restores DNS before cl
   assert.equal(JSON.parse(filesystem.read(statePath)).tailnetDnsSnapshot, undefined);
 });
 
+test("force destroying Tailscale records DNS recovery details when restoration fails", async () => {
+  const filesystem = new FakeFilesystem();
+  const statePath = seedProvisionedTailnet(filesystem);
+  const snapshot = { nameservers: ["192.0.2.53"], overrideLocalDNS: false };
+  const state = JSON.parse(filesystem.read(statePath));
+  state.providerReferences.nc_vpn_test = { vmid: 130, ip: "10.0.0.60" };
+  state.tailnetDnsSnapshot = snapshot;
+  filesystem.writeFile(statePath, JSON.stringify(state));
+  const calls = [];
+  const proxmox = createProxmoxAdapter();
+  proxmox.stopLxc = async (vmid) => calls.push(["stop", vmid]);
+  proxmox.destroyLxc = async (vmid) => calls.push(["destroy", vmid]);
+
+  const result = await runCli(
+    ["service", "destroy", "tailscale", "--force", "--yes", "--project-dir", "/projects/bunnyhome"],
+    {
+      filesystem,
+      runtime: proxmoxRootRuntime(),
+      proxmox,
+      providerAdapters: { tailscale: { restoreTailnetDns: async () => { throw new Error("HTTP 401"); } } },
+      secretStore: { has: () => true }
+    }
+  );
+
+  assert.deepEqual(calls, [["stop", 130], ["destroy", 130]]);
+  const updatedState = JSON.parse(filesystem.read(statePath));
+  assert.deepEqual(updatedState.tailnetDnsRecovery, { vmid: 130, snapshot });
+  assert.equal(updatedState.tailnetDnsSnapshot, undefined);
+  assert.match(result.stdout, /WARNING: Tailscale DNS was not restored/);
+  assert.match(result.stdout, /Service tailscale destroyed/);
+});
+
+test("ordinary Tailscale destruction preserves the LXC when DNS restoration fails", async () => {
+  const filesystem = new FakeFilesystem();
+  const statePath = seedProvisionedTailnet(filesystem);
+  const snapshot = { nameservers: ["192.0.2.53"], overrideLocalDNS: false };
+  const state = JSON.parse(filesystem.read(statePath));
+  state.providerReferences.nc_vpn_test = { vmid: 130, ip: "10.0.0.60" };
+  state.tailnetDnsSnapshot = snapshot;
+  filesystem.writeFile(statePath, JSON.stringify(state));
+  const calls = [];
+  const proxmox = createProxmoxAdapter();
+  proxmox.stopLxc = async (vmid) => calls.push(["stop", vmid]);
+  proxmox.destroyLxc = async (vmid) => calls.push(["destroy", vmid]);
+
+  await assert.rejects(
+    () => runCli(
+      ["service", "destroy", "tailscale", "--yes", "--project-dir", "/projects/bunnyhome"],
+      {
+        filesystem,
+        runtime: proxmoxRootRuntime(),
+        proxmox,
+        providerAdapters: { tailscale: { restoreTailnetDns: async () => { throw new Error("HTTP 401"); } } },
+        secretStore: { has: () => true }
+      }
+    ),
+    /HTTP 401/
+  );
+
+  assert.deepEqual(calls, []);
+  const unchangedState = JSON.parse(filesystem.read(statePath));
+  assert.deepEqual(unchangedState.tailnetDnsSnapshot, snapshot);
+  assert.equal(unchangedState.tailnetDnsRecovery, undefined);
+});
+
 test("Tailscale does not create an LXC when DNS or proxy is not provisioned", async () => {
   const filesystem = new FakeFilesystem();
   seedProject(filesystem);

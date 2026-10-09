@@ -1226,9 +1226,12 @@ async function destroyService(serviceName, rawOptions, adapters) {
 
   let confirmed = options.confirm || options.yes;
   if (!confirmed) {
+    const forceWarning = options.force && managedServiceType === "tailscale"
+      ? " WARNING: Tailnet DNS will not be restored; manual recovery will be required."
+      : "";
     confirmed = await confirmPrompt(
       prompts,
-      `Are you sure you want to permanently destroy LXC ${vmid} for ${resolvedServiceName} and delete all data${managedServiceType === "tailscale" ? " and locally stored Tailscale keys" : ""}?`,
+      `Are you sure you want to permanently destroy LXC ${vmid} for ${resolvedServiceName} and delete all data${managedServiceType === "tailscale" ? " and locally stored Tailscale keys" : ""}?${forceWarning}`,
       false
     );
   }
@@ -1240,9 +1243,18 @@ async function destroyService(serviceName, rawOptions, adapters) {
     };
   }
 
+  let recoveryWarning = "";
   if (managedServiceType === "tailscale" && project.state.providerReferences?.[managedItemId] &&
       (project.state.providerReferences[managedItemId].provisioningPending !== true || project.state.tailnetDnsSnapshot !== undefined)) {
-    await restoreTailnetDns(project, { vmid }, adapters);
+    if (options.force) {
+      project.state.tailnetDnsRecovery = {
+        vmid,
+        snapshot: project.state.tailnetDnsSnapshot ?? null
+      };
+      recoveryWarning = "WARNING: Tailscale DNS was not restored. Manual recovery is required; see .nomina/state.json tailnetDnsRecovery.\n";
+    } else {
+      await restoreTailnetDns(project, { vmid }, adapters);
+    }
   }
   if (proxmox?.stopLxc) {
     await proxmox.stopLxc(vmid);
@@ -1294,7 +1306,7 @@ async function destroyService(serviceName, rawOptions, adapters) {
   filesystem.chmod(project.statePath, 0o600);
 
   return {
-    stdout: `Service ${resolvedServiceName} destroyed. LXC ${vmid} and all persistent data deleted.\n`,
+    stdout: `${recoveryWarning}Service ${resolvedServiceName} destroyed. LXC ${vmid} and all persistent data deleted.\n`,
     vmid,
     service: resolvedServiceName
   };
@@ -2103,8 +2115,8 @@ const parseServiceRemoveOptions = optionParser({
 });
 
 const parseServiceDestroyOptions = optionParser({
-  flags: [["--confirm", "confirm"], ["--yes", "yes"], ["-y", "yes"]],
-  booleans: ["--confirm", "--yes", "-y"]
+  flags: [["--confirm", "confirm"], ["--yes", "yes"], ["-y", "yes"], ["--force", "force"]],
+  booleans: ["--confirm", "--yes", "-y", "--force"]
 });
 
 const parseServiceRecheckOptions = optionParser({

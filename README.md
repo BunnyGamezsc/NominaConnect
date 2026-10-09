@@ -271,6 +271,13 @@ auth key and admin API token after confirmation. For an untracked container left
 by an older version, run `nomina service recheck tailscale --ip <LXC-IP>` first.
 These actions do not revoke keys in the Tailscale admin console.
 
+For an emergency per-service deletion when Tailscale DNS cannot be restored,
+run `nomina service destroy tailscale --force` and confirm the prompt. This
+skips DNS recovery, stores the saved DNS settings in
+`.nomina/state.json` under `tailnetDnsRecovery`, and prints a warning. Restore
+those settings manually in the Tailscale admin console; `--force` does not
+affect the safer behavior of `nomina uninstall`.
+
 ## Providers and development
 
 Supported providers: Technitium; Caddy or Traefik; step-ca or Caddy Internal CA;
