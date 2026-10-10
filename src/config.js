@@ -63,6 +63,7 @@ function readServiceEntry(lines, startIndex) {
   return { value: nested.value, nextIndex: nested.nextIndex };
 }
 
+/** Parse project YAML, keeping Docker binding intent in configuration and provider-native references in local state. */
 export function parseProjectConfiguration(content) {
   const lines = content.split("\n");
   const config = {
@@ -136,6 +137,13 @@ export function parseProjectConfiguration(content) {
       const services = readServiceList(lines, index, servicesIndent);
       config.managedInventory.services = services.value;
       index = services.nextIndex;
+      continue;
+    }
+    if (line === "dockerHosts:" || line === "dockerHosts: []") {
+      const indent = lines[index].match(/^(\s*)/)?.[1].length ?? 0;
+      const hosts = line.endsWith("[]") ? { value: [], nextIndex: index + 1 } : readServiceList(lines, index + 1, indent);
+      config.managedInventory.dockerHosts = hosts.value;
+      index = hosts.nextIndex;
       continue;
     }
     index += 1;
@@ -271,6 +279,7 @@ export function updatePlatformDeployment(config, platformKey, deployment) {
   };
 }
 
+/** Serialize managed inventory and Docker deployment intent without including runtime provider references. */
 export function serializeProjectConfiguration(config) {
   const lines = [
     "apiVersion: nomina.connect/v0alpha1",
@@ -288,6 +297,22 @@ export function serializeProjectConfiguration(config) {
   appendPlatformService(lines, "    certificateAuthority", config.managedInventory.platform.certificateAuthority);
   appendPlatformService(lines, "    vpn", config.managedInventory.platform.vpn);
   appendManagedServices(lines, config.managedInventory.services);
+  if (config.managedInventory.dockerHosts !== undefined) {
+    lines.push("  dockerHosts:");
+    if (config.managedInventory.dockerHosts.length === 0) lines.push("    []");
+    for (const host of config.managedInventory.dockerHosts) {
+      lines.push(`    - id: ${yamlScalar(host.id)}`, `      name: ${yamlScalar(host.name)}`, `      origin: ${yamlScalar(host.origin)}`, `      socketPath: ${yamlScalar(host.socketPath)}`);
+      if (host.deployment !== undefined) {
+        lines.push("      deployment:");
+        for (const [key, value] of Object.entries(host.deployment)) {
+          if (key === "resources") {
+            lines.push("        resources:");
+            for (const [resource, amount] of Object.entries(value)) lines.push(`          ${resource}: ${yamlScalar(amount)}`);
+          } else if (value !== undefined) lines.push(`        ${key}: ${yamlScalar(value)}`);
+        }
+      }
+    }
+  }
   lines.push("connectionSecretReferences:");
   for (const [id, reference] of Object.entries(config.connectionSecretReferences)) {
     lines.push(`  ${id}: ${reference}`);

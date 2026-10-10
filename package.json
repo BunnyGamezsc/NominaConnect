@@ -14,7 +14,8 @@
     "build:native:local": "bun build --compile --outfile dist/nomina bin/nomina.js",
     "build:node": "cp bin/nomina.js dist/nomina.js && chmod +x dist/nomina.js",
     "build:all": "bun run build:native && bun run build:native:arm64 && bun run build:node",
-    "test:acceptance": "node --test acceptance/live-proxmox.acceptance.mjs"
+    "test:acceptance": "node --test acceptance/live-proxmox.acceptance.mjs",
+    "test:docker-acceptance": "node --test acceptance/docker-lxc.acceptance.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

@@ -12,6 +12,7 @@ import { createTailscaleAdapter } from "./tailscale-adapter.js";
 import { createTailnetController } from "./tailscale-tailnet.js";
 import { createTechnitiumAdapter } from "./technitium-adapter.js";
 import { createTraefikAdapter } from "./traefik-adapter.js";
+import { createDockerAdapter } from "./docker-adapter.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -215,6 +216,7 @@ function requestViaNodeModules({ url, method = "GET", headers = {}, body, tls },
   });
 }
 
+/** Build Proxmox, provider, secret-store and Docker adapters backed by the configured command runner. */
 export function createProductionAdapters(options = {}) {
   const commandRunner = options.commandRunner ?? createCommandRunner();
   const secretResolver = options.secretResolver ?? createLocalSecretResolver();
@@ -276,9 +278,10 @@ export function createProductionAdapters(options = {}) {
       enableTunDevice: (vmid) => proxmox.enableTunDevice(vmid)
     })
   });
-  return Object.freeze({ proxmox, providerAdapters, secretStore });
+  return Object.freeze({ proxmox, providerAdapters, secretStore, docker: createDockerAdapter(proxmox, options.retryOptions) });
 }
 
+/** Build local Proxmox lifecycle and inspection operations around the command runner. */
 function createProxmoxAdapter(commandRunner) {
   return Object.freeze({
     async checkIpAvailability(ip) {
@@ -303,7 +306,7 @@ function createProxmoxAdapter(commandRunner) {
           }
         } catch {}
       }
-      return { status: "available" };
+      return { status: "uncertain", reason: "No configured LXC collision was found; external devices and DHCP leases cannot be verified" };
     },
     async validateProvisioningPrerequisites(spec) {
       await assertStorageAvailable(commandRunner, spec.storage);
@@ -316,14 +319,35 @@ function createProxmoxAdapter(commandRunner) {
       }
       return { templateVolume };
     },
-    async createLxc(spec) {
+    /** Reject operations when the configured Proxmox node differs from the local hostname. */
+    async assertLocalNode(node) {
+      const result = await commandRunner.run({ binary: "/usr/bin/hostname", args: ["-s"] });
+      if (result.stdout.trim() !== node) throw new Error(`Configured Proxmox node ${node} is not this host. Run Nomina on the configured node.`);
+    },
+    /** Check available rootdir storage, CPU, memory and an UP Linux bridge before Docker LXC creation. */
+    async validateDockerResources(spec) {
+      const storage = await commandRunner.run({ binary: "/usr/sbin/pvesm", args: ["status", "--content", "rootdir"] });
+      const parts = storage.stdout.split("\n").map((line) => line.trim().split(/\s+/)).find((row) => row[0] === spec.storage);
+      if (!parts || parts[2] !== "active" || !Number.isFinite(Number(parts[5])) || Number(parts[5]) < spec.resources.diskGb * 1024 * 1024) throw new Error("Selected storage must support rootdir and have enough available space for the requested Docker root disk.");
+      const cpu = await commandRunner.run({ binary: "/usr/bin/nproc", args: [] });
+      const memory = await commandRunner.run({ binary: "/usr/bin/awk", args: ["/MemAvailable:/ { print $2 }", "/proc/meminfo"] });
+      const availableCpu = Number(cpu.stdout.trim());
+      const availableMemory = Number(memory.stdout.trim());
+      if (!Number.isInteger(availableCpu) || availableCpu < 1 || !Number.isFinite(availableMemory) || availableMemory <= 0 || spec.resources.cpus > availableCpu || spec.resources.memoryMb * 1024 > availableMemory) throw new Error("Requested Docker CPU/memory exceeds available host resources or host capacity could not be verified.");
+      const bridge = await commandRunner.run({ binary: "/usr/bin/ip", args: ["-j", "-d", "link", "show", "dev", spec.bridge] });
+      const links = JSON.parse(bridge.stdout);
+      if (!links.some((link) => link.linkinfo?.info_kind === "bridge" && link.flags?.includes("UP"))) throw new Error("Docker networking requires an available, UP Linux bridge.");
+    },
+    /** Allocate and create an LXC, awaiting persistence hooks before creation and after success; optionally defer its first start. */
+    async createLxc(spec, hooks = {}) {
       const { templateVolume } = await this.validateProvisioningPrerequisites(spec);
       const nextId = await commandRunner.run({ binary: "/usr/bin/pvesh", args: ["get", "/cluster/nextid"] });
       const vmid = nextId.stdout.trim();
       if (!/^\d+$/.test(vmid)) {
         throw new Error("Proxmox did not return a valid next LXC ID.");
       }
-      const net0 = ["name=eth0", `bridge=${spec.bridge}`, `ip=${spec.ip}/24`];
+      await hooks.onAllocated?.({ vmid: Number(vmid), hostname: spec.hostname });
+      const net0 = ["name=eth0", `bridge=${spec.bridge}`, `ip=${spec.ip}/${spec.prefixLength ?? 24}`];
       if (spec.gateway !== undefined) {
         net0.push(`gw=${spec.gateway}`);
       }
@@ -338,14 +362,16 @@ function createProxmoxAdapter(commandRunner) {
           "--net0", net0.join(","),
           ...(spec.nameserver !== undefined ? ["--nameserver", spec.nameserver] : []),
           "--unprivileged", spec.unprivileged ? "1" : "0",
+          ...(spec.features === undefined ? [] : ["--features", spec.features]),
           "--onboot", "1",
-          "--start", "1"
+          "--start", spec.deferStart ? "0" : "1"
         ],
         // Template extraction plus first boot on slow (e.g. nested-virtualized)
         // storage routinely exceeds the 30s default; killing pct create
         // mid-extraction leaves a half-written rootfs ("received interrupt").
         timeoutMs: 600_000
       });
+      await hooks.onCreated?.({ vmid: Number(vmid), hostname: spec.hostname });
       return { vmid: Number(vmid), hostname: spec.hostname };
     },
     async listTemplates() {
@@ -355,6 +381,33 @@ function createProxmoxAdapter(commandRunner) {
       const result = await commandRunner.run({ binary: "/usr/sbin/pct", args: ["config", String(vmid)] });
       return parsePctConfig(result.stdout);
     },
+    /** Read the current LXC runtime status without changing it. */
+    async lxcStatus(vmid) {
+      const result = await commandRunner.run({ binary: "/usr/sbin/pct", args: ["status", String(vmid)] });
+      return result.stdout.trim().replace(/^status:\s*/, "");
+    },
+    /** Return LXC IDs, statuses and hostnames from a bounded Proxmox inventory listing. */
+    async listLxcs() {
+      const result = await commandRunner.run({ binary: "/usr/sbin/pct", args: ["list"], maxOutputBytes: 65536 });
+      return result.stdout.split("\n").slice(1).map((line) => line.trim().split(/\s+/))
+        .filter((row) => /^\d+$/.test(row[0])).map((row) => ({ vmid: Number(row[0]), status: row[1], hostname: row.at(-1) }));
+    },
+    /** Start the selected LXC with a bounded startup timeout. */
+    async startLxc(vmid) {
+      return commandRunner.run({ binary: "/usr/sbin/pct", args: ["start", String(vmid)], timeoutMs: 180000 });
+    },
+    /** Enable nesting and keyctl while preserving unrelated feature flags; reboot a running CT only when flags change. */
+    async enableDockerFeatures(vmid) {
+      const config = await commandRunner.run({ binary: "/usr/sbin/pct", args: ["config", String(vmid)] });
+      const current = config.stdout.match(/^features:\s*(.*)$/m)?.[1] ?? "";
+      const features = new Map(current.split(",").filter(Boolean).map((entry) => entry.split("=")));
+      if (features.get("nesting") === "1" && features.get("keyctl") === "1") return;
+      features.set("nesting", "1");
+      features.set("keyctl", "1");
+      await commandRunner.run({ binary: "/usr/sbin/pct", args: ["set", String(vmid), "--features", [...features].map(([key, value]) => `${key}=${value}`).join(",")] });
+      if (await this.lxcStatus(vmid) === "running") await commandRunner.run({ binary: "/usr/sbin/pct", args: ["reboot", String(vmid)], timeoutMs: 180000 });
+    },
+    /** Run a normalized command inside an LXC, forwarding input, redactions and output limits. */
     async pctExec(vmid, command) {
       const normalized = normalizeCommand(command, DEFAULT_TIMEOUT_MS);
       return commandRunner.run({
@@ -362,7 +415,8 @@ function createProxmoxAdapter(commandRunner) {
         args: ["exec", String(vmid), "--", normalized.binary, ...normalized.args],
         timeoutMs: normalized.timeoutMs,
         redactions: normalized.redactions,
-        ...(normalized.stdin === undefined ? {} : { stdin: normalized.stdin })
+        ...(normalized.stdin === undefined ? {} : { stdin: normalized.stdin }),
+        ...(normalized.maxOutputBytes === undefined ? {} : { maxOutputBytes: normalized.maxOutputBytes, truncateOutput: normalized.truncateOutput })
       });
     },
     async supportsSnapshots() {
@@ -398,11 +452,12 @@ function createProxmoxAdapter(commandRunner) {
   });
 }
 
+/** Validate executable arguments and normalize timeout, input, redaction and output-limit settings. */
 function normalizeCommand(command, defaultTimeoutMs) {
   if (command === null || typeof command !== "object" || Array.isArray(command)) {
     throw new Error("Commands must be an object with a fixed binary and argument array.");
   }
-  const { binary, args, timeoutMs = defaultTimeoutMs, redactions = [], stdin = undefined } = command;
+  const { binary, args, timeoutMs = defaultTimeoutMs, redactions = [], stdin = undefined, maxOutputBytes = undefined, truncateOutput = false } = command;
   if (typeof binary !== "string" || binary.length === 0 || binary.includes("\0")) {
     throw new Error("Command binary must be a non-empty string.");
   }
@@ -418,28 +473,50 @@ function normalizeCommand(command, defaultTimeoutMs) {
   // Standard input is the only channel that carries a resolved connection
   // secret into a command: an argument array would expose it to the host
   // process list (ADR-0019).
-  return { binary, args: [...args], timeoutMs, redactions: [...redactions], ...(stdin === undefined ? {} : { stdin }) };
+  if (maxOutputBytes !== undefined && (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1)) throw new Error("Command output limit must be a positive integer.");
+  return { binary, args: [...args], timeoutMs, redactions: [...redactions], ...(stdin === undefined ? {} : { stdin }), maxOutputBytes, truncateOutput };
 }
 
-function executeCommand({ spawn, binary, args, timeoutMs, stdin = undefined }) {
+/** Spawn a command with timeout and combined output limits; reject overflow unless explicit truncation is allowed. */
+function executeCommand({ spawn, binary, args, timeoutMs, stdin = undefined, maxOutputBytes = undefined, truncateOutput = false }) {
   return new Promise((resolve, reject) => {
     const child = spawn(binary, args, { shell: false, windowsHide: true });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let outputBytes = 0;
+    let truncated = false;
+    let killTimer;
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
+      killTimer = setTimeout(() => child.kill("SIGKILL"), 1000);
     }, timeoutMs);
-    child.stdout?.on("data", (chunk) => { stdout += chunk; });
-    child.stderr?.on("data", (chunk) => { stderr += chunk; });
+    /** Append each output channel within the shared byte budget, killing the child on disallowed overflow. */
+    function append(chunk, channel) {
+      if (truncated) return;
+      const bytes = Buffer.from(chunk);
+      const remaining = maxOutputBytes === undefined ? bytes.length : Math.max(0, maxOutputBytes - outputBytes);
+      const value = bytes.subarray(0, remaining).toString();
+      if (channel === "stdout") stdout += value; else stderr += value;
+      outputBytes += bytes.length;
+      if (maxOutputBytes !== undefined && outputBytes > maxOutputBytes) {
+        truncated = true;
+        child.kill("SIGTERM");
+        killTimer = setTimeout(() => child.kill("SIGKILL"), 1000);
+      }
+    }
+    child.stdout?.on("data", (chunk) => append(chunk, "stdout"));
+    child.stderr?.on("data", (chunk) => append(chunk, "stderr"));
     child.once("error", (error) => {
       clearTimeout(timer);
+      clearTimeout(killTimer);
       reject(error);
     });
     child.once("close", (exitCode) => {
       clearTimeout(timer);
-      resolve({ exitCode: exitCode ?? 1, stdout, stderr, timedOut });
+      clearTimeout(killTimer);
+      resolve({ exitCode: truncated ? (truncateOutput ? 0 : 1) : exitCode ?? 1, stdout, stderr, timedOut, truncated });
     });
     if (stdin !== undefined) {
       child.stdin?.on("error", () => {});
@@ -450,12 +527,14 @@ function executeCommand({ spawn, binary, args, timeoutMs, stdin = undefined }) {
   });
 }
 
+/** Replace configured sensitive strings in captured command output before returning it. */
 function redactResult(result, redactions) {
   return {
     exitCode: result.exitCode ?? 1,
     stdout: redactValue(result.stdout, redactions),
     stderr: redactValue(result.stderr, redactions),
-    ...(result.timedOut ? { timedOut: true } : {})
+    ...(result.timedOut ? { timedOut: true } : {}),
+    ...(result.truncated ? { truncated: true } : {})
   };
 }
 
