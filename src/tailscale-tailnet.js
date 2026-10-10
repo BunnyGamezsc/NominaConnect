@@ -228,6 +228,7 @@ export function firewallInstallScript(dnsIp, proxyIp, gatewayIp) {
     "install -m 0700 -d /usr/local/sbin",
     "cat > /usr/local/sbin/nomina-tailnet-firewall <<'NOMINA_FIREWALL'",
     script.join("\n"),
+    "[ ! -x /usr/local/sbin/nomina-tailnet-tcp ] || /usr/local/sbin/nomina-tailnet-tcp",
     "NOMINA_FIREWALL",
     "chmod 0700 /usr/local/sbin/nomina-tailnet-firewall",
     "cat > /etc/systemd/system/nomina-tailnet-firewall.service <<'NOMINA_UNIT'",

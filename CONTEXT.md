@@ -263,3 +263,25 @@ A published application address served by Caddy or Traefik through TLS with a
 certificate that browsers do not trust because no trust-providing CA is
 configured.
 _Avoid_: HTTP-only fallback, failed exposure
+
+**Managed exposure**:
+A declared client-facing hostname and transport connected to a service's backend
+IP and port, or to a web redirect. The backend may exist outside NominaConnect's
+deployment inventory.
+_Avoid_: managed container, automatic application deployment
+
+**Web exposure**:
+A managed exposure whose client connection uses HTTPS and hostname-based web
+routing.
+_Avoid_: universal exposure transport, HTTP fallback
+
+**TCP exposure**:
+A managed exposure whose client connection forwards an ordinary TCP byte stream
+through a distinct listener address and port to its backend. Its service health
+check establishes transport reachability, while application access is verified
+separately.
+_Avoid_: hostname-based TCP routing, successful application login
+
+**Exposure listener port**:
+The client-facing port of a TCP exposure, retained when its backend port changes.
+_Avoid_: backend port, hostname routing key

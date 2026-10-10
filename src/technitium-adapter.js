@@ -134,7 +134,7 @@ export function createTechnitiumAdapter({ httpClient, secretResolver, enableNest
     async healthCheckExposure(request) {
       const observed = await this.inspect(request);
       const record = observed.resources.find((resource) => resource.id === request.hostname && resource.locator?.type === "A");
-      if (record === undefined) {
+      if (record === undefined || (request.expectedIp !== undefined && record.record !== `${request.hostname} A ${request.expectedIp}`)) {
         return { dns: "unreachable", status: "unhealthy" };
       }
       return { dns: "reachable", status: "healthy" };

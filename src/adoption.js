@@ -1,3 +1,4 @@
+import { tcpRequest } from "./tcp-exposure.js";
 import { getPlatformProvider } from "./providers.js";
 
 export function collectPlatformServices(managedInventory) {
@@ -552,6 +553,28 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
       });
       changes.push(...dnsAdoption.changes);
       warnings.push(...dnsAdoption.warnings);
+    }
+    if (service.exposure.protocol === "tcp") {
+      try {
+        const request = tcpRequest(project, service.exposure);
+        const tcp = providerAdapters["tcp"];
+        if (!tcp?.inspect) throw new Error("TCP forwarding adapter is unavailable");
+        const inspection = await withBoundedRetry(() => tcp.inspect(request), retryOptions);
+        const matches = inspection.resources.filter((resource) => resource.hostname === hostname);
+        if (matches.length !== 1) throw new Error("TCP forwarding is missing or ambiguous");
+        const observed = matches[0];
+        if (observed.ip !== request.ip || Number(observed.listenerPort) !== request.listenerPort) {
+          throw new Error("TCP listener differs from its recorded endpoint; managed configuration was preserved");
+        }
+        const after = { ...service.exposure, backend: { ip: observed.backendIp, port: observed.backendPort }, tailnet: observed.tailnet };
+        const changed = observed.backendIp !== request.backendIp || Number(observed.backendPort) !== request.backendPort || observed.tailnet !== request.tailnet;
+        const health = await tcp.healthCheckExposure({ ...request, backendIp: observed.backendIp, backendPort: Number(observed.backendPort), tailnet: observed.tailnet });
+        if (health.status !== "healthy") warnings.push({ serviceId: service.id, serviceName: service.name, platformKey: "tcp", message: health.reason ?? "TCP transport health check failed; application access is not verified." });
+        if (changed) changes.push({ kind: "exposure-changed", serviceId: service.id, serviceName: service.name, before: service.exposure, after, fields: ["backend", "tailnet"], health, verified: health.status === "healthy", timestamp: new Date().toISOString() });
+      } catch (error) {
+        warnings.push({ serviceId: service.id, serviceName: service.name, platformKey: "tcp", message: `Failed to inspect TCP exposure for ${hostname}: ${error.message}.` });
+      }
+      continue;
     }
     if (proxyAdapter !== undefined && proxyRef !== undefined) {
       try {

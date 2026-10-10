@@ -1,3 +1,4 @@
+import { publishTcpExposure } from "./tcp-exposure.js";
 import { randomUUID } from "node:crypto";
 import { withHealthyRetry } from "./adoption.js";
 import { getPlatformProvider } from "./providers.js";
@@ -19,6 +20,11 @@ export async function publishManagedExposure({
   providerAdapters,
   healthRetryOptions = {}
 }) {
+  const storedExposure = project.config.managedInventory.services.find((service) => service.exposure?.hostname === options.hostname)?.exposure;
+  if ((options.protocol ?? storedExposure?.protocol ?? "https") === "tcp") {
+    return publishTcpExposure({ project, options, providerAdapters });
+  }
+  if (storedExposure?.protocol === "tcp") throw new Error("Remove the TCP exposure before changing its transport to HTTPS.");
   const dnsService = project.config.managedInventory.platform.dns;
   const proxyService = project.config.managedInventory.platform.reverseProxy;
   const caService = project.config.managedInventory.platform.certificateAuthority;
@@ -321,6 +327,7 @@ function collectManagedDnsReferences(project, hostname) {
 
 function collectManagedProxyReferences(project, hostname) {
   const references = project.config.managedInventory.services
+    .filter((service) => service.exposure?.protocol !== "tcp")
     .map((service) => service.exposure?.hostname)
     .filter((value) => value !== undefined);
   if (!references.includes(hostname)) {
@@ -331,6 +338,7 @@ function collectManagedProxyReferences(project, hostname) {
 
 function collectManagedCaReferences(project, hostname) {
   const references = project.config.managedInventory.services
+    .filter((service) => service.exposure?.protocol !== "tcp")
     .map((service) => service.exposure?.hostname)
     .filter((value) => value !== undefined);
   if (!references.includes(hostname)) {

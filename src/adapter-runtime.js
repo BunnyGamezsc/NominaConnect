@@ -4,6 +4,7 @@ import http from "node:http";
 import https from "node:https";
 import path from "node:path";
 
+import { createTcpAdapter } from "./tcp-adapter.js";
 import { createCaddyAdapter } from "./caddy-adapter.js";
 import { createNetBirdAdapter } from "./netbird-adapter.js";
 import { createStepCaAdapter } from "./step-ca-adapter.js";
@@ -237,6 +238,7 @@ export function createProductionAdapters(options = {}) {
     }
   });
   const providerAdapters = Object.freeze({
+    tcp: createTcpAdapter({ exec: (vmid, command) => proxmox.pctExec(vmid, command) }),
     technitium: createTechnitiumAdapter({
       httpClient,
       secretResolver,

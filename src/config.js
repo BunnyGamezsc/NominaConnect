@@ -327,8 +327,14 @@ function appendManagedServices(lines, services) {
         );
       }
       lines.push(
-        `        protocol: ${yamlScalar(service.exposure.protocol)}`
+        `        protocol: ${yamlScalar(service.exposure.protocol ?? "https")}`
       );
+      if (service.exposure.listenerPort !== undefined) {
+        lines.push(`        listenerPort: ${service.exposure.listenerPort}`);
+      }
+      if (service.exposure.preset !== undefined) {
+        lines.push(`        preset: ${yamlScalar(service.exposure.preset)}`);
+      }
       if (service.exposure.tailnet !== undefined) {
         lines.push(`        tailnet: ${service.exposure.tailnet === true}`);
       }

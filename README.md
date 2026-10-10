@@ -168,7 +168,8 @@ Use the secret prompts. Unattended setup can supply the admin token through
 The gateway forwards DNS queries to Technitium. Successful A answers in the
 managed domain that point at the proxy are rewritten to the gateway's Tailscale
 IPv4 address. Negative and blocked answers remain unchanged. The gateway
-forwards TCP 80/443 to the proxy, restricts other incoming tailnet traffic,
+forwards TCP 80/443 and opted-in TCP exposure listener ports to the proxy,
+restricts other incoming tailnet traffic,
 and advertises no LAN subnet route. Gateway IPv6 ingress is blocked.
 
 **DNS setup affects the entire tailnet.** Nomina replaces global nameservers
@@ -185,7 +186,7 @@ is not needed for these exposures.
 | --- | --- |
 | Local, Tailscale off | Local Technitium returns the proxy LAN address |
 | Local, Tailscale on | Gateway Tailscale address; transport can use local Ethernet/Wi-Fi |
-| Away, Tailscale on | Same HTTPS names through Tailscale |
+| Away, Tailscale on | Same HTTPS and opted-in TCP names through Tailscale |
 | Away, Tailscale off | Internal services unavailable |
 
 A `100.x` DNS answer at home does not prove traffic uses a remote relay.
@@ -312,3 +313,63 @@ SHA-256 hashes and leaves the release `nomina` link alone.
 - [Live Proxmox acceptance](docs/live-proxmox-acceptance.md)
 - [Current field report](docs/bunnytest-tailnet-field-report.md), [remaining fix plan](docs/production-check-followups.md)
 - [Lab tools](tools/lab/README.md), [changelog](CHANGELOG.md)
+
+## TCP and Minecraft Java exposures
+
+Choose TCP in the exposure wizard, then enter the hostname, backend IP, and
+backend port. Scripted setup uses the same workflow:
+
+```sh
+nomina exposure publish --name minecraft --protocol tcp \
+  --hostname mc.example.internal --backend-ip 198.51.100.20 \
+  --backend-port 25565 --tailnet true
+```
+
+A Minecraft Java client enters `mc.example.internal`. LAN DNS points at the selected
+proxy LXC; tailnet DNS returns the gateway's Tailscale address. Both listen on
+25565. TCP works with Caddy or Traefik and does not use an HTTP route or request a
+certificate. The application retains its own authentication and encryption.
+
+`--listener-port` defaults to the backend port on creation. Republish retains the
+saved listener port while updating the backend. Each listener address and port
+can serve one backend; choosing another hostname does not make a shared port
+possible. Ports used by gateway administration and platform services are reserved.
+The initial TCP path supports IPv4. Minecraft Bedrock/UDP is outside this path.
+
+`--tailnet false` removes the exposure's gateway forwarding while keeping LAN
+access. DNS may still return the gateway address remotely, where its port is
+blocked. Run `nomina service remove minecraft` to disconnect owned DNS and TCP
+forwarding. Edited or conflicting resources cause a refusal or verification
+warning. Successful TCP health means transport reachability, not a Minecraft join.
+
+Persistent socket forwarding runs in the proxy LXC, independently of the web
+proxy process. Its socket and service units are enabled at boot. Gateway port
+files are replayed by the existing persistent firewall. See
+[the live verification guide](docs/tcp-live-verification.md) for builds, checks,
+and the later combined TCP/SMB test stage.
+
+## SMB exposures
+
+Choose SMB in the wizard, or publish an existing Samba LXC, NAS or VM:
+
+```sh
+nomina exposure publish --name files --protocol smb \
+  --hostname files.example.internal --backend-ip 198.51.100.21 --tailnet true
+```
+
+The backend port defaults to 445. Supply `--backend-port 1445` for a server on
+another port. The LAN proxy and opted-in Tailscale gateway always listen on TCP
+445, so Windows opens `\\files.example.internal\SHARE` and macOS Finder opens
+`smb://files.example.internal/SHARE`, without a client port. SMB is saved as a TCP
+exposure with `preset: smb`; republish keeps the preset and client port.
+
+Samba owns shares, credentials, permissions and application encryption.
+NominaConnect does not provision or administer the backend. Configure the
+backend's hostname alias for the chosen name before client testing. The
+[Samba fixture and verification guide](docs/smb-live-verification.md) covers
+aliases, authenticated file checks and exact inputs for the combined release
+stage. A healthy TCP endpoint does not verify SMB authentication or file access.
+
+SMB, Minecraft and HTTPS can coexist. Another backend cannot use the same port
+445 listener. Updates, restart persistence, `--tailnet false`, tracking and
+`nomina service remove files` use the existing TCP lifecycle.

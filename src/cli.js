@@ -1,3 +1,4 @@
+import { tcpRequest } from "./tcp-exposure.js";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { INITIAL_PLATFORM_CATALOG, certificateAuthorityIsCompatible, hasCatalogOption } from "./catalog.js";
@@ -63,6 +64,7 @@ async function runCommand(command, rest, adapters) {
   if (command === "--version" || command === "-v" || command === "version") {
     return { stdout: `${VERSION}\n` };
   }
+  if (command === "--help" || command === "help" || command === "-h") return { stdout: "nomina exposure publish --name NAME --protocol https|tcp|smb --hostname HOST --backend-ip IP [--backend-port PORT] [--listener-port PORT] [--tailnet true|false]\nHTTPS is the default. HTTPS and generic TCP require a backend port. TCP listens on the backend port by default; Minecraft Java uses 25565. Raw TCP selects a backend by listener address and port.\nSMB uses client TCP 445, with backend port 445 by default, and supports existing Samba/NAS/VM servers. Windows: \\\\files.bunny.internal\\SHARE. macOS: smb://files.bunny.internal/SHARE. Shares, credentials and permissions stay on the server. Configure Samba hostname aliases; see docs/smb-live-verification.md.\nRemove with: nomina service remove NAME\n" };
   switch (command) {
     case "init":
       return initializeProject(parseInitOptions(rest), adapters);
@@ -850,7 +852,7 @@ async function syncTailscaleTailnet(project, vpnReference, providerAdapter, adap
     }
   };
   // Install opt-out guards before sending tailnet web traffic to the proxy.
-  const republishedReferences = await republishExposures(workingProject, project.config.managedInventory.services, adapters.providerAdapters,
+  const republishedReferences = await republishExposures(workingProject, project.config.managedInventory.services.filter((service) => service.exposure?.protocol !== "tcp"), adapters.providerAdapters,
     { verifyTailnetGuards: true });
   if (project.config.managedInventory.platform.reverseProxy.service === "caddy") {
     await persistCaddyLiveConfig(adapters.proxmox, project.state.providerReferences[project.config.managedInventory.platform.reverseProxy.id]?.vmid);
@@ -863,6 +865,7 @@ async function syncTailscaleTailnet(project, vpnReference, providerAdapter, adap
     adminSecretReference,
     saveDnsSnapshot: (snapshot, gatewayIp, options) => saveTailnetDnsSnapshot(project, adapters, snapshot, gatewayIp, options)
   });
+  Object.assign(republishedReferences, await republishExposures(workingProject, project.config.managedInventory.services.filter((service) => service.exposure?.protocol === "tcp"), adapters.providerAdapters, { verifyTailnetGuards: true }));
   return {
     references: republishedReferences,
     warnings: tailnetResult?.warnings ?? []
@@ -1127,6 +1130,10 @@ async function removeService(serviceName, rawOptions, adapters) {
       const dnsRef = project.state.providerReferences[dnsService?.id];
       const proxyService = project.config.managedInventory.platform.reverseProxy;
       const proxyRef = project.state.providerReferences[proxyService?.id];
+      if (matchedService.exposure.protocol === "tcp") {
+        if (!providerAdapters.tcp?.remove) throw new Error("TCP forwarding adapter is unavailable.");
+        await providerAdapters.tcp.remove(tcpRequest(project, matchedService.exposure));
+      }
       if (providerAdapters.technitium?.deleteRecord) {
         await providerAdapters.technitium.deleteRecord({
           hostname,
@@ -1136,7 +1143,7 @@ async function removeService(serviceName, rawOptions, adapters) {
           connectionSecretReference: project.config.connectionSecretReferences[dnsService?.id]
         });
       }
-      if (proxyService && providerAdapters[proxyService.service]?.unpublishRoute) {
+      if (matchedService.exposure.protocol !== "tcp" && proxyService && providerAdapters[proxyService.service]?.unpublishRoute) {
         await providerAdapters[proxyService.service].unpublishRoute({
           hostname,
           ip: proxyRef?.ip,
@@ -1144,7 +1151,7 @@ async function removeService(serviceName, rawOptions, adapters) {
           endpoint: proxyEndpointFor(proxyService.service, proxyRef?.ip)
         });
       }
-      if (proxyService?.service === "caddy") {
+      if (matchedService.exposure.protocol !== "tcp" && proxyService?.service === "caddy") {
         persistCaddyLiveConfig(proxmox, project.state.providerReferences[proxyService.id]?.vmid);
       }
     }
@@ -1173,7 +1180,7 @@ async function removeService(serviceName, rawOptions, adapters) {
     filesystem.chmod(project.statePath, 0o600);
 
     return {
-      stdout: `Exposure ${matchedService.name} (${hostname}) removed. DNS and proxy routes disconnected.\n`,
+      stdout: `Exposure ${matchedService.name} (${hostname}) removed. DNS and forwarding disconnected.\n`,
       service: matchedService.name
     };
   }
@@ -1545,6 +1552,8 @@ async function republishExposures(workingProject, services, providerAdapters, { 
       project: workingProject,
       options: {
         name: service.name,
+        protocol: service.exposure.protocol ?? "https",
+        listenerPort: service.exposure.listenerPort !== undefined ? Number(service.exposure.listenerPort) : undefined,
         hostname: service.exposure.hostname,
         backendIp: service.exposure.backend?.ip,
         backendPort: service.exposure.backend?.port !== undefined ? Number(service.exposure.backend.port) : undefined,
@@ -1556,7 +1565,7 @@ async function republishExposures(workingProject, services, providerAdapters, { 
       providerAdapters
     });
     if (verifyTailnetGuards && service.exposure.tailnet === false &&
-        result.health.reverseProxy?.status !== "healthy") {
+        ("tcp" in result.health ? result.health.tcp : result.health.reverseProxy)?.status !== "healthy") {
       throw new Error(`The reverse proxy could not verify tailnet denial for ${service.exposure.hostname}; routes were not advertised.`);
     }
     references[result.managedService.id] = result.integrationReferences;
@@ -1640,7 +1649,9 @@ async function changeBaseDomain(options, adapters) {
           connectionSecretReference: project.config.connectionSecretReferences[dnsService.id]
         });
       }
-      await proxyAdapter.unpublishRoute({
+      if (service.exposure.protocol === "tcp") {
+        await providerAdapters.tcp.remove(tcpRequest(project, service.exposure));
+      } else await proxyAdapter.unpublishRoute({
         hostname: oldHost,
         ip: proxyRef?.ip,
         vmid: proxyRef?.vmid,
@@ -1942,9 +1953,19 @@ async function publishExposure(options, adapters) {
 
   const project = loadProject(filesystem, options.projectDir);
   const resolvedOptions = await promptExposureOptions(project, options, adapters.prompts);
+  const storedExposure = project.config.managedInventory.services.find((service) => service.exposure?.hostname === resolvedOptions.hostname)?.exposure;
+  if (resolvedOptions.protocol === "smb" || (resolvedOptions.protocol === "tcp" && storedExposure?.preset === "smb")) {
+    resolvedOptions.protocol = "tcp";
+    resolvedOptions.preset = "smb";
+    resolvedOptions.backendPort ??= Number(storedExposure?.backend?.port ?? 445);
+    if (resolvedOptions.listenerPort !== undefined && resolvedOptions.listenerPort !== 445) {
+      throw new Error("SMB requires client-facing TCP listener port 445. The backend port can differ.");
+    }
+    resolvedOptions.listenerPort = 445;
+  }
   validateExposureOptions(resolvedOptions);
 
-  await ensureCaddyTrustsStepCa(project, adapters);
+  if (resolvedOptions.protocol !== "tcp") await ensureCaddyTrustsStepCa(project, adapters);
 
   const result = await publishManagedExposure({
     project,
@@ -1966,29 +1987,36 @@ async function publishExposure(options, adapters) {
   filesystem.chmod(project.statePath, 0o600);
 
   const proxyServiceForPersistence = project.config.managedInventory.platform.reverseProxy;
-  if (proxyServiceForPersistence?.service === "caddy") {
+  if (result.managedService.exposure.protocol !== "tcp" && proxyServiceForPersistence?.service === "caddy") {
     persistCaddyLiveConfig(adapters.proxmox, project.state.providerReferences[proxyServiceForPersistence.id]?.vmid);
   }
 
   const actionLabel = result.isUpdate ? "updated" : "published";
   const healthLabel = result.health.status === "healthy" ? "healthy" : "unhealthy";
+  const tcpHealth = "tcp" in result.health ? result.health.tcp : undefined;
+  const proxyHealth = "reverseProxy" in result.health ? result.health.reverseProxy : undefined;
+  const caHealth = "certificateAuthority" in result.health ? result.health.certificateAuthority : undefined;
   const warnings = [
     ...(result.warnings ?? []),
-    ...(result.health.reverseProxy?.reason !== undefined ? [result.health.reverseProxy.reason] : []),
-    ...(result.health.certificateAuthority?.reason !== undefined ? [result.health.certificateAuthority.reason] : [])
+    ...(tcpHealth?.reason !== undefined ? [tcpHealth.reason] : []),
+    ...(proxyHealth?.reason !== undefined ? [proxyHealth.reason] : []),
+    ...(caHealth?.reason !== undefined ? [caHealth.reason] : [])
   ];
   const warningLines = warnings.map((warning) => `Warning: ${warning}\n`).join("");
+  const smb = "preset" in result.managedService.exposure && result.managedService.exposure.preset === "smb";
+  const clientInstructions = smb
+    ? `Windows: \\\\${resolvedOptions.hostname}\\SHARE. macOS: smb://${resolvedOptions.hostname}/SHARE.\nShares, credentials and permissions stay on the SMB server. Configure its hostname alias for ${resolvedOptions.hostname}; see docs/smb-live-verification.md.\n`
+    : "";
   const destination = resolvedOptions.redirectTo !== undefined && resolvedOptions.redirectTo !== ""
     ? `redirect to ${resolvedOptions.redirectTo} (${resolvedOptions.redirectCode ?? 308})`
-    : `via HTTPS at ${resolvedOptions.backendIp}:${resolvedOptions.backendPort}`;
+    : `via ${result.managedService.exposure.protocol.toUpperCase()} at ${resolvedOptions.backendIp}:${resolvedOptions.backendPort}${result.managedService.exposure.protocol === "tcp" ? ` (listener ${"listenerPort" in result.managedService.exposure ? result.managedService.exposure.listenerPort : ""}; ${smb ? "SMB file access" : "application join"} not verified)` : ""}`;
 
   return {
-    stdout: `Exposure ${actionLabel} for ${resolvedOptions.hostname} ${destination}. Health: ${healthLabel}.\n${warningLines}`,
+    stdout: `Exposure ${actionLabel} for ${resolvedOptions.hostname} ${destination}. Health: ${healthLabel}.\n${warningLines}${clientInstructions}`,
     health: result.health,
     warnings,
     dnsInspection: result.dnsInspection,
-    proxyInspection: result.proxyInspection,
-    ...(result.caInspection !== undefined ? { caInspection: result.caInspection } : {}),
+    ...("tcpInspection" in result ? { tcpInspection: result.tcpInspection } : { proxyInspection: result.proxyInspection, ...(result.caInspection !== undefined ? { caInspection: result.caInspection } : {}) }),
     managedService: result.managedService
   };
 }
@@ -2083,13 +2111,13 @@ const parseServiceAddOptions = optionParser({
 
 const parseExposurePublishOptions = optionParser({
   flags: [
-    ["--name", "name"], ["--hostname", "hostname"], ["--backend-ip", "backendIp"],
+    ["--name", "name"], ["--hostname", "hostname"], ["--protocol", "protocol"], ["--listener-port", "listenerPort"], ["--backend-ip", "backendIp"],
     ["--backend-port", "backendPort"], ["--backend-tls", "backendTls"],
     ["--redirect-to", "redirectTo"], ["--redirect-code", "redirectCode"],
     ["--tailnet", "tailnet"]
   ],
   booleans: ["--backend-tls", "--tailnet"],
-  numbers: ["backendPort", "redirectCode"]
+  numbers: ["backendPort", "listenerPort", "redirectCode"]
 });
 
 const parseSecretChangeOptions = optionParser({
@@ -2124,6 +2152,10 @@ const parseServiceRecheckOptions = optionParser({
 });
 
 function validateExposureOptions(options) {
+  options.protocol ??= "https";
+  if (!["https", "tcp"].includes(options.protocol)) throw new Error("Exposure protocol must be https, tcp or smb.");
+  if (options.protocol === "tcp" && (options.redirectTo || options.backendTls)) throw new Error("TCP does not accept HTTPS backend TLS or URL redirect options.");
+  if (options.protocol === "https" && options.listenerPort !== undefined) throw new Error("Listener port is only available for TCP exposures.");
   for (const field of ["name", "hostname"]) {
     if (options[field] === undefined || options[field] === "") {
       throw new Error(`${field} is required.`);
@@ -2142,7 +2174,7 @@ function validateExposureOptions(options) {
   if (!isIpAddress(options.backendIp)) {
     throw new Error(`Invalid backend IP: ${options.backendIp}.`);
   }
-  if (!Number.isInteger(options.backendPort) || options.backendPort <= 0) {
+  if (!Number.isInteger(options.backendPort) || options.backendPort <= 0 || options.backendPort > 65535) {
     throw new Error(`Invalid backend port: ${options.backendPort}.`);
   }
 }

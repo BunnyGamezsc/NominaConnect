@@ -154,9 +154,9 @@ const MENU_ENTRIES = Object.freeze([
   { value: "provision-caddy-internal-ca", label: "Configure Caddy Internal CA", hint: "configure internal certificates in Caddy", when: (project) => canProvisionCertificateAuthority(project, "caddy-internal-ca") },
   { value: "provision-tailscale", label: "Provision Tailscale VPN", hint: "create the Tailscale LXC", when: (project) => canProvisionVpn(project, "tailscale") },
   { value: "provision-netbird", label: "Provision NetBird VPN", hint: "create the NetBird LXC", when: (project) => canProvisionVpn(project, "netbird") },
-  { value: "publish-exposure", label: "Publish a web exposure", hint: "connect DNS and HTTPS routing", when: canPublishExposure },
+  { value: "publish-exposure", label: "Publish an exposure", hint: "connect DNS and HTTPS or TCP forwarding", when: canPublishExposure },
   { value: "edit-exposure", label: "Edit an exposure", hint: "update backend IP or port", when: canEditExposure },
-  { value: "remove-exposure", label: "Remove an exposure", hint: "disconnect DNS and HTTPS routing", when: canRemoveExposure },
+  { value: "remove-exposure", label: "Remove an exposure", hint: "disconnect DNS and forwarding", when: canRemoveExposure },
   { value: "change-domain", label: "Change the local domain", hint: "migrate exposures to a new TLD", when: hasExposures },
   {
     value: "toggle-http-redirect",
@@ -342,7 +342,7 @@ export async function runInteractiveApp(adapters) {
     // ask for the desired type first and default every later prompt from the
     // stored values of that type (which may not exist yet after a conversion).
     let wantRedirect = svc.exposure.redirect !== undefined;
-    if (adapters.prompts !== undefined) {
+    if (svc.exposure.protocol !== "tcp" && adapters.prompts !== undefined) {
       wantRedirect = await confirmPrompt(
         adapters.prompts,
         "Is this a redirect to another URL? (no backend, e.g. apex bunny.internal -> home.bunny.internal)",
@@ -393,14 +393,14 @@ export async function runInteractiveApp(adapters) {
     }
     // Ask with the stored value as default so edits can flip the TLS setting.
     let backendTls = svc.exposure.backend?.tls === true;
-    if (adapters.prompts !== undefined) {
+    if (svc.exposure.protocol !== "tcp" && adapters.prompts !== undefined) {
       backendTls = await confirmPrompt(
         adapters.prompts,
         "Does the backend serve HTTPS/TLS itself? (e.g. Proxmox :8006, OPNsense)",
         backendTls
       );
     }
-    const publishArgs = ["exposure", "publish", "--name", svc.name, "--hostname", svc.exposure.hostname, "--backend-ip", backendIp, "--backend-port", String(backendPort)];
+    const publishArgs = ["exposure", "publish", "--protocol", svc.exposure.protocol ?? "https", "--name", svc.name, "--hostname", svc.exposure.hostname, "--backend-ip", backendIp, "--backend-port", String(backendPort)];
     if (backendTls) {
       publishArgs.push("--backend-tls");
     }
@@ -723,7 +723,8 @@ export async function promptNetBirdOptions(project, existingOptions, prompts, av
 
 export async function promptExposureOptions(project, existingOptions, prompts) {
   if (prompts?.ask === undefined) {
-    return existingOptions;
+    const stored = (project.config.managedInventory.services ?? []).find((service) => service.exposure?.hostname === existingOptions.hostname)?.exposure;
+    return { ...existingOptions, protocol: existingOptions.protocol ?? stored?.preset ?? stored?.protocol ?? "https" };
   }
 
   const name = existingOptions.name ?? await askPrompt(prompts, "Service name", "app");
@@ -731,8 +732,17 @@ export async function promptExposureOptions(project, existingOptions, prompts) {
   const hostname = existingOptions.hostname ?? await askPrompt(prompts, "Full hostname", suggestedHostname);
   const existingExposure = (project.config.managedInventory.services ?? [])
     .find((service) => service.exposure?.hostname === hostname)?.exposure;
+  const scriptedSmbProtocol = existingExposure?.preset === "smb"
+    && existingOptions.name && existingOptions.hostname && existingOptions.backendIp
+    ? "smb"
+    : undefined;
+  const protocol = existingOptions.protocol ?? scriptedSmbProtocol ?? (prompts.select
+    ? await prompts.select({ message: "Exposure protocol", initialValue: existingExposure?.preset ?? existingExposure?.protocol ?? "https", options: [{ value: "https", label: "HTTPS", hint: "web service" }, { value: "tcp", label: "TCP", hint: "raw TCP, including Minecraft Java" }, { value: "smb", label: "SMB", hint: "file shares over TCP 445; credentials stay on the server" }] })
+    : await askPrompt(prompts, "Exposure protocol (https, tcp or smb)", existingExposure?.preset ?? existingExposure?.protocol ?? "https"));
+  const isTcp = protocol === "tcp" || protocol === "smb";
+  const isSmb = protocol === "smb" || (protocol === "tcp" && existingExposure?.preset === "smb");
   const tailnet = existingOptions.tailnet ?? await promptTailnetAccess(project, existingExposure?.tailnet, prompts);
-  const isRedirect = existingOptions.redirectTo !== undefined && existingOptions.redirectTo !== ""
+  const isRedirect = isTcp ? false : existingOptions.redirectTo !== undefined && existingOptions.redirectTo !== ""
     ? true
     : await confirmPrompt(
       prompts,
@@ -744,20 +754,26 @@ export async function promptExposureOptions(project, existingOptions, prompts) {
       ?? await askPrompt(prompts, "Redirect target (e.g. home.bunny.internal)", `home.${project.config.baseLocalDomain}`);
     const redirectCode = existingOptions.redirectCode
       ?? await promptRedirectCode(prompts, 308);
-    return { ...existingOptions, name, hostname, tailnet, redirectTo: redirectRaw, redirectCode };
+    return { ...existingOptions, name, hostname, protocol, tailnet, redirectTo: redirectRaw, redirectCode };
   }
   const backendIp = existingOptions.backendIp
     ?? await askRequired(prompts, "Backend IP", validateIp);
+  // Fully specified SMB commands may omit the backend port. Guided setup
+  // still asks so an operator can choose a nonstandard server port.
+  const scriptedSmbPort = isSmb && existingOptions.name && existingOptions.hostname && existingOptions.backendIp
+    ? Number(existingExposure?.backend?.port ?? 445)
+    : undefined;
   const backendPort = existingOptions.backendPort
-    ?? Number(await askPrompt(prompts, "Backend port", "8080"));
-  const backendTls = existingOptions.backendTls
+    ?? scriptedSmbPort
+    ?? Number(await askPrompt(prompts, "Backend port", existingExposure?.backend?.port ?? (isSmb ? "445" : protocol === "tcp" ? "25565" : "8080")));
+  const backendTls = isTcp ? existingOptions.backendTls ?? false : existingOptions.backendTls
     ?? await confirmPrompt(
       prompts,
       "Does the backend serve HTTPS/TLS itself? (e.g. Proxmox :8006, OPNsense)",
       false
     );
 
-  return { ...existingOptions, name, hostname, tailnet, backendIp, backendPort, backendTls };
+  return { ...existingOptions, name, hostname, protocol, tailnet, backendIp, backendPort, backendTls };
 }
 
 async function promptTailnetAccess(project, stored, prompts) {
