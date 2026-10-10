@@ -40,7 +40,8 @@ systemctl() { printf '%s\\n' "$*" >> "$HOME/service-events"; }
   };
 }
 
-test("home DNS setup can be edited through its installed command", (t) => {
+// Home-DNS clients are local, ignored files and are absent from clean checkouts.
+test("home DNS setup can be edited through its installed command", { skip: !fs.existsSync(helper) }, (t) => {
   const client = clientFixture(t);
   const first = client.run(["setup", "192.0.2.53", "private.example.test"]);
   assert.equal(first.status, 0, first.stderr);
@@ -51,7 +52,7 @@ test("home DNS setup can be edited through its installed command", (t) => {
   assert.ok(fs.existsSync(client.installed));
 });
 
-test("Linux home DNS uninstall stops an active tick before restoring Tailscale DNS", async (t) => {
+test("Linux home DNS uninstall stops an active tick before restoring Tailscale DNS", { skip: !fs.existsSync(helper) }, async (t) => {
   const client = clientFixture(t);
   assert.equal(client.run(["setup", "192.0.2.53", "private.example.test"]).status, 0);
   fs.writeFileSync(path.join(client.root, "dns-events"), "");
@@ -88,7 +89,7 @@ systemctl() {
   assert.equal(fs.existsSync(client.installed), false);
 });
 
-test("Linux home DNS uninstall succeeds when its service is already absent", (t) => {
+test("Linux home DNS uninstall succeeds when its service is already absent", { skip: !fs.existsSync(helper) }, (t) => {
   const client = clientFixture(t);
   fs.appendFileSync(client.initialization, `
 systemctl() {
@@ -103,7 +104,7 @@ systemctl() {
   assert.match(fs.readFileSync(path.join(client.root, "dns-events"), "utf8"), /set --accept-dns=true/);
 });
 
-test("Windows home DNS setup can be edited through its installed command", (t) => {
+test("Windows home DNS setup can be edited through its installed command", { skip: !fs.existsSync(windowsHelper) }, (t) => {
   const powershellProbe = spawnSync(powershell, ["-NoProfile", "-Command", "exit 0"]);
   const probeError = /** @type {NodeJS.ErrnoException | undefined} */ (powershellProbe.error);
   if (probeError?.code === "ENOENT") {
