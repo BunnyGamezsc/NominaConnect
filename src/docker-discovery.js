@@ -6,10 +6,12 @@ export const COMPOSE_LABELS = Object.freeze([
   "com.docker.compose.container-number", "com.docker.compose.oneoff"
 ]);
 
+/** Strip terminal control characters and cap observation fields before returning them to the caller. */
 function bounded(value, max = Number(DOCKER_LIMITS.fieldLength)) {
   return String(value ?? "").replace(/[\x00-\x1f\x7f-\x9f]/g, "").slice(0, max);
 }
 
+/** Check whether a valid IP can represent a backend, excluding wildcard, loopback, link-local and IPv6 multicast addresses. */
 export function usableAddress(address) {
   if (!isIP(address ?? "")) return false;
   const lower = address.toLowerCase();
@@ -20,6 +22,7 @@ export function usableAddress(address) {
 
 // Only a projected inspect result enters this function. No environment, mounts,
 // credentials, or arbitrary labels are returned to the caller or persisted.
+/** Convert projected observations into bounded containers and endpoint candidates. Return only allowlisted metadata and explicit selection rejection reasons. */
 export function normalizeDockerDiscovery(observations, hostAddress, limits = DOCKER_LIMITS) {
   const containers = [];
   const candidates = [];

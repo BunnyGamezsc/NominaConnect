@@ -48,6 +48,7 @@ function serviceDisplayLabel(name) {
   return SERVICE_DISPLAY_LABELS[name] ?? `${name.charAt(0).toUpperCase()}${name.slice(1)}`;
 }
 
+/** Dispatch interactive or scripted commands with project locking, then start background tracking after releasing command locks. */
 export async function runCli(argumentsList, adapters) {
   if (argumentsList.length === 0) {
     if (adapters.interactive?.run === undefined) {
@@ -77,6 +78,7 @@ export async function runCli(argumentsList, adapters) {
   return commandResult;
 }
 
+/** Route a scripted top-level command to its shared CLI handler. */
 async function runCommand(command, rest, adapters) {
   if (command === "--version" || command === "-v" || command === "version") {
     return { stdout: `${VERSION}\n` };
@@ -1829,6 +1831,7 @@ function parseUninstallOptions(rawOptions) {
   return options;
 }
 
+/** Remove the selected project and managed platform resources while retaining all Docker-bound CTs, including orphaned state references. */
 async function uninstallEverything(options, adapters) {
   const { filesystem, proxmox, prompts } = adapters;
   assertProxmoxShell(adapters.runtime);

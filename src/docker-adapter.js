@@ -1,6 +1,7 @@
 import { withBoundedRetry } from "./adoption.js";
 import { COMPOSE_LABELS, DOCKER_LIMITS, normalizeDockerDiscovery } from "./docker-discovery.js";
 
+/** Accept only bounded absolute local Unix socket paths without traversal or shell metacharacters. */
 export function validateDockerSocket(socketPath = "/var/run/docker.sock") {
   if (typeof socketPath !== "string" || socketPath.length > 200 || !/^\/(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+$/.test(socketPath)
     || socketPath.split("/").some((part) => part === "." || part === "..")) {
@@ -9,6 +10,7 @@ export function validateDockerSocket(socketPath = "/var/run/docker.sock") {
   return socketPath;
 }
 
+/** Return a numeric Proxmox LXC ID, rejecting malformed values and IDs outside the supported range. */
 export function validateDockerVmid(vmid) {
   const number = Number(vmid);
   if (!/^\d+$/.test(String(vmid)) || !Number.isSafeInteger(number) || number < 100 || number > 999999999) throw new Error("LXC VMID must be an integer between 100 and 999999999.");
@@ -17,7 +19,9 @@ export function validateDockerVmid(vmid) {
 
 const INSPECT_FORMAT = '{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Config.Image}},"imageId":{{json .Image}},"status":{{json .State.Status}},"networkMode":{{json .HostConfig.NetworkMode}},"ports":{{json .NetworkSettings.Ports}},"exposedPorts":{{json .Config.ExposedPorts}},"labels":{' + COMPOSE_LABELS.map((label) => `"${label}":{{json (index .Config.Labels "${label}")}}`).join(",") + '}}';
 
+/** Build bounded, read-only Docker verification and discovery operations for rootful local Unix sockets. */
 export function createDockerAdapter(proxmox, retryOptions = {}) {
+  /** Execute a bounded command in the LXC and replace provider failures with diagnostics that omit provider output. */
   async function exec(vmid, command) {
     validateDockerVmid(vmid);
     try { return await proxmox.pctExec(vmid, { timeoutMs: 10000, maxOutputBytes: DOCKER_LIMITS.outputBytes, ...command }); }
@@ -27,6 +31,7 @@ export function createDockerAdapter(proxmox, retryOptions = {}) {
       throw new Error(`Docker inspection command ${command.binary.split("/").at(-1)} failed in LXC ${vmid}${error.timedOut ? " (timed out)" : ""}. Check the running CT, rootful Engine, and local Unix socket; use manual exposure entry if unsupported.`);
     }
   }
+  /** Run Docker against the explicit socket with an isolated environment and no operator CLI configuration. */
   async function docker(vmid, socketPath, args, extra = {}) {
     validateDockerSocket(socketPath);
     return exec(vmid, {
@@ -39,6 +44,7 @@ export function createDockerAdapter(proxmox, retryOptions = {}) {
   }
   const retry = (operation) => withBoundedRetry(operation, { maxRetries: 2, baseDelayMs: 100, ...retryOptions });
   return Object.freeze({
+    /** Verify a running LXC and root-owned rootful Docker socket; optionally check Compose and Buildx without changing the CT. */
     async verify(vmid, socketPath, { compose = false } = {}) {
       validateDockerVmid(vmid);
       validateDockerSocket(socketPath);
@@ -61,6 +67,7 @@ export function createDockerAdapter(proxmox, retryOptions = {}) {
         return { status: "healthy", ip: ct.ip, hostname: ct.hostname, unprivileged: ct.unprivileged, canonicalSocketPath };
       });
     },
+    /** Inspect allowlisted container fields within output, count and time budgets, returning endpoints and incomplete-discovery diagnostics. */
     async discover(vmid, socketPath) {
       const deadline = Date.now() + DOCKER_LIMITS.durationMs;
       const health = await this.verify(vmid, socketPath);

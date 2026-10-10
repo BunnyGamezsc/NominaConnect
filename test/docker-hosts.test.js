@@ -120,11 +120,12 @@ test("creation enables features in its spec before install, with editable resour
 test("installation failure persists VMID immediately and retry resumes it without duplicate creation", async () => {
   const f = fixture();
   const original = f.proxmox.pctExec;
+  const setupError = new Error("PRIVATE ENV token=supersecret");
   f.proxmox.pctExec = async (vmid, command) => {
     if (command.binary === "/bin/sh") {
       const host = f.project().config.managedInventory.dockerHosts[0];
       assert.equal(f.project().state.providerReferences[host.id].vmid, vmid);
-      throw new Error("PRIVATE ENV token=supersecret");
+      throw setupError;
     }
     return original(vmid, command);
   };
@@ -132,6 +133,7 @@ test("installation failure persists VMID immediately and retry resumes it withou
     assert.ok(error instanceof Error);
     assert.match(error.message, /pending.*Docker installation.*LXC 120/);
     assert.doesNotMatch(error.message, /supersecret/);
+    assert.equal(error.cause, setupError);
     return true;
   });
   const host = f.project().config.managedInventory.dockerHosts[0];
@@ -143,6 +145,34 @@ test("installation failure persists VMID immediately and retry resumes it withou
   assert.equal(f.project().state.providerReferences[host.id].vmid, 120);
   assert.equal(f.project().state.dockerHostStates[host.id].status, "healthy");
   await assert.rejects(runCli(["docker", "retry", "apps", "--yes"], f.adapters), /already complete/);
+});
+
+test("allocation and recovery lock failures preserve both errors without claiming a saved VMID", async () => {
+  const f = fixture();
+  const setupError = new Error("allocation write lock timed out");
+  const recoveryError = new Error("recovery write lock timed out");
+  let writes = 0;
+  const acquireProjectLock = async (_directory, operation) => {
+    if (operation === "docker-operation") return () => {};
+    writes += 1;
+    if (writes === 2) throw setupError;
+    if (writes === 3) throw recoveryError;
+    return () => {};
+  };
+  const adapters = { ...f.adapters, filesystem: { ...f.filesystem, acquireProjectLock } };
+  await assert.rejects(runCli(createArgs, adapters), (error) => {
+    assert.ok(error instanceof AggregateError);
+    assert.deepEqual(error.errors, [setupError, recoveryError]);
+    assert.match(error.message, /setup failed during creation; pending state could not be saved/);
+    assert.match(error.message, /Check project storage and Proxmox manually/);
+    assert.doesNotMatch(error.message, /uses the recorded VMID|nomina docker retry/);
+    return true;
+  });
+  const host = f.project().config.managedInventory.dockerHosts[0];
+  assert.equal(f.project().state.providerReferences[host.id], undefined);
+  assert.equal(f.project().state.dockerHostStates[host.id].status, "pending");
+  assert.equal(f.calls.filter((call) => call[0] === "create").length, 1);
+  assert.equal(f.calls.some((call) => ["features", "start", "exec"].includes(call[0])), false);
 });
 
 test("failed create retains reserved VMID and missing CT is never silently replaced", async () => {

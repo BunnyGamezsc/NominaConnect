@@ -97,3 +97,22 @@ were not exercised. Automated tests cover their acceptance/rejection or
 normalization paths. Discovery establishes published mapping evidence, not
 an application's HTTP protocol or end-to-end reachability. The exposure
 picker and publishing integration remain the separate #33 ticket.
+
+## PR #34 review follow-up, 2026-10-10
+
+Setup failures now preserve their original error as the cause. If saving
+recovery state also fails, an `AggregateError` retains both errors and asks
+for manual project-storage and Proxmox inspection without claiming that a
+VMID was saved or recommending an automatic retry.
+
+Regression coverage simulates allocation and recovery write-lock failures,
+checks that no provider reference was persisted, and confirms that setup
+does not continue. The existing interrupted-installation test also checks
+that a successful recovery write preserves the original setup error.
+Changed runtime functions have JSDoc descriptions for CodeRabbit's
+docstring coverage warning.
+
+Repository validation passed 580 tests with two existing skips and no
+failures. Typecheck and `git diff --check` passed. No live acceptance or
+native-binary check was rerun for this error-handling and documentation
+follow-up; the lab and production resources were not accessed or changed.

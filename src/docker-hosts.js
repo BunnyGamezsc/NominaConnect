@@ -12,6 +12,7 @@ const AUTHORITY_NOTICE = "Docker socket access conveys full daemon authority. Th
 const DISCONNECT_NOTICE = "The LXC and its applications are retained. Existing exposures remain independently managed and keep their configured backends.";
 const operations = new Map();
 
+/** Serialize Docker lifecycle operations per project and hold the cross-process lifecycle lock until release. */
 async function acquireOperation(filesystem, directory) {
   const key = path.resolve(directory);
   const previous = operations.get(key) ?? Promise.resolve();
@@ -29,13 +30,16 @@ async function acquireOperation(filesystem, directory) {
   };
 }
 
+/** Return Docker bindings, including an empty list for projects created before Docker support. */
 function bindings(project) { return project.config.managedInventory.dockerHosts ?? []; }
+/** Find a binding by its user-facing name or reject an unknown binding. */
 function hostByName(project, name) {
   const host = bindings(project).find((entry) => entry.name === name);
   if (!host) throw new Error(`Docker host binding ${name} was not found.`);
   return host;
 }
 
+/** Parse Docker flags, rejecting unknown flags, duplicate values and missing arguments. */
 function parseOptions(args) {
   const options = {};
   const flags = { "--name": "name", "--vmid": "vmid", "--socket": "socketPath", "--ip": "ip", "--hostname": "hostname", "--template": "template", "--bridge": "bridge", "--storage": "storage", "--gateway": "gateway", "--nameserver": "nameserver", "--cpus": "cpus", "--memory": "memoryMb", "--disk": "diskGb", "--prefix-length": "prefixLength", "--project-dir": "projectDir" };
@@ -50,11 +54,13 @@ function parseOptions(args) {
   return options;
 }
 
+/** Validate a lowercase binding name suitable for guided and scripted commands. */
 function validateName(name) {
   if (typeof name !== "string" || !/^[a-z][a-z0-9-]{0,62}$/.test(name) || name.endsWith("-")) throw new Error("Docker binding name must be 1-63 lowercase letters, digits or hyphens, starting with a letter and ending with a letter or digit.");
   return name;
 }
 
+/** Reject duplicate names or node/VMID/socket bindings while allowing updates to the same binding ID. */
 function assertUnique(project, host, reference) {
   if (bindings(project).some((existing) => existing.id !== host.id && existing.name === host.name)) throw new Error(`Docker binding name ${host.name} is already in use.`);
   if (reference && bindings(project).some((existing) => {
@@ -64,6 +70,7 @@ function assertUnique(project, host, reference) {
   })) throw new Error("This node/VMID/socket is already bound under another name.");
 }
 
+/** Reload and save a binding, provider reference and setup status under the project write lock. */
 async function saveHost(adapters, directory, host, reference, setup) {
   return updateProject(adapters.filesystem, directory, (project) => {
     assertUnique(project, host, reference);
@@ -74,6 +81,7 @@ async function saveHost(adapters, directory, host, reference, setup) {
   });
 }
 
+/** Resolve an explicit option or prompt, using defaults only when available. */
 async function ask(prompts, options, key, message, fallback = undefined) {
   if (options[key] !== undefined) return options[key];
   if (options.yes || !prompts?.ask) {
@@ -83,6 +91,7 @@ async function ask(prompts, options, key, message, fallback = undefined) {
   return prompts.ask(message, fallback);
 }
 
+/** Resolve a named binding or ask the operator to select an existing binding. */
 async function selectBinding(project, options, prompts) {
   if (options.name) return hostByName(project, options.name);
   if (!prompts?.select || options.yes) throw new Error("Docker binding name is required.");
@@ -92,12 +101,14 @@ async function selectBinding(project, options, prompts) {
   return hostByName(project, name);
 }
 
+/** Require operator confirmation unless the scripted operation explicitly uses --yes. */
 async function confirm(prompts, options, message) {
   if (options.yes) return true;
   if (!prompts?.confirm) throw new Error("Use --yes to confirm this scripted operation.");
   return prompts.confirm({ message, initialValue: false });
 }
 
+/** Validate the Debian 13 template, static IPv4 subnet, Proxmox identifiers and positive resource allocations. */
 export function validateDockerDeployment(spec) {
   const token = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$/;
   if (!token.test(spec.node) || !token.test(spec.bridge) || !token.test(spec.storage) || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(spec.hostname)) throw new Error("Invalid Proxmox node, bridge, storage or Docker LXC hostname.");
@@ -119,6 +130,7 @@ export function validateDockerDeployment(spec) {
   return spec;
 }
 
+/** Collect creation settings and validate an available template without allocating or modifying an LXC. */
 async function creationOptions(project, options, adapters) {
   const prompts = adapters.prompts;
   const name = validateName(await ask(prompts, options, "name", "Docker binding name"));
@@ -152,6 +164,7 @@ async function creationOptions(project, options, adapters) {
   return { host, spec };
 }
 
+/** Create or resume one LXC, persist its VMID before setup and retain resources on failure. Report failed recovery writes separately. */
 async function setupCreatedHost(project, host, spec, adapters, retry = false) {
   const directory = project.projectDirectory;
   let reference = project.state.providerReferences?.[host.id];
@@ -189,12 +202,20 @@ async function setupCreatedHost(project, host, spec, adapters, retry = false) {
     reference = { ...reference, socketPath: health.canonicalSocketPath };
     await saveHost(adapters, directory, host, reference, { status: "healthy", phase: "complete" });
     return { stdout: `Docker host ${host.name} is ready on ${reference.node}/LXC ${reference.vmid}.\n`, host, providerReference: reference, health };
-  } catch {
-    await saveHost(adapters, directory, host, reference, { status: "pending", phase, diagnostic: `Setup did not complete during ${phase}.` });
-    throw new Error(`Docker host ${host.name} is pending during ${phase}${reference ? ` on LXC ${reference.vmid}` : " with no recorded VMID"}. The CT and applications were retained. Check Proxmox/CT logs and correct this step, then run 'nomina docker retry ${host.name}'. Retry uses the recorded VMID and never creates a replacement; if no VMID exists, inspect Proxmox manually before disconnecting the pending binding.`);
+  } catch (setupError) {
+    try {
+      await saveHost(adapters, directory, host, reference, { status: "pending", phase, diagnostic: `Setup did not complete during ${phase}.` });
+    } catch (recoveryError) {
+      throw new AggregateError(
+        [setupError, recoveryError],
+        `Docker host ${host.name} setup failed during ${phase}; pending state could not be saved. Check project storage and Proxmox manually before retrying or disconnecting this binding.`,
+      );
+    }
+    throw new Error(`Docker host ${host.name} is pending during ${phase}${reference ? ` on LXC ${reference.vmid}` : " with no recorded VMID"}. The CT and applications were retained. Check Proxmox/CT logs and correct this step, then run 'nomina docker retry ${host.name}'. Retry uses the recorded VMID and never creates a replacement; if no VMID exists, inspect Proxmox manually before disconnecting the pending binding.`, { cause: setupError });
   }
 }
 
+/** Dispatch guided or scripted Docker binding operations. Serialize mutations and keep attachment and discovery read-only. */
 export async function handleDockerCommand(argumentsList, adapters) {
   let [action, ...args] = argumentsList;
   if (["help", "--help", "-h"].includes(action)) return { stdout: "nomina docker create --name NAME --ip IPv4 [--gateway IPv4] [--prefix-length 24] [--cpus 2] [--memory 2048] [--disk 32] [--yes]\nnomina docker connect --name NAME --vmid VMID [--socket /var/run/docker.sock] [--yes]\nnomina docker list [--json]\nnomina docker inspect NAME [--json]\nnomina docker retry NAME [--yes]\nnomina docker disconnect NAME [--yes]\nOmit values for guided prompts. Socket access grants full daemon authority; attachment uses read-only commands. Disconnect retains LXCs, applications and independent exposures. See docs/docker-hosts.md.\n" };
@@ -292,6 +313,7 @@ export async function handleDockerCommand(argumentsList, adapters) {
   } finally { release?.(); }
 }
 
+/** Format bounded endpoint observations with rejection reasons and incomplete-discovery warnings. */
 function formatDiscovery(name, discovery) {
   const lines = [`Docker endpoints for ${name}. ${AUTHORITY_NOTICE}`, "Container IDs are current observations. No container identity is adopted and no exposure is retargeted."];
   for (const candidate of discovery.candidates) {

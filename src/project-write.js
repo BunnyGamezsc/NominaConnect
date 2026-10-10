@@ -6,6 +6,7 @@ const queues = new Map();
 
 // Reload inside the queue, then commit both files without an asynchronous gap.
 // Production also holds a filesystem lock across processes.
+/** Queue per-project updates, reload under the write lock and replace config and state without an asynchronous gap. */
 export async function updateProject(filesystem, projectDirectory, update) {
   const key = path.resolve(projectDirectory);
   const previous = queues.get(key) ?? Promise.resolve();
@@ -25,6 +26,7 @@ export async function updateProject(filesystem, projectDirectory, update) {
   try { return await pending; } finally { if (queues.get(key) === pending) queues.delete(key); }
 }
 
+/** Write through a unique temporary file, optionally restrict its permissions, then atomically replace the destination. */
 export function atomicWrite(filesystem, destination, content, mode = undefined) {
   const temporary = `${destination}.${randomUUID()}.tmp`;
   filesystem.writeFile(temporary, content);

@@ -4,6 +4,7 @@ import { loadProject } from "./config.js";
 import { adoptPlatformDeployment, adoptServiceExposure, applyProviderReferenceChange } from "./adoption.js";
 import { updateProject } from "./project-write.js";
 
+/** Inspect providers without a write lock, then reload and apply observed changes under the shared project update lock. */
 export async function runTrackingJob({ filesystem, projectDir, providerAdapters = {}, retryOptions = {} }) {
   let project;
   try {

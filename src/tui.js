@@ -136,6 +136,7 @@ export function hasProvisionedServices(project) {
   return Object.keys(project.state.providerReferences).length > 0;
 }
 
+/** Check whether platform, retained or Docker-bound resources make uninstall available. */
 export function hasProvisionedOrRetainedServices(project) {
   if (!project?.state) return false;
   const activeCount = Object.keys(project.state.providerReferences ?? {}).length;
@@ -204,6 +205,7 @@ export function buildMenuOptions(project) {
   return options;
 }
 
+/** Run the project menu and route guided operations through the shared command handlers. */
 export async function runInteractiveApp(adapters) {
   clack.intro("NominaConnect");
 

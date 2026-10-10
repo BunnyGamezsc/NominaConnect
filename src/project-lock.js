@@ -2,11 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
+/** Treat a process as alive unless the OS confirms its PID does not exist. */
 function alive(pid) {
   try { process.kill(pid, 0); return true; }
   catch (error) { return error.code !== "ESRCH"; }
 }
 
+/** Remove a recorded dead owner's lock under a recovery guard; leave live or unverifiable owners untouched. */
 function recoverAbandonedLock(lock) {
   const recovery = `${lock}.recovery`;
   try { fs.mkdirSync(recovery, { mode: 0o700 }); }
@@ -21,6 +23,7 @@ function recoverAbandonedLock(lock) {
   } finally { fs.rmdirSync(recovery); }
 }
 
+/** Acquire a named per-project filesystem lock within five seconds and return an ownership-checked release callback. */
 export async function acquireProjectLock(projectDirectory, name = "write") {
   const lock = path.join(projectDirectory, ".nomina", `${name}.lock`);
   const deadline = Date.now() + 5000;

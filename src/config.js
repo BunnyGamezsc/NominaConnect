@@ -63,6 +63,7 @@ function readServiceEntry(lines, startIndex) {
   return { value: nested.value, nextIndex: nested.nextIndex };
 }
 
+/** Parse project YAML, keeping Docker binding intent in configuration and provider-native references in local state. */
 export function parseProjectConfiguration(content) {
   const lines = content.split("\n");
   const config = {
@@ -278,6 +279,7 @@ export function updatePlatformDeployment(config, platformKey, deployment) {
   };
 }
 
+/** Serialize managed inventory and Docker deployment intent without including runtime provider references. */
 export function serializeProjectConfiguration(config) {
   const lines = [
     "apiVersion: nomina.connect/v0alpha1",

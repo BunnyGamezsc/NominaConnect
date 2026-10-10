@@ -216,6 +216,7 @@ function requestViaNodeModules({ url, method = "GET", headers = {}, body, tls },
   });
 }
 
+/** Build Proxmox, provider, secret-store and Docker adapters backed by the configured command runner. */
 export function createProductionAdapters(options = {}) {
   const commandRunner = options.commandRunner ?? createCommandRunner();
   const secretResolver = options.secretResolver ?? createLocalSecretResolver();
@@ -280,6 +281,7 @@ export function createProductionAdapters(options = {}) {
   return Object.freeze({ proxmox, providerAdapters, secretStore, docker: createDockerAdapter(proxmox, options.retryOptions) });
 }
 
+/** Build local Proxmox lifecycle and inspection operations around the command runner. */
 function createProxmoxAdapter(commandRunner) {
   return Object.freeze({
     async checkIpAvailability(ip) {
@@ -317,10 +319,12 @@ function createProxmoxAdapter(commandRunner) {
       }
       return { templateVolume };
     },
+    /** Reject operations when the configured Proxmox node differs from the local hostname. */
     async assertLocalNode(node) {
       const result = await commandRunner.run({ binary: "/usr/bin/hostname", args: ["-s"] });
       if (result.stdout.trim() !== node) throw new Error(`Configured Proxmox node ${node} is not this host. Run Nomina on the configured node.`);
     },
+    /** Check available rootdir storage, CPU, memory and an UP Linux bridge before Docker LXC creation. */
     async validateDockerResources(spec) {
       const storage = await commandRunner.run({ binary: "/usr/sbin/pvesm", args: ["status", "--content", "rootdir"] });
       const parts = storage.stdout.split("\n").map((line) => line.trim().split(/\s+/)).find((row) => row[0] === spec.storage);
@@ -334,6 +338,7 @@ function createProxmoxAdapter(commandRunner) {
       const links = JSON.parse(bridge.stdout);
       if (!links.some((link) => link.linkinfo?.info_kind === "bridge" && link.flags?.includes("UP"))) throw new Error("Docker networking requires an available, UP Linux bridge.");
     },
+    /** Allocate and create an LXC, awaiting persistence hooks before creation and after success; optionally defer its first start. */
     async createLxc(spec, hooks = {}) {
       const { templateVolume } = await this.validateProvisioningPrerequisites(spec);
       const nextId = await commandRunner.run({ binary: "/usr/bin/pvesh", args: ["get", "/cluster/nextid"] });
@@ -376,18 +381,22 @@ function createProxmoxAdapter(commandRunner) {
       const result = await commandRunner.run({ binary: "/usr/sbin/pct", args: ["config", String(vmid)] });
       return parsePctConfig(result.stdout);
     },
+    /** Read the current LXC runtime status without changing it. */
     async lxcStatus(vmid) {
       const result = await commandRunner.run({ binary: "/usr/sbin/pct", args: ["status", String(vmid)] });
       return result.stdout.trim().replace(/^status:\s*/, "");
     },
+    /** Return LXC IDs, statuses and hostnames from a bounded Proxmox inventory listing. */
     async listLxcs() {
       const result = await commandRunner.run({ binary: "/usr/sbin/pct", args: ["list"], maxOutputBytes: 65536 });
       return result.stdout.split("\n").slice(1).map((line) => line.trim().split(/\s+/))
         .filter((row) => /^\d+$/.test(row[0])).map((row) => ({ vmid: Number(row[0]), status: row[1], hostname: row.at(-1) }));
     },
+    /** Start the selected LXC with a bounded startup timeout. */
     async startLxc(vmid) {
       return commandRunner.run({ binary: "/usr/sbin/pct", args: ["start", String(vmid)], timeoutMs: 180000 });
     },
+    /** Enable nesting and keyctl while preserving unrelated feature flags; reboot a running CT only when flags change. */
     async enableDockerFeatures(vmid) {
       const config = await commandRunner.run({ binary: "/usr/sbin/pct", args: ["config", String(vmid)] });
       const current = config.stdout.match(/^features:\s*(.*)$/m)?.[1] ?? "";
@@ -398,6 +407,7 @@ function createProxmoxAdapter(commandRunner) {
       await commandRunner.run({ binary: "/usr/sbin/pct", args: ["set", String(vmid), "--features", [...features].map(([key, value]) => `${key}=${value}`).join(",")] });
       if (await this.lxcStatus(vmid) === "running") await commandRunner.run({ binary: "/usr/sbin/pct", args: ["reboot", String(vmid)], timeoutMs: 180000 });
     },
+    /** Run a normalized command inside an LXC, forwarding input, redactions and output limits. */
     async pctExec(vmid, command) {
       const normalized = normalizeCommand(command, DEFAULT_TIMEOUT_MS);
       return commandRunner.run({
@@ -442,6 +452,7 @@ function createProxmoxAdapter(commandRunner) {
   });
 }
 
+/** Validate executable arguments and normalize timeout, input, redaction and output-limit settings. */
 function normalizeCommand(command, defaultTimeoutMs) {
   if (command === null || typeof command !== "object" || Array.isArray(command)) {
     throw new Error("Commands must be an object with a fixed binary and argument array.");
@@ -466,6 +477,7 @@ function normalizeCommand(command, defaultTimeoutMs) {
   return { binary, args: [...args], timeoutMs, redactions: [...redactions], ...(stdin === undefined ? {} : { stdin }), maxOutputBytes, truncateOutput };
 }
 
+/** Spawn a command with timeout and combined output limits; reject overflow unless explicit truncation is allowed. */
 function executeCommand({ spawn, binary, args, timeoutMs, stdin = undefined, maxOutputBytes = undefined, truncateOutput = false }) {
   return new Promise((resolve, reject) => {
     const child = spawn(binary, args, { shell: false, windowsHide: true });
@@ -480,6 +492,7 @@ function executeCommand({ spawn, binary, args, timeoutMs, stdin = undefined, max
       child.kill("SIGTERM");
       killTimer = setTimeout(() => child.kill("SIGKILL"), 1000);
     }, timeoutMs);
+    /** Append each output channel within the shared byte budget, killing the child on disallowed overflow. */
     function append(chunk, channel) {
       if (truncated) return;
       const bytes = Buffer.from(chunk);
@@ -514,6 +527,7 @@ function executeCommand({ spawn, binary, args, timeoutMs, stdin = undefined, max
   });
 }
 
+/** Replace configured sensitive strings in captured command output before returning it. */
 function redactResult(result, redactions) {
   return {
     exitCode: result.exitCode ?? 1,
