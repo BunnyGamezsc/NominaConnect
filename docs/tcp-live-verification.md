@@ -100,4 +100,5 @@ proxy. A Minecraft Java 1.21.11 client joined by hostname on LAN and through
 Tailscale with Ethernet physically unplugged. Live SMB checks also passed while
 the Minecraft server remained published, along with lifecycle and HTTPS/DNS
 regressions. See [the SMB verification results](smb-live-verification.md#validation-boundary)
-for the shared validation summary. Final release checks remain in #28.
+for the shared validation summary. The release workflow verifies published
+artifacts through the supported installer before closing #28.

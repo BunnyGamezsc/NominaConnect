@@ -181,5 +181,7 @@ Live verification passed against disposable Samba and Minecraft fixtures:
   the operator also confirmed native access through Tailscale.
 
 Detailed logs, private credentials, addresses, account identities, and local
-paths remain outside the committed evidence. Native Windows checks and final
-release-artifact verification remain for #28. No release was published.
+paths remain outside the committed evidence. Native Windows testing provides
+additional client coverage; the recorded Samba and macOS checks verify SMB
+application access. The release workflow verifies published artifacts through
+the supported installer before closing #28. SSH remains deferred until then.

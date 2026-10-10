@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.4.0] - 2026-10-09
+
+### Added
+- TCP exposures for existing backends, with guided and scripted setup,
+  persistent forwarding, backend updates, scoped removal, and Tailscale opt-out.
+- Hostname-only Minecraft Java access on LAN and through Tailscale.
+- SMB exposures with client port 445, alternate backend ports, hostname alias
+  guidance, and authenticated Samba fixture and client checks.
+
+### Improved
+- Exposure health distinguishes TCP reachability from application access.
+- TCP, SMB, HTTPS, and DNS forwarding coexist while preserving unrelated
+  resources and gateway administration. Listener conflicts fail before changes.
+- SMB verification isolates Samba's hostname cache and checks connection
+  destinations when switching between LAN and Tailscale.
+
+### Removed
+- Home-DNS client helpers from version control. Local copies remain ignored;
+  their optional tests skip when the helpers are absent from a clean checkout.
+
 ## [2.3.2] - 2026-10-09
 
 ### Added
