@@ -6,6 +6,16 @@ configuration.
 
 ## Language
 
+**Docker host binding**:
+An explicitly selected Docker host entrusted to NominaConnect for inspection.
+It can contain multiple independently managed applications.
+_Avoid_: dedicated service LXC, managed application host
+
+**Docker endpoint candidate**:
+A discovered application endpoint available for explicit selection, not yet a
+managed exposure.
+_Avoid_: adopted application, automatic exposure
+
 **Managed inventory**:
 The explicit list of infrastructure services, applications, domains, and
 integrations that a user has entrusted to NominaConnect to manage.

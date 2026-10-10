@@ -307,6 +307,8 @@ SHA-256 hashes and leaves the release `nomina` link alone.
 
 ## Documentation
 
+- [Docker host bindings and endpoint discovery](docs/docker-hosts.md)
+
 - [Architecture](docs/architecture.md), [domain language](CONTEXT.md), [ADRs](docs/adr/)
 - [Interactive CLI](docs/tui.md)
 - [Manual DNS/proxy/TLS workflow](docs/manual/dns-proxy-tls.md)

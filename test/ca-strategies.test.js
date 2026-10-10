@@ -703,7 +703,7 @@ test("interactive menu offers step-ca and caddy-internal-ca in dependency order"
   assert.equal(canPublishExposure(projectStepCa), false);
   assert.deepEqual(
     buildMenuOptions(projectStepCa).map((option) => option.value),
-    ["provision-step-ca", "toggle-http-redirect", "upgrade-service", "remove-service", "destroy-service", "nuclear-uninstall", "init", "exit"]
+    ["docker-hosts", "provision-step-ca", "toggle-http-redirect", "upgrade-service", "remove-service", "destroy-service", "nuclear-uninstall", "init", "exit"]
   );
 
   const projectCaddyInternalCa = {
@@ -728,7 +728,7 @@ test("interactive menu offers step-ca and caddy-internal-ca in dependency order"
   assert.equal(canPublishExposure(projectCaddyInternalCa), false);
   assert.deepEqual(
     buildMenuOptions(projectCaddyInternalCa).map((option) => option.value),
-    ["provision-caddy-internal-ca", "toggle-http-redirect", "upgrade-service", "remove-service", "destroy-service", "nuclear-uninstall", "init", "exit"]
+    ["docker-hosts", "provision-caddy-internal-ca", "toggle-http-redirect", "upgrade-service", "remove-service", "destroy-service", "nuclear-uninstall", "init", "exit"]
   );
 });
 
@@ -1338,7 +1338,7 @@ test("interactive menu offers step-ca when Traefik is the reverse proxy and CA n
   assert.equal(canPublishExposure(projectStepCaTraefik), false);
   assert.deepEqual(
     buildMenuOptions(projectStepCaTraefik).map((option) => option.value),
-    ["provision-step-ca", "upgrade-service", "remove-service", "destroy-service", "nuclear-uninstall", "init", "exit"]
+    ["docker-hosts", "provision-step-ca", "upgrade-service", "remove-service", "destroy-service", "nuclear-uninstall", "init", "exit"]
   );
 });
 

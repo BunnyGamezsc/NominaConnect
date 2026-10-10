@@ -22,6 +22,8 @@ import {
 } from "./tracking.js";
 import { getStepCaExportGuide, getStepCaTrustGuide } from "./ca-guide.js";
 import { VERSION } from "./version.js";
+import { handleDockerCommand } from "./docker-hosts.js";
+import { findProjectDirectory } from "./config.js";
 import {
   promptCaddyOptions,
   promptExposureOptions,
@@ -55,7 +57,22 @@ export async function runCli(argumentsList, adapters) {
   }
 
   const [command, ...rest] = argumentsList;
-  const commandResult = await runCommand(command, rest, adapters);
+  // Tracking acquires this lock only to reload and commit, never while it is
+  // inspecting providers. Docker takes short write locks and a separate
+  // lifecycle lock so a VMID is saved before installation begins.
+  const explicitProjectIndex = rest.indexOf("--project-dir");
+  const candidateDirectory = command === "docker" || !adapters.filesystem?.acquireProjectLock ? undefined
+    : explicitProjectIndex >= 0 ? rest[explicitProjectIndex + 1] : findProjectDirectory(adapters.filesystem, adapters.cwd ?? ".");
+  const directory = candidateDirectory !== undefined && adapters.filesystem.exists(path.posix.join(candidateDirectory, ".nomina/state.json")) ? candidateDirectory : undefined;
+  const releaseOperation = directory === undefined || command !== "uninstall" ? undefined : await adapters.filesystem.acquireProjectLock?.(directory, "docker-operation");
+  let release;
+  let commandResult;
+  try {
+    release = directory === undefined ? undefined : await adapters.filesystem.acquireProjectLock?.(directory);
+    commandResult = await runCommand(command, rest, adapters);
+  } finally {
+    try { release?.(); } finally { releaseOperation?.(); }
+  }
   startTrackingJobInBackground(adapters);
   return commandResult;
 }
@@ -66,6 +83,8 @@ async function runCommand(command, rest, adapters) {
   }
   if (command === "--help" || command === "help" || command === "-h") return { stdout: "nomina exposure publish --name NAME --protocol https|tcp|smb --hostname HOST --backend-ip IP [--backend-port PORT] [--listener-port PORT] [--tailnet true|false]\nHTTPS is the default. HTTPS and generic TCP require a backend port. TCP listens on the backend port by default; Minecraft Java uses 25565. Raw TCP selects a backend by listener address and port.\nSMB uses client TCP 445, with backend port 445 by default, and supports existing Samba/NAS/VM servers. Windows: \\\\files.bunny.internal\\SHARE. macOS: smb://files.bunny.internal/SHARE. Shares, credentials and permissions stay on the server. Configure Samba hostname aliases; see docs/smb-live-verification.md.\nRemove with: nomina service remove NAME\n" };
   switch (command) {
+    case "docker":
+      return handleDockerCommand(rest, adapters);
     case "init":
       return initializeProject(parseInitOptions(rest), adapters);
     case "service":
@@ -1822,16 +1841,27 @@ async function uninstallEverything(options, adapters) {
   // Only LXC vmids recorded in NominaConnect's own state are ever touched:
   // provider references (active) and retained services (previously removed).
   const targets = new Map();
+  const dockerVmids = new Set();
   let project = null;
   if (filesystem.exists(configPath)) {
     project = loadProject(filesystem, options.projectDir);
+    // A config/state write interrupted between replacements can leave an
+    // orphaned Docker reference. Its socket still identifies an inspection
+    // binding; it must not become a native service destruction target.
+    for (const reference of Object.values(project.state.providerReferences ?? {})) {
+      if (reference?.vmid !== undefined && typeof reference.socketPath === "string") dockerVmids.add(Number(reference.vmid));
+    }
+    for (const binding of project.config.managedInventory.dockerHosts ?? []) {
+      const vmid = project.state.providerReferences?.[binding.id]?.vmid;
+      if (vmid !== undefined) dockerVmids.add(Number(vmid));
+    }
     for (const [id, reference] of Object.entries(project.state.providerReferences ?? {})) {
-      if (reference?.vmid !== undefined && !targets.has(reference.vmid)) {
+      if (reference?.vmid !== undefined && !dockerVmids.has(Number(reference.vmid)) && !targets.has(reference.vmid)) {
         targets.set(reference.vmid, id);
       }
     }
     for (const [id, reference] of Object.entries(project.state.retainedServices ?? {})) {
-      if (reference?.vmid !== undefined && !targets.has(reference.vmid)) {
+      if (reference?.vmid !== undefined && !dockerVmids.has(Number(reference.vmid)) && !targets.has(reference.vmid)) {
         targets.set(reference.vmid, `${id} (retained)`);
       }
     }
@@ -1844,7 +1874,7 @@ async function uninstallEverything(options, adapters) {
     }
     const confirmed = await confirmPrompt(
       prompts,
-      `Nuclear uninstall: STOP AND DESTROY LXC(s) ${targetList.length > 0 ? targetList.join(", ") : "(none)"} and delete all NominaConnect configuration, state, and secrets. This cannot be undone. Continue?`,
+      `Nuclear uninstall: STOP AND DESTROY LXC(s) ${targetList.length > 0 ? targetList.join(", ") : "(none)"} and delete all NominaConnect configuration, state, and secrets. Docker-bound LXCs and their applications are retained. This cannot be undone. Continue?`,
       false
     );
     if (!confirmed) {
@@ -1937,6 +1967,7 @@ async function uninstallEverything(options, adapters) {
   }
 
   const lines = [];
+  if (dockerVmids.size > 0) lines.push(`Retained Docker LXC(s): ${[...dockerVmids].join(", ")}. Their applications are preserved.`);
   if (dnsLine !== "") lines.push(dnsLine);
   lines.push(targetList.length > 0 ? `Destroyed ${destroyed.length} LXC(s): ${destroyed.join(", ")}.` : "No managed LXCs were recorded; nothing to destroy.");
   lines.push(`Removed: ${removedPaths.join(", ") || "nothing"}.`);

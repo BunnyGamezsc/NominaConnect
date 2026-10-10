@@ -1,15 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { runAdoptionPass } from "./adoption.js";
-import { loadProject, serializeProjectConfiguration } from "./config.js";
+import { loadProject } from "./config.js";
 import { adoptPlatformDeployment, adoptServiceExposure, applyProviderReferenceChange } from "./adoption.js";
-
-function reloadProject(filesystem, projectDir) {
-  try {
-    return loadProject(filesystem, projectDir);
-  } catch {
-    return undefined;
-  }
-}
+import { updateProject } from "./project-write.js";
 
 export async function runTrackingJob({ filesystem, projectDir, providerAdapters = {}, retryOptions = {} }) {
   let project;
@@ -25,8 +18,7 @@ export async function runTrackingJob({ filesystem, projectDir, providerAdapters 
   if (adoptionResult.changes.length > 0 || adoptionResult.warnings.length > 0) {
     // Re-read rather than reusing the pre-adoption snapshot: the pass itself
     // can take a while, and the file on disk is the one being updated.
-    const currentProject = reloadProject(filesystem, projectDir);
-    if (currentProject !== undefined) {
+    await updateProject(filesystem, project.projectDirectory, (currentProject) => {
       let updatedConfig = currentProject.config;
       let updatedProviderReferences = currentProject.state.providerReferences ?? {};
       for (const change of adoptionResult.changes) {
@@ -70,15 +62,8 @@ export async function runTrackingJob({ filesystem, projectDir, providerAdapters 
         }
       };
 
-      filesystem.writeFile(
-        currentProject.configPath,
-        serializeProjectConfiguration(updatedConfig)
-      );
-      filesystem.writeFile(
-        currentProject.statePath,
-        `${JSON.stringify(updatedState, null, 2)}\n`
-      );
-    }
+      return { ...currentProject, config: updatedConfig, state: updatedState };
+    });
   }
 
   return {

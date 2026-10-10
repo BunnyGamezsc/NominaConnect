@@ -147,6 +147,7 @@ export function hasProvisionedOrRetainedServices(project) {
 // is offered for the loaded project; `label` may be a function when the entry
 // renames itself with state.
 const MENU_ENTRIES = Object.freeze([
+  { value: "docker-hosts", label: "Docker hosts", hint: "create, connect, inspect or disconnect bindings", when: () => true },
   { value: "provision-technitium", label: "Provision Technitium DNS", hint: "create the DNS LXC", when: canProvisionTechnitium },
   { value: "provision-caddy", label: "Provision Caddy reverse proxy", hint: "create the proxy LXC", when: (project) => canProvisionReverseProxy(project, "caddy") },
   { value: "provision-traefik", label: "Provision Traefik reverse proxy", hint: "create the proxy LXC", when: (project) => canProvisionReverseProxy(project, "traefik") },
@@ -237,6 +238,11 @@ export async function runInteractiveApp(adapters) {
   if (action === "exit") {
     clack.outro("Goodbye.");
     return { stdout: "", cancelled: true };
+  }
+  if (action === "docker-hosts") {
+    const result = await adapters.runCommand(["docker"], adapters);
+    clack.outro(result.cancelled ? "Docker operation cancelled." : "Docker operation complete.");
+    return result;
   }
   if (action === "view-changes") {
     const result = await adapters.runCommand(["changes"], adapters);

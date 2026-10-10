@@ -7,8 +7,10 @@ import { runCli } from "../src/cli.js";
 import { createClackPrompts } from "../src/prompts.js";
 import { runInteractiveApp } from "../src/tui.js";
 import { createProductionAdapters } from "../src/adapter-runtime.js";
+import { acquireProjectLock } from "../src/project-lock.js";
 
 const filesystem = {
+  acquireProjectLock,
   exists: fs.existsSync,
   read: (path) => fs.readFileSync(path, "utf8"),
   mkdir: (path) => fs.mkdirSync(path, { recursive: true }),
