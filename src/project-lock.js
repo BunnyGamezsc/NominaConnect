@@ -44,7 +44,7 @@ export async function acquireProjectLock(projectDirectory, name = "write") {
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
       recoverAbandonedLock(lock);
-      if (Date.now() >= deadline) throw new Error(`Project is busy or has an interrupted operation. Check ${lock} before retrying; remove this lock only after confirming no Nomina process is using it.`);
+      if (Date.now() >= deadline) throw Object.assign(new Error(`Project is busy or has an interrupted operation. Check ${lock} before retrying; remove this lock only after confirming no Nomina process is using it.`), { code: "NOMINA_PROJECT_BUSY" });
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
   }

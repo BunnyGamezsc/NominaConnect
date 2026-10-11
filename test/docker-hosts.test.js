@@ -18,6 +18,7 @@ const id = "a".repeat(64);
 class Filesystem {
   files = new Map();
   modes = new Map();
+  acquireProjectLock = async () => () => {};
   exists = (path) => this.files.has(path);
   read = (path) => this.files.get(path);
   writeFile = (path, content) => { this.files.set(path, content); };
@@ -79,6 +80,64 @@ function observation(overrides = {}) {
   };
 }
 const createArgs = ["docker", "create", "--name", "apps", "--ip", "10.0.0.88", "--yes"];
+
+test("DHCP discovery uses the current lease on the configured interface", async () => {
+  const f = fixture();
+  let lease = "10.0.0.90";
+  f.proxmox.inspectLxc = async () => ({ ip: "dhcp", networkInterface: "lan0", hostname: "existing", unprivileged: true });
+  const originalExec = f.proxmox.pctExec;
+  f.proxmox.pctExec = async (vmid, command) => {
+    if (command.args.includes("address")) {
+      assert.ok(command.args.includes("lan0"));
+      return { stdout: JSON.stringify([
+        { ifname: "docker0", addr_info: [{ family: "inet", scope: "global", local: "172.17.0.1" }] },
+        { ifname: "lan0", addr_info: [{ family: "inet", scope: "global", local: lease }] }
+      ]) };
+    }
+    return originalExec(vmid, command);
+  };
+  const docker = createDockerAdapter(f.proxmox, { maxRetries: 0 });
+  const first = await docker.discover(120, "/run/docker.sock");
+  assert.equal(first.candidates[0].backendAddress, lease);
+  assert.equal(first.candidates[0].selectable, true);
+  lease = "10.0.0.91";
+  assert.equal((await docker.discover(120, "/run/docker.sock")).candidates[0].backendAddress, lease);
+  lease = "127.0.0.1";
+  assert.equal((await docker.discover(120, "/run/docker.sock")).candidates[0].selectable, false);
+});
+
+test("tracking retries a contended commit without repeating provider inspection or overwriting newer bindings", async () => {
+  const f = fixture();
+  let attempts = 0;
+  let inspections = 0;
+  f.filesystem.acquireProjectLock = async () => {
+    attempts++;
+    if (attempts < 3) throw Object.assign(new Error("busy"), { code: "NOMINA_PROJECT_BUSY" });
+    return () => {};
+  };
+  await runTrackingJob({
+    filesystem: f.filesystem, projectDir: directory,
+    providerAdapters: { technitium: { inspect: async () => { inspections++; throw new Error("unavailable"); } } },
+    retryOptions: { maxRetries: 0 },
+    commitRetryOptions: { maxRetries: 2, sleep: async () => {
+      const current = f.project();
+      current.config.managedInventory.dockerHosts = [{ id: "docker", name: "apps", origin: "connected", socketPath: "/run/docker.sock" }];
+      f.filesystem.writeFile(current.configPath, serializeProjectConfiguration(current.config));
+    } }
+  });
+  assert.equal(attempts, 3);
+  assert.equal(inspections, 1);
+  assert.equal(f.project().config.managedInventory.dockerHosts[0].name, "apps");
+  assert.equal(f.project().state.tracking.notices.length, 1);
+});
+
+test("project updates do not retry unrelated filesystem errors", async () => {
+  const f = fixture();
+  let attempts = 0;
+  f.filesystem.acquireProjectLock = async () => { attempts++; throw Object.assign(new Error("denied"), { code: "EACCES" }); };
+  await assert.rejects(updateProject(f.filesystem, directory, (project) => project, { maxRetries: 2, sleep: async () => {} }), /denied/);
+  assert.equal(attempts, 1);
+});
 
 test("old configuration loads unchanged; Docker visible configuration round trips without provider references", async () => {
   const f = fixture();

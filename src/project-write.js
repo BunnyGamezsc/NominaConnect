@@ -7,11 +7,20 @@ const queues = new Map();
 // Reload inside the queue, then commit both files without an asynchronous gap.
 // Production also holds a filesystem lock across processes.
 /** Queue per-project updates, reload under the write lock and replace config and state without an asynchronous gap. */
-export async function updateProject(filesystem, projectDirectory, update) {
+export async function updateProject(filesystem, projectDirectory, update, { maxRetries = 0, baseDelayMs = 1000, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {}) {
   const key = path.resolve(projectDirectory);
   const previous = queues.get(key) ?? Promise.resolve();
   const pending = previous.catch(() => {}).then(async () => {
-    const release = await filesystem.acquireProjectLock?.(projectDirectory);
+    let release;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        release = await filesystem.acquireProjectLock?.(projectDirectory);
+        break;
+      } catch (error) {
+        if (error.code !== "NOMINA_PROJECT_BUSY" || attempt >= maxRetries) throw error;
+        await sleep(baseDelayMs);
+      }
+    }
     try {
       const project = loadProject(filesystem, projectDirectory);
       const result = update(project) ?? project;

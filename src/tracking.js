@@ -5,7 +5,7 @@ import { adoptPlatformDeployment, adoptServiceExposure, applyProviderReferenceCh
 import { updateProject } from "./project-write.js";
 
 /** Inspect providers without a write lock, then reload and apply observed changes under the shared project update lock. */
-export async function runTrackingJob({ filesystem, projectDir, providerAdapters = {}, retryOptions = {} }) {
+export async function runTrackingJob({ filesystem, projectDir, providerAdapters = {}, retryOptions = {}, commitRetryOptions = {} }) {
   let project;
   try {
     project = loadProject(filesystem, projectDir);
@@ -64,7 +64,7 @@ export async function runTrackingJob({ filesystem, projectDir, providerAdapters 
       };
 
       return { ...currentProject, config: updatedConfig, state: updatedState };
-    });
+    }, { maxRetries: 60, ...commitRetryOptions });
   }
 
   return {

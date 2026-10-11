@@ -642,6 +642,7 @@ function parsePctConfig(stdout) {
     hostname: values.hostname,
     unprivileged: values.unprivileged === "1",
     ip: net0.match(/ip=([^/,]+)/)?.[1],
+    networkInterface: net0.match(/(?:^|,)name=([^,]+)/)?.[1],
     bridge: net0.match(/bridge=([^,]+)/)?.[1],
     nameserver: values.nameserver,
     storage: values.rootfs?.split(":")[0]

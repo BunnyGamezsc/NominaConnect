@@ -371,7 +371,9 @@ function startTrackingJobInBackground(adapters) {
     return;
   }
 
-  runTrackingJob({ filesystem, projectDir, providerAdapters }).catch(() => {});
+  runTrackingJob({ filesystem, projectDir, providerAdapters }).catch(() => {
+    adapters.prompts?.warn?.("Background tracking could not save its results. Run Nomina again after the current operation finishes.");
+  });
 }
 
 async function addTechnitiumService(options, adapters) {
