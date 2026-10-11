@@ -56,13 +56,13 @@ function parseOptions(args) {
 
 /** Validate a lowercase binding name suitable for guided and scripted commands. */
 function validateName(name) {
-  if (typeof name !== "string" || !/^[a-z][a-z0-9-]{0,62}$/.test(name) || name.endsWith("-")) throw new Error("Docker binding name must be 1-63 lowercase letters, digits or hyphens, starting with a letter and ending with a letter or digit.");
+  if (typeof name !== "string" || !/^[a-z][a-z0-9-]{0,62}$/.test(name) || name.endsWith("-")) throw new Error("Docker binding nickname must be 1-63 lowercase letters, digits or hyphens, starting with a letter and ending with a letter or digit.");
   return name;
 }
 
 /** Reject duplicate names or node/VMID/socket bindings while allowing updates to the same binding ID. */
 function assertUnique(project, host, reference) {
-  if (bindings(project).some((existing) => existing.id !== host.id && existing.name === host.name)) throw new Error(`Docker binding name ${host.name} is already in use.`);
+  if (bindings(project).some((existing) => existing.id !== host.id && existing.name === host.name)) throw new Error(`Docker binding nickname ${host.name} is already in use.`);
   if (reference && bindings(project).some((existing) => {
     const ref = project.state.providerReferences?.[existing.id];
     return existing.id !== host.id && ref?.node === reference.node && Number(ref.vmid) === Number(reference.vmid)
@@ -94,7 +94,7 @@ async function ask(prompts, options, key, message, fallback = undefined) {
 /** Resolve a named binding or ask the operator to select an existing binding. */
 async function selectBinding(project, options, prompts) {
   if (options.name) return hostByName(project, options.name);
-  if (!prompts?.select || options.yes) throw new Error("Docker binding name is required.");
+  if (!prompts?.select || options.yes) throw new Error("Docker binding nickname is required.");
   const hosts = bindings(project);
   if (hosts.length === 0) throw new Error("No Docker hosts are bound. Create or connect one first.");
   const name = await prompts.select({ message: "Docker host binding", options: hosts.map((host) => ({ value: host.name, label: host.name, hint: project.state.dockerHostStates?.[host.id]?.status ?? "unknown" })) });
@@ -116,7 +116,7 @@ export function validateDockerDeployment(spec) {
   for (const field of ["ip", "gateway", "nameserver"]) {
     if (isIP(spec[field] ?? "") !== 4 || /^0\.|^127\.|^169\.254\./.test(spec[field]) || Number(spec[field].split(".")[0]) >= 224) throw new Error(`Docker ${field} must be a usable static IPv4 address.`);
   }
-  if (!Number.isInteger(spec.prefixLength) || spec.prefixLength < 1 || spec.prefixLength > 30) throw new Error("Docker IPv4 prefix length must be an integer between 1 and 30.");
+  if (!Number.isInteger(spec.prefixLength) || spec.prefixLength < 1 || spec.prefixLength > 30) throw new Error("Docker IPv4 prefix length (CIDR) must be an integer between 1 and 30.");
   const integerIp = (ip) => ip.split(".").reduce((value, octet) => (value * 256 + Number(octet)) >>> 0, 0);
   const mask = (0xffffffff << (32 - spec.prefixLength)) >>> 0;
   const ip = integerIp(spec.ip);
@@ -133,7 +133,7 @@ export function validateDockerDeployment(spec) {
 /** Collect creation settings and validate an available template without allocating or modifying an LXC. */
 async function creationOptions(project, options, adapters) {
   const prompts = adapters.prompts;
-  const name = validateName(await ask(prompts, options, "name", "Docker binding name"));
+  const name = validateName(await ask(prompts, options, "name", "Docker binding nickname (short label for Nomina commands, e.g. apps)"));
   const host = { id: `nc_${randomUUID()}`, name, origin: "created", socketPath: SOCKET };
   if (options.socketPath !== undefined && options.socketPath !== SOCKET) throw new Error("Created Docker hosts use /var/run/docker.sock. Custom socket paths are supported by connect.");
   assertUnique(project, host, undefined);
@@ -152,7 +152,7 @@ async function creationOptions(project, options, adapters) {
     hostname: await ask(prompts, options, "hostname", "Docker LXC hostname", `docker-${name}`.slice(0, 63).replace(/-$/, "")),
     bridge: await ask(prompts, options, "bridge", "Bridge", project.config.proxmox.defaultBridge),
     storage: await ask(prompts, options, "storage", "Storage", project.config.proxmox.defaultStorage),
-    prefixLength: Number(await ask(prompts, options, "prefixLength", "IPv4 prefix length", 24)),
+    prefixLength: Number(await ask(prompts, options, "prefixLength", "IPv4 prefix length (CIDR)", 24)),
     resources: {
       cpus: Number(await ask(prompts, options, "cpus", "CPU cores", 2)),
       memoryMb: Number(await ask(prompts, options, "memoryMb", "Memory MiB", 2048)),
@@ -284,7 +284,7 @@ export async function handleDockerCommand(argumentsList, adapters) {
       return await setupCreatedHost(current, host, { ...host.deployment, node: ref.node }, adapters, true);
     }
     if (action === "connect") {
-      const name = validateName(await ask(adapters.prompts, options, "name", "Docker binding name"));
+      const name = validateName(await ask(adapters.prompts, options, "name", "Docker binding nickname (short label for Nomina commands, e.g. apps)"));
       const host = { id: `nc_${randomUUID()}`, name, origin: "connected", socketPath: validateDockerSocket(await ask(adapters.prompts, options, "socketPath", "Local Docker Unix socket", SOCKET)) };
       let vmid = options.vmid;
       if (!vmid && !options.yes && adapters.prompts?.select) {

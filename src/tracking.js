@@ -39,7 +39,7 @@ export async function runTrackingJob({ filesystem, projectDir, providerAdapters 
         providerReferences: updatedProviderReferences,
         tracking: {
           ...currentProject.state.tracking,
-          notices: [
+          notices: coalesceWarnings([
             ...currentProject.state.tracking.notices,
             ...adoptionResult.changes.map((change) => ({
               id: `nc_${randomUUID()}`,
@@ -54,12 +54,13 @@ export async function runTrackingJob({ filesystem, projectDir, providerAdapters 
               id: `nc_${randomUUID()}`,
               kind: "verification-warning",
               serviceName: warning.serviceName,
+              serviceId: warning.serviceId,
               platformKey: warning.platformKey,
               verified: false,
               timestamp: new Date().toISOString(),
               summary: warning.message
             }))
-          ]
+          ])
         }
       };
 
@@ -124,8 +125,9 @@ export function formatPendingNotices(notices) {
   if (notices.length === 0) {
     return "";
   }
-  const verified = notices.filter((n) => n.verified);
-  const unverified = notices.filter((n) => !n.verified);
+  const grouped = coalesceWarnings(notices);
+  const verified = grouped.filter((n) => n.verified);
+  const unverified = grouped.filter((n) => !n.verified);
   const parts = [];
   if (verified.length > 0) {
     parts.push(`${verified.length} verified change(s):`);
@@ -136,10 +138,37 @@ export function formatPendingNotices(notices) {
   if (unverified.length > 0) {
     parts.push(`${unverified.length} unverified change(s) or warning(s):`);
     for (const notice of unverified) {
-      parts.push(`  - ${notice.summary}`);
+      const repeats = notice.occurrences > 1 ? ` (reported ${notice.occurrences} times)` : "";
+      parts.push(`  - ${notice.summary}${repeats}`);
     }
   }
   return parts.join("\n");
+}
+
+// Only warnings coalesce. Distinct verified changes remain separate history
+// entries, even when their human-readable summaries happen to match.
+function coalesceWarnings(notices) {
+  const result = [];
+  const warnings = new Map();
+  for (const notice of notices) {
+    if (notice.kind !== "verification-warning") {
+      result.push(notice);
+      continue;
+    }
+    // Older notices did not carry serviceId. Name, platform and exact warning
+    // text also identify their scope, so they can coalesce with newer notices.
+    const key = JSON.stringify([notice.serviceName, notice.platformKey, notice.summary]);
+    const previous = warnings.get(key);
+    if (previous === undefined) {
+      const grouped = { ...notice, firstTimestamp: notice.firstTimestamp ?? notice.timestamp, occurrences: notice.occurrences ?? 1 };
+      warnings.set(key, grouped);
+      result.push(grouped);
+    } else {
+      previous.occurrences += notice.occurrences ?? 1;
+      previous.timestamp = notice.timestamp;
+    }
+  }
+  return result;
 }
 
 export function formatChangesDetail(notices) {
@@ -150,7 +179,9 @@ export function formatChangesDetail(notices) {
   for (const notice of notices) {
     const verifiedLabel = notice.verified ? "verified" : "unverified";
     lines.push(`[${notice.timestamp}] ${notice.serviceName} (${notice.platformKey ?? "n/a"}) — ${verifiedLabel}`);
-    lines.push(`  ${notice.summary}`);
+    const repeats = notice.occurrences > 1
+      ? ` (reported ${notice.occurrences} times, first seen ${notice.firstTimestamp})` : "";
+    lines.push(`  ${notice.summary}${repeats}`);
     lines.push("");
   }
   return lines.join("\n");

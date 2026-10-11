@@ -62,6 +62,7 @@ function createProviderPlugin({ name, operations, upgradeOperations = [`upgrade-
         managedItemId: managedItem.id,
         process: observed.process,
         endpoint: observed.endpoint,
+        ...(observed.reason === undefined ? {} : { reason: observed.reason }),
         status: healthy ? "healthy" : "unhealthy"
       };
     }

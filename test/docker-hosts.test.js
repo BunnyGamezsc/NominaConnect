@@ -288,7 +288,7 @@ test("disconnect retains CT/applications and exposures and requires no Proxmox a
 
 test("guided create/connect/inspect/retry/disconnect use shared commands and cancellation never claims health", async () => {
   const f = fixture();
-  const answers = { "Docker binding name": "guided", "Requested Docker LXC static IPv4 address": "10.0.0.88" };
+  const answers = { "Docker binding nickname (short label for Nomina commands, e.g. apps)": "guided", "Requested Docker LXC static IPv4 address": "10.0.0.88" };
   f.adapters.prompts = {
     ask: async (message, fallback) => answers[message] ?? fallback,
     select: async ({ options }) => options[0].value,
@@ -484,7 +484,7 @@ test("tracking adoption retains binding written while provider inspection is in 
   assert.ok(f.project().state.tracking.notices.length > 0);
 });
 
-test("concurrent creates cannot allocate duplicate hosts with the same binding name", async () => {
+test("concurrent creates cannot allocate duplicate hosts with the same binding nickname", async () => {
   const f = fixture();
   const results = await Promise.allSettled([runCli(createArgs, f.adapters), runCli(createArgs, f.adapters)]);
   assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);

@@ -165,7 +165,17 @@ export function createStepCaAdapter({ httpClient, secretResolver }) {
         return { process: "running", endpoint: "reachable" };
       } catch (error) {
         if (isUnreachable(error)) {
-          return { process: "stopped", endpoint: "unreachable" };
+          // A failed network/TLS probe cannot establish the process state.
+          const code = error.code ?? error.cause?.code;
+          const tlsFailure = typeof code === "string" &&
+            /TLS|CERT|SELF_SIGNED|UNABLE_TO_VERIFY|UNABLE_TO_GET_ISSUER/.test(code);
+          return {
+            process: "unknown",
+            endpoint: "unreachable",
+            reason: tlsFailure
+              ? `TLS certificate validation failed (${code}).`
+              : "Unable to reach step-ca API; process state could not be verified."
+          };
         }
         return { process: "running", endpoint: "unreachable" };
       }

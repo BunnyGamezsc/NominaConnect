@@ -291,7 +291,14 @@ async function adoptProviderIdentity({
 }) {
   const changes = [];
   const warnings = [];
-  const resources = [...(inspection?.managed ?? []), ...(inspection?.unmanaged ?? [])];
+  // A managed DNS exposure is an A record in the configured zone. An apex
+  // also has SOA/NS records with the same id; these are not candidates for
+  // adopting its exposure reference. Providers without typed locators retain
+  // their existing id matching.
+  const resources = [...(inspection?.managed ?? []), ...(inspection?.unmanaged ?? [])]
+    .filter((resource) => describe.integration !== "dns" || resource?.locator === undefined ||
+      (resource.locator.type === (storedIdentity?.locator?.type ?? "A") &&
+        resource.locator.zone === (storedIdentity?.locator?.zone ?? context.zone)));
   const trackable = trackWithoutStoredIdentity
     || storedIdentity?.locator !== undefined
     || resources.some((resource) => resource?.self === true);
@@ -458,7 +465,7 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
         warnings.push({
           serviceName: managedItem.service,
           platformKey,
-          message: `${managedItem.service} health check failed: process=${health.process}, endpoint=${health.endpoint}.`
+          message: `${managedItem.service} health check failed: process=${health.process}, endpoint=${health.endpoint}.${health.reason === undefined ? "" : ` ${health.reason}`}`
         });
       }
 
@@ -635,7 +642,7 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
             staleBackend ||
             ((observedRedirectTo !== undefined || storedRedirectTo !== undefined) &&
               (observedRedirectTo !== storedRedirectTo ||
-                (observedRedirectCode ?? 308) !== (service.exposure.redirect?.code ?? 308)));
+                Number(observedRedirectCode ?? 308) !== Number(service.exposure.redirect?.code ?? 308)));
           const newRedirect = observedIsRedirect
             ? { to: observedRedirectTo, code: observedRedirectCode ?? 308 }
             : undefined;

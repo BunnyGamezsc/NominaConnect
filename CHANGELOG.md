@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.5.1] - 2026-10-11
+
+### Fixed
+- Match managed DNS exposure records by record type and zone so an apex's
+  SOA and NS records do not cause a false ambiguity warning. Multiple A
+  records still require operator review.
+- Compare redirect status codes numerically after YAML loading, preventing
+  unchanged redirects from generating a change notice on every tracking pass.
+- Report step-ca network and TLS failures with unknown process state and a
+  diagnostic reason instead of claiming the CA process is stopped.
+- Group repeated pending verification warnings, retaining their occurrence
+  count and first/last timestamps. Distinct change events remain separate.
+
 ## [2.5.0] - 2026-10-11
 
 ### Added
