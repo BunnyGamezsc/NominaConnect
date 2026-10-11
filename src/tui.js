@@ -331,8 +331,8 @@ export async function runInteractiveApp(adapters) {
   }
   if (action === "publish-exposure") {
     const result = await adapters.runCommand(["exposure", "publish"], adapters);
-    clack.outro("Exposure published.");
-    if (adapters.tracking) {
+    clack.outro(result.cancelled ? "Exposure publication cancelled." : result.reviewOnly ? "Exposure reviewed." : "Exposure published.");
+    if (adapters.tracking && !result.cancelled && !result.reviewOnly) {
       adapters.tracking.run(adapters);
     }
     return result;
@@ -729,28 +729,31 @@ export async function promptNetBirdOptions(project, existingOptions, prompts, av
   });
 }
 
-export async function promptExposureOptions(project, existingOptions, prompts) {
+/** Collect editable exposure fields, honoring supplied flags and keeping Docker proposals separate from explicit overrides. */
+export async function promptExposureOptions(project, existingOptions, prompts, defaults = undefined) {
   if (prompts?.ask === undefined) {
     const stored = (project.config.managedInventory.services ?? []).find((service) => service.exposure?.hostname === existingOptions.hostname)?.exposure;
-    return { ...existingOptions, protocol: existingOptions.protocol ?? stored?.preset ?? stored?.protocol ?? "https" };
+    const protocol = existingOptions.protocol ?? defaults?.protocol ?? stored?.preset ?? stored?.protocol ?? "https";
+    return { ...defaults, ...existingOptions, protocol, ...(defaults ? { backendTls: existingOptions.backendTls ?? (protocol === "https" && defaults.backendTls === true) } : {}) };
   }
 
-  const name = existingOptions.name ?? await askPrompt(prompts, "Service name", "app");
-  const suggestedHostname = `${name}.${project.config.baseLocalDomain}`;
+  const name = existingOptions.name ?? await askPrompt(prompts, "Service name", defaults?.name ?? "app");
+  const suggestedHostname = defaults?.hostname ?? `${name}.${project.config.baseLocalDomain}`;
   const hostname = existingOptions.hostname ?? await askPrompt(prompts, "Full hostname", suggestedHostname);
   const existingExposure = (project.config.managedInventory.services ?? [])
     .find((service) => service.exposure?.hostname === hostname)?.exposure;
-  const scriptedSmbProtocol = existingExposure?.preset === "smb"
+  const scriptedSmbProtocol = !defaults && existingExposure?.preset === "smb"
     && existingOptions.name && existingOptions.hostname && existingOptions.backendIp
     ? "smb"
     : undefined;
   const protocol = existingOptions.protocol ?? scriptedSmbProtocol ?? (prompts.select
-    ? await prompts.select({ message: "Exposure protocol", initialValue: existingExposure?.preset ?? existingExposure?.protocol ?? "https", options: [{ value: "https", label: "HTTPS", hint: "web service" }, { value: "tcp", label: "TCP", hint: "raw TCP, including Minecraft Java" }, { value: "smb", label: "SMB", hint: "file shares over TCP 445; credentials stay on the server" }] })
-    : await askPrompt(prompts, "Exposure protocol (https, tcp or smb)", existingExposure?.preset ?? existingExposure?.protocol ?? "https"));
+    ? await prompts.select({ message: "Exposure protocol", initialValue: defaults ? defaults.protocol : existingExposure?.preset ?? existingExposure?.protocol ?? "https", options: [{ value: "https", label: "HTTPS", hint: "web service; backend HTTP/HTTPS is chosen separately" }, { value: "tcp", label: "TCP", hint: "raw TCP, including SSH and Minecraft Java" }, { value: "smb", label: "SMB", hint: "file shares over TCP 445; credentials stay on the server" }] })
+    : await askPrompt(prompts, "Exposure protocol (https, tcp or smb)", defaults ? defaults.protocol : existingExposure?.preset ?? existingExposure?.protocol ?? "https"));
+  if (!["https", "tcp", "smb"].includes(protocol)) throw new Error("Choose https, tcp or smb explicitly for an unknown Docker application protocol.");
   const isTcp = protocol === "tcp" || protocol === "smb";
   const isSmb = protocol === "smb" || (protocol === "tcp" && existingExposure?.preset === "smb");
   const tailnet = existingOptions.tailnet ?? await promptTailnetAccess(project, existingExposure?.tailnet, prompts);
-  const isRedirect = isTcp ? false : existingOptions.redirectTo !== undefined && existingOptions.redirectTo !== ""
+  const isRedirect = isTcp || defaults ? false : existingOptions.redirectTo !== undefined && existingOptions.redirectTo !== ""
     ? true
     : await confirmPrompt(
       prompts,
@@ -765,23 +768,25 @@ export async function promptExposureOptions(project, existingOptions, prompts) {
     return { ...existingOptions, name, hostname, protocol, tailnet, redirectTo: redirectRaw, redirectCode };
   }
   const backendIp = existingOptions.backendIp
-    ?? await askRequired(prompts, "Backend IP", validateIp);
+    ?? (defaults ? await askPrompt(prompts, "Backend IP", defaults.backendIp) : await askRequired(prompts, "Backend IP", validateIp));
   // Fully specified SMB commands may omit the backend port. Guided setup
   // still asks so an operator can choose a nonstandard server port.
-  const scriptedSmbPort = isSmb && existingOptions.name && existingOptions.hostname && existingOptions.backendIp
+  const scriptedSmbPort = !defaults && isSmb && existingOptions.name && existingOptions.hostname && existingOptions.backendIp
     ? Number(existingExposure?.backend?.port ?? 445)
     : undefined;
   const backendPort = existingOptions.backendPort
     ?? scriptedSmbPort
-    ?? Number(await askPrompt(prompts, "Backend port", existingExposure?.backend?.port ?? (isSmb ? "445" : protocol === "tcp" ? "25565" : "8080")));
+    ?? Number(await askPrompt(prompts, "Backend port", defaults?.backendPort ?? existingExposure?.backend?.port ?? (isSmb ? "445" : protocol === "tcp" ? "25565" : "8080")));
   const backendTls = isTcp ? existingOptions.backendTls ?? false : existingOptions.backendTls
     ?? await confirmPrompt(
       prompts,
       "Does the backend serve HTTPS/TLS itself? (e.g. Proxmox :8006, OPNsense)",
-      false
+      defaults?.backendTls ?? false
     );
 
-  return { ...existingOptions, name, hostname, protocol, tailnet, backendIp, backendPort, backendTls };
+  const listenerPort = existingOptions.listenerPort ?? (isTcp
+    ? isSmb ? 445 : Number(await askPrompt(prompts, "Client-facing TCP listener port", existingExposure?.listenerPort ?? backendPort)) : undefined);
+  return { ...existingOptions, name, hostname, protocol, tailnet, backendIp, backendPort, backendTls, ...(listenerPort === undefined ? {} : { listenerPort }) };
 }
 
 async function promptTailnetAccess(project, stored, prompts) {

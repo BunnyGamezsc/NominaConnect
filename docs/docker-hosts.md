@@ -85,8 +85,11 @@ require manual exposure entry.
 - Stopped containers, absent public bindings, loopback, UDP/SCTP, host networking
   and directly addressed or unverified networks remain visible with reasons
   and manual-entry fallback. EXPOSE metadata never becomes a published port.
-- `connectionTypeHint` stays `unknown`; TCP or a familiar port does not prove
-  HTTP. The hostname label suggestion is editable and publishes nothing.
+- `connectionTypeHint` is evidence-based for allowlisted image/application-port
+  pairs and otherwise stays `unknown`. TCP or a familiar port alone does not
+  prove HTTP. Hints and hostname proposals are editable and publish nothing.
+- Each candidate has an `endpointId` for scripted exposure selection. It
+  identifies the current observation and expires on identity/mapping changes.
 - `truncated` and diagnostics explicitly report incomplete observations.
 
 Limits are 100 containers, 500 endpoint candidates, 256-character names/image/
@@ -106,7 +109,8 @@ The LXC, applications and existing exposures remain independently managed.
 The existing nuclear uninstall workflow also excludes Docker-bound CTs from
 its destruction targets, including bindings to existing CTs.
 
-The exposure picker and editable publish form are tracked separately in #33.
+Use [Docker exposure creation](docker-exposures.md) for the picker, editable
+review and scripted publication flow implemented in #33.
 
 ## Validation
 

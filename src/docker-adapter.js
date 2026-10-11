@@ -1,5 +1,5 @@
 import { withBoundedRetry } from "./adoption.js";
-import { COMPOSE_LABELS, DOCKER_LIMITS, normalizeDockerDiscovery } from "./docker-discovery.js";
+import { COMPOSE_LABELS, DOCKER_LIMITS, normalizeDockerDiscovery, usableAddress } from "./docker-discovery.js";
 
 /** Accept only bounded absolute local Unix socket paths without traversal or shell metacharacters. */
 export function validateDockerSocket(socketPath = "/var/run/docker.sock") {
@@ -64,7 +64,21 @@ export function createDockerAdapter(proxmox, retryOptions = {}) {
           await docker(vmid, socketPath, ["compose", "version", "--short"]);
           await docker(vmid, socketPath, ["buildx", "version"]);
         }
-        return { status: "healthy", ip: ct.ip, hostname: ct.hostname, unprivileged: ct.unprivileged, canonicalSocketPath };
+        let ip = ct.ip;
+        if (ip === "dhcp") {
+          const networkInterface = ct.networkInterface ?? "eth0";
+          if (!/^[A-Za-z0-9_.-]{1,15}$/.test(networkInterface) || networkInterface.startsWith("-")) throw new Error("Unsupported LXC network interface. Use manual exposure entry.");
+          const addresses = await exec(vmid, { binary: "/usr/bin/env", args: ["-i", "PATH=/usr/sbin:/usr/bin:/sbin:/bin", "ip", "-j", "-4", "address", "show", "dev", networkInterface, "scope", "global"] });
+          const leases = [...new Set(JSON.parse(addresses.stdout)
+            .filter((entry) => entry.ifname === networkInterface)
+            .flatMap((entry) => entry.addr_info ?? [])
+            .filter((address) => address.family === "inet" && address.scope === "global" && usableAddress(address.local)
+              && !address.tentative && !address.deprecated && !address.dadfailed)
+            .map((address) => address.local))];
+          // Missing or ambiguous leases stay unavailable for wildcard endpoints.
+          ip = leases.length === 1 ? leases[0] : undefined;
+        }
+        return { status: "healthy", ip, hostname: ct.hostname, unprivileged: ct.unprivileged, canonicalSocketPath };
       });
     },
     /** Inspect allowlisted container fields within output, count and time budgets, returning endpoints and incomplete-discovery diagnostics. */

@@ -1,4 +1,4 @@
-import { tcpRequest } from "./tcp-exposure.js";
+import { tcpRequest, preflightTcpExposure } from "./tcp-exposure.js";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { INITIAL_PLATFORM_CATALOG, certificateAuthorityIsCompatible, hasCatalogOption } from "./catalog.js";
@@ -23,10 +23,10 @@ import {
 import { getStepCaExportGuide, getStepCaTrustGuide } from "./ca-guide.js";
 import { VERSION } from "./version.js";
 import { handleDockerCommand } from "./docker-hosts.js";
+import { prepareDockerExposure, validateDockerExposure, verifyDockerExposure, formatDockerExposureReview } from "./docker-exposure.js";
 import { findProjectDirectory } from "./config.js";
 import {
   promptCaddyOptions,
-  promptExposureOptions,
   promptInitOptions,
   promptServiceName,
   promptStepCaOptions,
@@ -40,6 +40,8 @@ import {
   promptSecretServiceName,
   confirmPrompt
 } from "./tui.js";
+
+const DOCKER_EXPOSURE_HELP = "\nDocker source: nomina docker inspect BINDING --json shows application and endpointId values.\nnomina exposure publish --source docker --docker-binding BINDING --docker-application APP --docker-endpoint ID [--protocol https|tcp|smb] [--name NAME] [--hostname HOST] [--backend-ip IP] [--backend-port PORT] [--backend-tls true|false] [--listener-port PORT] [--tailnet true|false] --review-only\nRepeat the reviewed selection with --yes to explicitly confirm publication. These flags suppress prompts. Unknown application protocols require --protocol. Endpoint IDs expire when the observed container/mapping changes. Backend overrides stay explicit; the endpoint is reinspected and the backend checked from the proxy LXC. No automatic publication or Docker application ownership. Manual entry stays available with --source manual.\n";
 
 // Display names that simple capitalization gets wrong.
 const SERVICE_DISPLAY_LABELS = Object.freeze({ netbird: "NetBird" });
@@ -74,7 +76,7 @@ export async function runCli(argumentsList, adapters) {
   } finally {
     try { release?.(); } finally { releaseOperation?.(); }
   }
-  startTrackingJobInBackground(adapters);
+  if (!("cancelled" in commandResult && commandResult.cancelled) && !("reviewOnly" in commandResult && commandResult.reviewOnly)) startTrackingJobInBackground(adapters);
   return commandResult;
 }
 
@@ -83,7 +85,7 @@ async function runCommand(command, rest, adapters) {
   if (command === "--version" || command === "-v" || command === "version") {
     return { stdout: `${VERSION}\n` };
   }
-  if (command === "--help" || command === "help" || command === "-h") return { stdout: "nomina exposure publish --name NAME --protocol https|tcp|smb --hostname HOST --backend-ip IP [--backend-port PORT] [--listener-port PORT] [--tailnet true|false]\nHTTPS is the default. HTTPS and generic TCP require a backend port. TCP listens on the backend port by default; Minecraft Java uses 25565. Raw TCP selects a backend by listener address and port.\nSMB uses client TCP 445, with backend port 445 by default, and supports existing Samba/NAS/VM servers. Windows: \\\\files.bunny.internal\\SHARE. macOS: smb://files.bunny.internal/SHARE. Shares, credentials and permissions stay on the server. Configure Samba hostname aliases; see docs/smb-live-verification.md.\nRemove with: nomina service remove NAME\n" };
+  if (command === "--help" || command === "help" || command === "-h") return { stdout: "nomina exposure publish --name NAME --protocol https|tcp|smb --hostname HOST --backend-ip IP [--backend-port PORT] [--listener-port PORT] [--tailnet true|false]\nHTTPS is the default. HTTPS and generic TCP require a backend port. TCP listens on the backend port by default; Minecraft Java uses 25565. Raw TCP selects a backend by listener address and port.\nSMB uses client TCP 445, with backend port 445 by default, and supports existing Samba/NAS/VM servers. Windows: \\\\files.bunny.internal\\SHARE. macOS: smb://files.bunny.internal/SHARE. Shares, credentials and permissions stay on the server. Configure Samba hostname aliases; see docs/smb-live-verification.md.\nRemove with: nomina service remove NAME\n" + DOCKER_EXPOSURE_HELP };
   switch (command) {
     case "docker":
       return handleDockerCommand(rest, adapters);
@@ -170,6 +172,7 @@ async function handleServiceCommand(argumentsList, adapters) {
 
 async function handleExposureCommand(argumentsList, adapters) {
   const [subcommand, ...rest] = argumentsList;
+  if (["--help", "help", "-h"].includes(subcommand) || (subcommand === "publish" && rest.includes("--help"))) return runCommand("help", [], adapters);
   if (subcommand !== "publish") {
     throw new Error("Run nomina for the interactive menu, or use: nomina exposure publish");
   }
@@ -368,7 +371,9 @@ function startTrackingJobInBackground(adapters) {
     return;
   }
 
-  runTrackingJob({ filesystem, projectDir, providerAdapters }).catch(() => {});
+  runTrackingJob({ filesystem, projectDir, providerAdapters }).catch(() => {
+    adapters.prompts?.warn?.("Background tracking could not save its results. Run Nomina again after the current operation finishes.");
+  });
 }
 
 async function addTechnitiumService(options, adapters) {
@@ -1981,12 +1986,15 @@ async function uninstallEverything(options, adapters) {
   return { stdout: `${lines.join("\n")}\n`, destroyed, removedPaths, failed };
 }
 
+/** Collect and validate an exposure, then review or explicitly publish Docker selections through the shared lifecycle. */
 async function publishExposure(options, adapters) {
   const { filesystem, providerAdapters = {} } = adapters;
   assertProxmoxShell(adapters.runtime);
 
-  const project = loadProject(filesystem, options.projectDir);
-  const resolvedOptions = await promptExposureOptions(project, options, adapters.prompts);
+  const project = loadProject(filesystem, options.projectDir ?? findProjectDirectory(filesystem, adapters.cwd ?? "."));
+  const prepared = await prepareDockerExposure(project, options, adapters);
+  if (prepared.cancelled) return { stdout: prepared.stdout, cancelled: true };
+  const resolvedOptions = prepared.options;
   const storedExposure = project.config.managedInventory.services.find((service) => service.exposure?.hostname === resolvedOptions.hostname)?.exposure;
   if (resolvedOptions.protocol === "smb" || (resolvedOptions.protocol === "tcp" && storedExposure?.preset === "smb")) {
     resolvedOptions.protocol = "tcp";
@@ -1998,6 +2006,38 @@ async function publishExposure(options, adapters) {
     resolvedOptions.listenerPort = 445;
   }
   validateExposureOptions(resolvedOptions);
+
+  let dockerReview = "";
+  let backendReachability;
+  let reviewOnly = options.reviewOnly === true;
+  if (prepared.selection) {
+    validateDockerExposure(project, resolvedOptions);
+    resolvedOptions.tailnet = project.config.managedInventory.platform.vpn?.service === "tailscale" && (resolvedOptions.tailnet ?? true);
+    dockerReview = (prepared.discovery?.truncated ? "Warning: Docker discovery is truncated or incomplete; only observed endpoints were offered.\n" : "")
+      + (prepared.discovery?.diagnostics ?? []).map((diagnostic) => `Warning: ${diagnostic}\n`).join("")
+      + (prepared.advisory ?? "") + formatDockerExposureReview(resolvedOptions, prepared.selection);
+    if (!reviewOnly && !options.yes) {
+      adapters.prompts?.info?.(dockerReview);
+      if (adapters.prompts?.select) {
+        const action = await adapters.prompts.select({ message: "Reviewed Docker exposure", initialValue: "cancel", options: [
+          { value: "publish", label: "Publish this reviewed exposure" },
+          { value: "review-only", label: "Check readiness without publishing", hint: "reinspect, probe the backend and check conflicts" },
+          { value: "cancel", label: "Cancel" }
+        ] });
+        if (action === "cancel" || action === undefined) return { stdout: "Exposure publication cancelled.\n", cancelled: true };
+        if (!["publish", "review-only"].includes(action)) throw new Error("Choose publication, readiness review or cancellation explicitly.");
+        reviewOnly = action === "review-only";
+      } else {
+        if (!adapters.prompts?.confirm) throw new Error("Review with --review-only, then use --yes to explicitly confirm publication.");
+        if (!await adapters.prompts.confirm({ message: "Publish this reviewed exposure?", initialValue: false })) return { stdout: "Exposure publication cancelled.\n", cancelled: true };
+      }
+    }
+    backendReachability = await verifyDockerExposure(prepared.selection, prepared.docker, resolvedOptions, project, adapters);
+    if (reviewOnly) {
+      if (resolvedOptions.protocol === "tcp") await preflightTcpExposure({ project, options: resolvedOptions, providerAdapters });
+      return { stdout: `${dockerReview}Backend transport reachable from proxy LXC ${backendReachability.vmid}; application access is not verified. No exposure published. Reuse the endpoint ID with --yes after review.\n`, reviewOnly: true, options: resolvedOptions, backendReachability };
+    }
+  }
 
   if (resolvedOptions.protocol !== "tcp") await ensureCaddyTrustsStepCa(project, adapters);
 
@@ -2046,7 +2086,8 @@ async function publishExposure(options, adapters) {
     : `via ${result.managedService.exposure.protocol.toUpperCase()} at ${resolvedOptions.backendIp}:${resolvedOptions.backendPort}${result.managedService.exposure.protocol === "tcp" ? ` (listener ${"listenerPort" in result.managedService.exposure ? result.managedService.exposure.listenerPort : ""}; ${smb ? "SMB file access" : "application join"} not verified)` : ""}`;
 
   return {
-    stdout: `Exposure ${actionLabel} for ${resolvedOptions.hostname} ${destination}. Health: ${healthLabel}.\n${warningLines}${clientInstructions}`,
+    stdout: `${dockerReview}Exposure ${actionLabel} for ${resolvedOptions.hostname} ${destination}. Health: ${healthLabel}.\n${warningLines}${clientInstructions}`,
+    ...(backendReachability ? { backendReachability } : {}),
     health: result.health,
     warnings,
     dnsInspection: result.dnsInspection,
@@ -2145,12 +2186,14 @@ const parseServiceAddOptions = optionParser({
 
 const parseExposurePublishOptions = optionParser({
   flags: [
+    ["--source", "source"], ["--docker-binding", "dockerBinding"], ["--docker-application", "dockerApplication"], ["--docker-endpoint", "dockerEndpoint"],
+    ["--yes", "yes"], ["--review-only", "reviewOnly"],
     ["--name", "name"], ["--hostname", "hostname"], ["--protocol", "protocol"], ["--listener-port", "listenerPort"], ["--backend-ip", "backendIp"],
     ["--backend-port", "backendPort"], ["--backend-tls", "backendTls"],
     ["--redirect-to", "redirectTo"], ["--redirect-code", "redirectCode"],
     ["--tailnet", "tailnet"]
   ],
-  booleans: ["--backend-tls", "--tailnet"],
+  booleans: ["--backend-tls", "--tailnet", "--yes", "--review-only"],
   numbers: ["backendPort", "listenerPort", "redirectCode"]
 });
 

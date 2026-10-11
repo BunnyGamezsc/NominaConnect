@@ -319,7 +319,8 @@ function formatDiscovery(name, discovery) {
   for (const candidate of discovery.candidates) {
     const tuple = candidate.hostPort === undefined ? "no published endpoint" : `${candidate.bindAddress}:${candidate.hostPort} -> ${candidate.containerPort}/${candidate.transport}`;
     lines.push(`${candidate.application} [${candidate.instance}] ${candidate.status}, network=${candidate.networkMode}: ${tuple}`);
-    lines.push(candidate.selectable ? `  Backend ${candidate.backendAddress}:${candidate.hostPort}; application protocol requires explicit choice.` : `  ${candidate.reasons.join(" ")}`);
+    lines.push(`  Endpoint ID: ${candidate.endpointId}`);
+    lines.push(candidate.selectable ? `  Proposed backend ${candidate.backendAddress}:${candidate.hostPort}; reachability not verified. ${candidate.connectionHint.evidence}` : `  ${candidate.reasons.join(" ")}`);
   }
   if (discovery.candidates.length === 0) lines.push("No container endpoints observed.");
   if (discovery.truncated) lines.push("Discovery is truncated or incomplete. Only bounded observations are shown; inspect again or use manual entry.");

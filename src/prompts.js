@@ -1,9 +1,10 @@
+/** Adapt Clack prompts with string text defaults, preserved explicit answers and cancellation errors. */
 export function createClackPrompts(clack) {
   return {
     ask: async (question, fallback) => {
       const value = await clack.text({
         message: question,
-        defaultValue: fallback,
+        defaultValue: fallback === undefined ? undefined : String(fallback),
         placeholder: fallback === undefined ? undefined : String(fallback)
       });
       if (clack.isCancel(value)) {

@@ -86,7 +86,17 @@ a project in the current directory or a parent. Automation can specify
 
 ## Publish HTTPS exposures
 
-Every exposure uses HTTPS **to the client**. `--backend-tls` controls the
+The exposure wizard offers **Manual entry** and **From Docker**. Docker
+selection chooses a binding, application and published endpoint, then opens
+an editable review. Publication requires confirmation; applications stay
+independently managed. Scripted selection uses `--source docker`,
+`--docker-binding`, `--docker-application` and `--docker-endpoint`.
+Use `--review-only` to inspect the proposal and `--yes` to confirm it without
+prompts. Unknown protocols require `--protocol https|tcp|smb`.
+See [Docker exposure creation](docs/docker-exposures.md) for naming, overrides,
+reachability checks, stale selections and unsupported endpoints.
+
+Every web exposure uses HTTPS **to the client**. `--backend-tls` controls the
 connection **from the proxy to the backend**.
 
 | Backend | Example | Backend TLS |
@@ -308,6 +318,7 @@ SHA-256 hashes and leaves the release `nomina` link alone.
 ## Documentation
 
 - [Docker host bindings and endpoint discovery](docs/docker-hosts.md)
+- [Docker exposure creation](docs/docker-exposures.md)
 
 - [Architecture](docs/architecture.md), [domain language](CONTEXT.md), [ADRs](docs/adr/)
 - [Interactive CLI](docs/tui.md)
