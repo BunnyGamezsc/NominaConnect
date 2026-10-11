@@ -9,7 +9,8 @@ Merge order is #34, then #33; retarget #33 to `main` when integrating it.
 
 ## Automated checks
 
-- Repository suite: 618 tests, 616 passed, 2 skipped, 0 failures.
+- Repository suite after the parity/review fixes: 658 tests, 656 passed,
+  2 skipped, 0 failures.
 - Local skips were the PowerShell helper CLI and Linux socket-forwarder test.
   PowerShell was unavailable. The TCP wire suite ran on Proxmox with all
   7 tests passing, including real `systemd-socket-proxyd` byte forwarding.
@@ -68,13 +69,53 @@ client checks. Its evidence and log are retained on the lab at
 Native CLI evidence and its tested binary SHA-256 are retained at
 `/opt/nomina-issue33-live/native-evidence.json` and
 `/opt/nomina-issue33-live/native-check.log`.
-The tested final Linux x64 binary SHA-256 is
+The initial implementation's tested Linux x64 binary SHA-256 is
 `1e319f8ec5b22b34f9130435c431e129bd3f5721c1ba58dd2e5667b0c9ecd454`.
 The native check script is retained at
 `/opt/nomina-issue33-live/nomina33-native-check.mjs`, and the TCP wire log at
 `/opt/nomina-issue33-live/tcp-wire.log`.
 
 ## Failures investigated
+
+The follow-up parity audit drives the root **Publish an exposure** menu through
+the production Clack adapter and compares its exposure, backend probe and TCP
+preflight requests with scripted flags. It covers Docker/manual HTTPS, backend
+TLS, generic TCP listeners, SMB, tailnet choices, unknown protocols, redirects
+307/308, parent-project discovery, supplied fields during manual fallback,
+readiness-only review and cancellation. The option mapping is documented in
+[Menu and flag parity](docker-exposures.md#menu-and-flag-parity).
+
+The audit fixed numeric text defaults, the missing manual TCP listener prompt,
+lost flags during manual fallback, project discovery during menu publication,
+and missing TCP listener preflights in readiness review. Docker's final menu
+now offers publication, readiness review and cancellation with cancellation
+selected initially. Both readiness routes use the existing read-only TCP
+preflight; publication retains the same lifecycle.
+
+CodeRabbit's manual `--yes` finding was valid. Manual entry now receives the
+computed prompt adapter, so `--yes` disables installed prompts and missing
+required fields fail validation without writes. Regression tests cover
+HTTPS/TCP/SMB, inferred/explicit manual selection and redirects. Function
+documentation was added for the affected collectors and TCP preflight.
+
+The follow-up native Linux x64 binary SHA-256 is
+`4ff54b1fcc8e92b604392f71a941113634608263eab9a2e3150d9256d1eb0b08`.
+Its scripted TCP readiness review passed; reserved and occupied listeners were
+rejected. Manual `--yes` produced a missing-field validation error without
+prompting or writing. An actual terminal run of the root TUI selected Docker,
+the standalone endpoint, generic TCP and an edited listener 18081. It accepted
+the numeric backend-port default 8080 and completed readiness review. YAML and
+state hashes remained unchanged across both review routes. The binary,
+`parity-evidence.json`, `parity-live.log`, and `tui-parity.typescript` are
+retained under `/opt/nomina-issue33-live/`.
+The same binary then explicitly published a Docker TCP exposure on 18081 and
+returned nginx HTTP 200 through that listener. A manual `--yes` SMB republish
+completed without prompts and retained its identity, backend 14445 and client
+listener 445. These checks are recorded in `parity-finish.log`. The additional
+TCP exposure remains in the isolated project for inspection.
+The live exposure acceptance suite passed again after these changes, including
+SMB3 listing/file read, anonymous rejection, HTTPS/TCP access and binding
+disconnection. Its Docker digest and retained lab preservation checks passed.
 
 Caddy configuration writes reload its admin server. Reusing an HTTP connection
 caused the next request to reset during live publication. The adapter now uses

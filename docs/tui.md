@@ -14,7 +14,7 @@ nomina
        ├─ Provision Technitium DNS         → service add technitium → promptTechnitiumOptions
        ├─ Provision Caddy reverse proxy  → service add caddy      → promptCaddyOptions
        ├─ Provision Traefik reverse proxy→ service add traefik    → promptTraefikOptions
-       ├─ Publish a web exposure         → exposure publish       → promptExposureOptions
+       ├─ Publish an exposure           → exposure publish       → Docker/manual source and editable fields
        └─ Exit
 ```
 
@@ -25,9 +25,10 @@ command line.
 
 ## Project discovery
 
-Operators do not choose a “project path”. NominaConnect finds `nomina.yaml` in
-the current working directory or any parent directory. Initialization always
-writes into the current working directory.
+The menu finds `nomina.yaml` in the current working directory or any parent
+directory. Scripted commands can select a project with `--project-dir`.
+Initialization always writes into the current working directory unless an
+explicit project directory is supplied.
 
 ## Architecture
 
@@ -42,7 +43,7 @@ src/cli.js
        ├─ []                    → interactive.run()
        ├─ init                  → promptInitOptions → initializeProject
        ├─ service add [name]    → promptServiceName? → promptTechnitiumOptions / promptCaddyOptions / promptTraefikOptions
-       └─ exposure publish      → promptExposureOptions → publishExposure
+       └─ exposure publish      → prepareDockerExposure → promptExposureOptions → review / publishExposure
 
 src/tui.js
   ├─ runInteractiveApp         main menu and routing
@@ -51,12 +52,19 @@ src/tui.js
   ├─ promptTechnitiumOptions   guided DNS LXC setup
   ├─ promptCaddyOptions        guided Caddy reverse-proxy LXC setup
   ├─ promptTraefikOptions      guided Traefik reverse-proxy LXC setup
-  ├─ promptExposureOptions     guided DNS + HTTPS exposure setup
+  ├─ promptExposureOptions     editable manual/Docker HTTPS, TCP and SMB fields
   └─ promptServiceName         when service name omitted
 ```
 
-Business logic stays in `cli.js`, `config.js`, and `provisioning.js`. The TUI
-layer only collects input and routes to commands.
+The TUI collects input and routes to shared command handlers. Exposure
+lifecycle modules perform validation, provider preflights and publication.
+
+Exposure creation offers **Manual entry** and **From Docker**, with equivalent
+scripted selectors and field overrides. Generic TCP has an editable client
+listener; SMB fixes the listener at 445. Docker's final review offers explicit
+publication, a readiness check without publication, and cancellation. See
+[Menu and flag parity](docker-exposures.md#menu-and-flag-parity) for every
+exposure option and its applicable interactive control.
 
 ## Prompt adapter contract
 
@@ -82,7 +90,7 @@ The main menu is built from project context:
 - **Project found, Technitium not yet provisioned** — offer Technitium provisioning,
   initialization (in another directory), and exit.
 - **Technitium provisioned, reverse proxy (Caddy or Traefik) not yet provisioned** — offer Caddy / Traefik provisioning.
-- **Technitium and reverse proxy provisioned** — offer web exposure publishing.
+- **Technitium and reverse proxy provisioned** — offer HTTPS, TCP and SMB exposure publishing.
 - **Action already completed** — hide that menu entry until another command applies.
 
 ## Adding a new interactive command

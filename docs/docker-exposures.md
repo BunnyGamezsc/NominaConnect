@@ -42,8 +42,11 @@ SMB server. Configure the server's hostname alias. Client paths are
 Ordinary TCP selects a backend by listener address/port, not hostname; each
 listener is exclusive. See [SMB verification](smb-live-verification.md).
 
-Nothing is published until the final confirmation. Cancellation and scripted
-review perform no provider/configuration writes or background tracking.
+At the final Docker review, choose **Publish this reviewed exposure**,
+**Check readiness without publishing**, or **Cancel**. Cancellation is the
+initial selection. Readiness review and cancellation perform no provider/
+configuration writes or background tracking. Readiness review applies the
+same TCP listener, gateway and DNS preflights as publication.
 Before publication the exact endpoint is reinspected, and the reviewed backend
 is checked from the managed proxy LXC. Transport reachability does not prove
 HTTP correctness, authentication, a share read or an application login.
@@ -66,6 +69,36 @@ Optional flags include `--name`, `--hostname`, `--backend-ip`,
 `--backend-port`, `--backend-tls true|false`, `--listener-port` and
 `--tailnet true|false`. `--source manual` selects the existing manual flow.
 Use `nomina exposure publish --help` for the flag summary.
+
+## Menu and flag parity
+
+The menu and scripted commands use the same field collection, validation and
+publication handlers. Supplied flags override proposals; missing fields are
+editable prompts unless `--yes` or Docker `--review-only` suppresses them.
+`--yes` also suppresses prompts for Manual entry, where missing required fields
+fail validation. Switching to Manual entry retains any exposure fields already
+supplied and drops the Docker selectors.
+
+| Scripted option | Interactive equivalent |
+| --- | --- |
+| `--source manual\|docker` | Manual entry / From Docker |
+| `--docker-binding` | Docker host binding selection |
+| `--docker-application` | Docker application selection |
+| `--docker-endpoint` | Published Docker endpoint selection |
+| `--name`, `--hostname` | Service name and full hostname |
+| `--protocol https\|tcp\|smb` | HTTPS / TCP / SMB protocol selection |
+| `--backend-ip`, `--backend-port` | Backend IP and effective published port |
+| `--backend-tls true\|false` | Backend HTTPS/TLS confirmation for web exposures |
+| `--listener-port` | Editable generic TCP client listener; SMB is fixed at 445 |
+| `--tailnet true\|false` | Tailscale access confirmation when configured |
+| `--yes` | Explicit final Docker publication choice; suppress scripted prompts |
+| `--review-only` | Docker readiness review without publication |
+| `--redirect-to`, `--redirect-code 307\|308` | Manual web redirect target and status code |
+| `--project-dir` | Select a project explicitly; the menu discovers its current or parent project |
+
+Raw TCP rejects backend TLS and redirects. Web exposures reject a TCP listener.
+SMB rejects client listeners other than 445. Docker selection requires a backend
+endpoint; URL redirects use Manual entry. Review-only applies to Docker selection.
 
 Endpoint IDs describe an observation, including current container identity,
 application/instance, bind tuple, status and resolved CT address. They are not

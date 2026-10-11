@@ -4,13 +4,15 @@ import { runCli } from "../src/cli.js";
 import { loadProject, serializeProjectConfiguration } from "../src/config.js";
 import { normalizeDockerDiscovery, dockerConnectionHint, usableAddress } from "../src/docker-discovery.js";
 import { suggestDockerExposure } from "../src/docker-exposure.js";
+import { runInteractiveApp } from "../src/tui.js";
+import { createClackPrompts } from "../src/prompts.js";
 
 const directory = "/docker-exposures";
 const observed = (overrides = {}) => ({ id: "a".repeat(64), name: "/web", image: "nginx:alpine", status: "running", networkMode: "bridge", ports: { "80/tcp": [{ HostIp: "0.0.0.0", HostPort: "18080" }] }, labels: {}, ...overrides });
 
 /** Exercise the real CLI/lifecycle while recording provider/config mutations and proxy-context probes. */
 function fixture(observations = [observed()], proxy = "caddy") {
-  const files = new Map(), writes = [], mutations = [], probes = [], dns = [], routes = [], forwards = [];
+  const files = new Map(), writes = [], mutations = [], probes = [], preflights = [], dns = [], routes = [], forwards = [];
   const filesystem = {
     exists: (path) => files.has(path), read: (path) => files.get(path),
     writeFile: (path, content) => { writes.push(path); files.set(path, content); },
@@ -35,11 +37,11 @@ function fixture(observations = [observed()], proxy = "caddy") {
     providerAdapters: {
       technitium: { inspect: async () => ({ resources: dns }), publishRecord: async (request) => { mutations.push("dns"); dns.push({ id: request.hostname, record: request.hostname + " A " + request.ip }); }, healthCheckExposure: async () => ({ status: "healthy" }) },
       [proxy]: { inspect: async () => ({ resources: routes }), publishRoute: async (request) => { mutations.push("web"); routes.push({ ...request, id: request.hostname }); return {}; }, healthCheckExposure: async () => ({ status: "healthy", tls: "untrusted" }) },
-      tcp: { preflight: async () => {}, publish: async (request) => { mutations.push("tcp"); forwards.push(request); }, inspect: async () => ({ resources: forwards }), healthCheckExposure: async () => ({ status: "healthy", application: "not-verified" }) }
+      tcp: { preflight: async (request) => { preflights.push(request); }, publish: async (request) => { mutations.push("tcp"); forwards.push(request); }, inspect: async () => ({ resources: forwards }), healthCheckExposure: async () => ({ status: "healthy", application: "not-verified" }) }
     }
   };
   const base = (candidate = discovery.candidates[0]) => ["exposure", "publish", "--project-dir", directory, "--source", "docker", "--docker-binding", "apps", "--docker-application", candidate.application, "--docker-endpoint", candidate.endpointId];
-  return { adapters, config, state, save, files, writes, mutations, probes, dns, routes, forwards, base,
+  return { adapters, config, state, save, files, writes, mutations, probes, preflights, dns, routes, forwards, base,
     publish: (extra = []) => runCli([...base(), ...extra], adapters),
     project: () => loadProject(filesystem, directory), discovery: () => discovery,
     refresh: (observations) => { refreshed = { ...normalizeDockerDiscovery(observations, "10.0.0.88"), diagnostics: [] }; }
@@ -212,7 +214,10 @@ test("unknown guided types have no default; web backend TLS can be edited indepe
   let proposed;
   f.adapters.prompts = {
     ask: async (_question, fallback) => fallback,
-    select: async ({ message, initialValue }) => { assert.equal(message, "Exposure protocol"); proposed = initialValue; return "https"; },
+    select: async ({ message, initialValue }) => {
+      if (message === "Reviewed Docker exposure") return "publish";
+      assert.equal(message, "Exposure protocol"); proposed = initialValue; return "https";
+    },
     confirm: async ({ message }) => message.includes("HTTPS/TLS") || message === "Publish this reviewed exposure?"
   };
   const result = await f.publish();
@@ -261,4 +266,163 @@ test("no-binding and unavailable endpoint fallback can continue through manual p
     assert.equal(result.managedService.exposure.backend.ip, "10.0.0.9");
     assert.equal(result.managedService.exposure.hostname, "manual.home.test");
   }
+});
+
+/** Drive the real menu route through the production Clack adapter, including string-only text defaults. */
+function exposureMenu(f, {
+  source = "docker", protocol = "https", name = "Edited app", hostname = "edited.home.test",
+  backendIp = "10.0.0.99", backendPort = "18888", backendTls = false, listenerPort = "15555",
+  tailnet = false, redirectTo = undefined, redirectCode = 308, action = "publish"
+} = {}) {
+  const questions = [];
+  f.adapters.prompts = createClackPrompts({
+    isCancel: () => false,
+    text: async ({ message, defaultValue }) => {
+      assert.ok(defaultValue === undefined || typeof defaultValue === "string", "Clack text default must be a string");
+      questions.push(message);
+      const answers = { "Service name": name, "Full hostname": hostname, "Backend IP": backendIp, "Backend port": backendPort, "Client-facing TCP listener port": listenerPort, "Redirect target (e.g. home.bunny.internal)": redirectTo };
+      return answers[message] ?? defaultValue ?? "";
+    },
+    select: async ({ message, options, initialValue }) => {
+      questions.push(message);
+      if (message === "Reviewed Docker exposure") assert.equal(initialValue, "cancel");
+      const value = { "Exposure source": source, "Exposure protocol": protocol, "Redirect status code": redirectCode, "Reviewed Docker exposure": action }[message] ?? options[0].value;
+      assert.ok(options.some((option) => option.value === value));
+      return value;
+    },
+    confirm: async ({ message }) => {
+      questions.push(message);
+      return message.includes("Tailscale") ? tailnet : message.includes("HTTPS/TLS") ? backendTls : message.startsWith("Is this a redirect") ? redirectTo !== undefined : false;
+    },
+    log: { info: () => {}, warn: () => {} }
+  });
+  f.adapters.interactive = { chooseAction: async () => "publish-exposure" };
+  f.adapters.runCommand = (args, adapters) => runCli(args, adapters);
+  f.adapters.tracking.run = () => { f.mutations.push("menu-tracking"); };
+  return { run: () => runInteractiveApp(f.adapters), questions };
+}
+
+const parityCases = [
+  { label: "Docker HTTP backend defaults", backendIp: "", backendPort: "" },
+  { label: "Docker HTTPS backend and tailnet", privatePort: 443, backendTls: true, tailnet: true },
+  { label: "Docker HTTPS hint changed to HTTP", privatePort: 443, backendTls: false },
+  { label: "Docker generic TCP listener and tailnet", protocol: "tcp", tailnet: true },
+  { label: "Docker unknown HTTPS", image: "custom/server", backendTls: true },
+  { label: "Docker unknown TCP", image: "custom/server", protocol: "tcp" },
+  { label: "Docker unknown SMB nonstandard host port", image: "custom/server", protocol: "smb", privatePort: 445, hostPort: 14445 },
+  { label: "Docker hinted SMB", image: "ghcr.io/servercontainers/samba", protocol: "smb", privatePort: 445, hostPort: 14445 },
+  { label: "manual HTTPS from a nested project directory", source: "manual", nestedProject: true },
+  { label: "manual backend TLS and tailnet", source: "manual", backendTls: true, tailnet: true },
+  { label: "manual generic TCP custom listener", source: "manual", protocol: "tcp" },
+  { label: "manual SMB nonstandard backend", source: "manual", protocol: "smb", backendPort: "14445" },
+  { label: "manual 307 redirect", source: "manual", redirectTo: "target.home.test", redirectCode: 307 },
+  { label: "manual 308 redirect", source: "manual", redirectTo: "target.home.test", redirectCode: 308 }
+];
+
+for (const options of parityCases) test(options.label + " has menu/flag parity through Clack and the real CLI", async () => {
+  const protocol = options.protocol ?? "https", source = options.source ?? "docker";
+  const observation = observed({ image: options.image ?? "nginx:alpine", ports: { [(options.privatePort ?? 80) + "/tcp"]: [{ HostIp: "0.0.0.0", HostPort: String(options.hostPort ?? 18080) }] } });
+  const guided = fixture([observation]), scripted = fixture([observation]);
+  if (options.nestedProject) guided.adapters.cwd = directory + "/nested/child";
+  const menu = exposureMenu(guided, options);
+  const result = await menu.run();
+  const args = source === "docker" ? scripted.base() : ["exposure", "publish", "--source", "manual", "--project-dir", directory];
+  args.push("--yes", "--protocol", protocol, "--name", "Edited app", "--hostname", "edited.home.test", "--tailnet", String(options.tailnet ?? false));
+  if (options.redirectTo) args.push("--redirect-to", options.redirectTo, "--redirect-code", String(options.redirectCode));
+  else {
+    args.push("--backend-ip", options.backendIp === "" ? "10.0.0.88" : "10.0.0.99", "--backend-port", options.backendPort === "" ? String(options.hostPort ?? 18080) : options.backendPort ?? "18888", "--backend-tls", String(options.backendTls ?? false));
+    if (protocol !== "https") args.push("--listener-port", protocol === "smb" ? "445" : "15555");
+  }
+  const other = await runCli(args, scripted.adapters);
+  assert.deepEqual(result.managedService.exposure, other.managedService.exposure);
+  assert.deepEqual(guided.probes, scripted.probes);
+  assert.deepEqual(guided.preflights, scripted.preflights);
+  assert.deepEqual(guided.mutations.filter((entry) => entry !== "menu-tracking"), scripted.mutations);
+  if (source === "docker") assert.ok(menu.questions.includes("Docker host binding") && menu.questions.includes("Docker application") && menu.questions.includes("Published Docker endpoint") && menu.questions.includes("Reviewed Docker exposure"));
+  if (protocol === "tcp") assert.ok(menu.questions.includes("Client-facing TCP listener port"));
+  if (protocol === "smb") assert.ok(!menu.questions.includes("Client-facing TCP listener port"));
+});
+
+for (const protocol of ["https", "tcp", "smb"]) for (const action of ["review-only", "cancel"]) test("menu Docker " + protocol + " " + action + " preserves providers/configuration/tracking", async () => {
+  const f = fixture();
+  const before = new Map(f.files);
+  const menu = exposureMenu(f, { action, protocol });
+  const result = await menu.run();
+  assert.equal(action === "review-only" ? result.reviewOnly : result.cancelled, true);
+  assert.deepEqual(f.files, before);
+  assert.deepEqual(f.mutations, []);
+  assert.equal(f.probes.length, action === "review-only" ? 1 : 0);
+  if (action === "review-only") {
+    const scripted = fixture();
+    const other = await scripted.publish(["--review-only", "--protocol", protocol, "--name", "Edited app", "--hostname", "edited.home.test", "--backend-ip", "10.0.0.99", "--backend-port", "18888", "--backend-tls", "false", "--tailnet", "false", ...(protocol !== "https" ? ["--listener-port", protocol === "smb" ? "445" : "15555"] : [])]);
+    for (const key of ["name", "hostname", "protocol", "backendIp", "backendPort", "backendTls", "listenerPort", "preset", "tailnet"]) assert.equal(result.options[key], other.options[key], key);
+    assert.deepEqual(f.probes, scripted.probes);
+    assert.deepEqual(f.preflights, scripted.preflights);
+    assert.equal(f.preflights.length, protocol === "https" ? 0 : 1);
+  }
+});
+
+for (const path of ["no binding", "unavailable endpoint", "application fallback"]) test(path + " keeps supplied manual fields", async () => {
+  const f = fixture([observed({ ports: { "80/tcp": [{ HostIp: "127.0.0.1", HostPort: "8080" }] } })]);
+  if (path === "no binding") { f.config.managedInventory.dockerHosts = []; f.save(); }
+  f.adapters.prompts = {
+    select: async () => "__manual__",
+    ask: async () => { throw new Error("Supplied field was prompted again"); },
+    confirm: async () => false, info: () => {}
+  };
+  const args = path === "application fallback" ? ["exposure", "publish", "--source", "docker", "--docker-binding", "apps", "--project-dir", directory] : f.base();
+  const result = await runCli([...args, "--name", "Manual override", "--hostname", "override.home.test", "--protocol", "tcp", "--backend-ip", "10.0.0.99", "--backend-port", "12222", "--listener-port", "13333", "--tailnet", "false"], f.adapters);
+  assert.equal(result.managedService.name, "Manual override");
+  assert.equal(result.managedService.exposure.hostname, "override.home.test");
+  assert.deepEqual(result.managedService.exposure.backend, { ip: "10.0.0.99", port: 12222 });
+  assert.equal(result.managedService.exposure.listenerPort, 13333);
+  assert.equal(result.managedService.exposure.tailnet, false);
+  assert.equal(f.probes.length, 0);
+});
+
+for (const mode of ["menu", "flags"]) for (const conflict of ["reserved port", "existing exposure", "provider listener"]) test(mode + " readiness review rejects " + conflict + " without writes", async () => {
+  const f = fixture();
+  let listenerPort = "15555";
+  if (conflict === "reserved port") listenerPort = "22";
+  if (conflict === "existing exposure") {
+    f.config.managedInventory.services.push({ id: "old-tcp", name: "old", exposure: { hostname: "old.home.test", protocol: "tcp", listenerPort: 15555, backend: { ip: "10.0.0.88", port: 18080 } } }); f.save();
+  }
+  if (conflict === "provider listener") f.adapters.providerAdapters.tcp.preflight = async () => { throw new Error("Listener collision"); };
+  const before = new Map(f.files);
+  const run = mode === "menu" ? exposureMenu(f, { protocol: "tcp", listenerPort, action: "review-only" }).run : () => f.publish(["--review-only", "--protocol", "tcp", "--listener-port", listenerPort]);
+  await assert.rejects(run(), /reserved|conflicts|collision/);
+  assert.deepEqual(f.files, before);
+  assert.deepEqual(f.mutations, []);
+});
+
+for (const protocol of ["https", "tcp", "smb"]) for (const source of [undefined, "manual"]) test("manual " + protocol + " --yes suppresses installed prompts with " + (source ?? "inferred source"), async () => {
+  const f = fixture();
+  f.adapters.prompts = { ask: () => { throw new Error("Unexpected text prompt"); }, select: () => { throw new Error("Unexpected selection"); }, confirm: () => { throw new Error("Unexpected confirmation"); } };
+  const args = ["exposure", "publish", "--project-dir", directory, "--yes", "--name", "manual", "--hostname", "manual.home.test", "--protocol", protocol, "--backend-ip", "10.0.0.99"];
+  if (source) args.push("--source", source);
+  if (protocol !== "smb") args.push("--backend-port", "18888");
+  const result = await runCli(args, f.adapters);
+  assert.equal(result.managedService.exposure.protocol, protocol === "smb" ? "tcp" : protocol);
+  assert.equal(result.managedService.exposure.backend.port, protocol === "smb" ? 445 : 18888);
+  assert.equal(result.managedService.exposure.tailnet, true);
+  assert.ok(!f.probes.some((probe) => probe.command.binary === "/usr/bin/timeout"));
+});
+
+for (const field of ["name", "hostname", "backend-ip", "backend-port"]) test("manual --yes reports missing " + field + " without prompts or mutations", async () => {
+  const f = fixture();
+  f.adapters.prompts = { ask: () => { throw new Error("Unexpected text prompt"); }, select: () => { throw new Error("Unexpected selection"); }, confirm: () => { throw new Error("Unexpected confirmation"); } };
+  const fields = { name: "manual", hostname: "manual.home.test", "backend-ip": "10.0.0.99", "backend-port": "18888" };
+  const args = ["exposure", "publish", "--project-dir", directory, "--source", "manual", "--yes"];
+  for (const [key, value] of Object.entries(fields)) if (key !== field) args.push("--" + key, value);
+  await assert.rejects(runCli(args, f.adapters), /is required/);
+  assert.deepEqual(f.mutations, []);
+  assert.deepEqual(f.writes, []);
+});
+
+test("manual --yes supports redirects without prompting for a backend", async () => {
+  const f = fixture();
+  f.adapters.prompts = { ask: () => { throw new Error("Unexpected text prompt"); }, select: () => { throw new Error("Unexpected selection"); }, confirm: () => { throw new Error("Unexpected confirmation"); } };
+  const result = await runCli(["exposure", "publish", "--project-dir", directory, "--source", "manual", "--yes", "--name", "redirect", "--hostname", "redirect.home.test", "--redirect-to", "target.home.test", "--redirect-code", "307", "--tailnet", "false"], f.adapters);
+  assert.deepEqual(result.managedService.exposure.redirect, { to: "https://target.home.test", code: 307 });
+  assert.equal(result.managedService.exposure.backend, undefined);
 });

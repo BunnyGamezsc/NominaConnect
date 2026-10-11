@@ -1,4 +1,4 @@
-import { tcpRequest } from "./tcp-exposure.js";
+import { tcpRequest, preflightTcpExposure } from "./tcp-exposure.js";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { INITIAL_PLATFORM_CATALOG, certificateAuthorityIsCompatible, hasCatalogOption } from "./catalog.js";
@@ -1984,11 +1984,12 @@ async function uninstallEverything(options, adapters) {
   return { stdout: `${lines.join("\n")}\n`, destroyed, removedPaths, failed };
 }
 
+/** Collect and validate an exposure, then review or explicitly publish Docker selections through the shared lifecycle. */
 async function publishExposure(options, adapters) {
   const { filesystem, providerAdapters = {} } = adapters;
   assertProxmoxShell(adapters.runtime);
 
-  const project = loadProject(filesystem, options.projectDir);
+  const project = loadProject(filesystem, options.projectDir ?? findProjectDirectory(filesystem, adapters.cwd ?? "."));
   const prepared = await prepareDockerExposure(project, options, adapters);
   if (prepared.cancelled) return { stdout: prepared.stdout, cancelled: true };
   const resolvedOptions = prepared.options;
@@ -2006,19 +2007,34 @@ async function publishExposure(options, adapters) {
 
   let dockerReview = "";
   let backendReachability;
+  let reviewOnly = options.reviewOnly === true;
   if (prepared.selection) {
     validateDockerExposure(project, resolvedOptions);
     resolvedOptions.tailnet = project.config.managedInventory.platform.vpn?.service === "tailscale" && (resolvedOptions.tailnet ?? true);
     dockerReview = (prepared.discovery?.truncated ? "Warning: Docker discovery is truncated or incomplete; only observed endpoints were offered.\n" : "")
       + (prepared.discovery?.diagnostics ?? []).map((diagnostic) => `Warning: ${diagnostic}\n`).join("")
       + (prepared.advisory ?? "") + formatDockerExposureReview(resolvedOptions, prepared.selection);
-    if (!options.reviewOnly && !options.yes) {
+    if (!reviewOnly && !options.yes) {
       adapters.prompts?.info?.(dockerReview);
-      if (!adapters.prompts?.confirm) throw new Error("Review with --review-only, then use --yes to explicitly confirm publication.");
-      if (!await adapters.prompts.confirm({ message: "Publish this reviewed exposure?", initialValue: false })) return { stdout: "Exposure publication cancelled.\n", cancelled: true };
+      if (adapters.prompts?.select) {
+        const action = await adapters.prompts.select({ message: "Reviewed Docker exposure", initialValue: "cancel", options: [
+          { value: "publish", label: "Publish this reviewed exposure" },
+          { value: "review-only", label: "Check readiness without publishing", hint: "reinspect, probe the backend and check conflicts" },
+          { value: "cancel", label: "Cancel" }
+        ] });
+        if (action === "cancel" || action === undefined) return { stdout: "Exposure publication cancelled.\n", cancelled: true };
+        if (!["publish", "review-only"].includes(action)) throw new Error("Choose publication, readiness review or cancellation explicitly.");
+        reviewOnly = action === "review-only";
+      } else {
+        if (!adapters.prompts?.confirm) throw new Error("Review with --review-only, then use --yes to explicitly confirm publication.");
+        if (!await adapters.prompts.confirm({ message: "Publish this reviewed exposure?", initialValue: false })) return { stdout: "Exposure publication cancelled.\n", cancelled: true };
+      }
     }
     backendReachability = await verifyDockerExposure(prepared.selection, prepared.docker, resolvedOptions, project, adapters);
-    if (options.reviewOnly) return { stdout: `${dockerReview}Backend transport reachable from proxy LXC ${backendReachability.vmid}; application access is not verified. No exposure published. Reuse the endpoint ID with --yes after review.\n`, reviewOnly: true, options: resolvedOptions, backendReachability };
+    if (reviewOnly) {
+      if (resolvedOptions.protocol === "tcp") await preflightTcpExposure({ project, options: resolvedOptions, providerAdapters });
+      return { stdout: `${dockerReview}Backend transport reachable from proxy LXC ${backendReachability.vmid}; application access is not verified. No exposure published. Reuse the endpoint ID with --yes after review.\n`, reviewOnly: true, options: resolvedOptions, backendReachability };
+    }
   }
 
   if (resolvedOptions.protocol !== "tcp") await ensureCaddyTrustsStepCa(project, adapters);

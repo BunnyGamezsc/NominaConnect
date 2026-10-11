@@ -729,6 +729,7 @@ export async function promptNetBirdOptions(project, existingOptions, prompts, av
   });
 }
 
+/** Collect editable exposure fields, honoring supplied flags and keeping Docker proposals separate from explicit overrides. */
 export async function promptExposureOptions(project, existingOptions, prompts, defaults = undefined) {
   if (prompts?.ask === undefined) {
     const stored = (project.config.managedInventory.services ?? []).find((service) => service.exposure?.hostname === existingOptions.hostname)?.exposure;
@@ -783,8 +784,8 @@ export async function promptExposureOptions(project, existingOptions, prompts, d
       defaults?.backendTls ?? false
     );
 
-  const listenerPort = existingOptions.listenerPort ?? (defaults && isTcp
-    ? isSmb ? 445 : Number(await askPrompt(prompts, "Client-facing TCP listener port", backendPort)) : undefined);
+  const listenerPort = existingOptions.listenerPort ?? (isTcp
+    ? isSmb ? 445 : Number(await askPrompt(prompts, "Client-facing TCP listener port", existingExposure?.listenerPort ?? backendPort)) : undefined);
   return { ...existingOptions, name, hostname, protocol, tailnet, backendIp, backendPort, backendTls, ...(listenerPort === undefined ? {} : { listenerPort }) };
 }
 

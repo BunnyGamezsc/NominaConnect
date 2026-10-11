@@ -20,7 +20,8 @@ export function tcpRequest(project, exposure) {
   };
 }
 
-export async function publishTcpExposure({ project, options, providerAdapters }) {
+/** Build and check a TCP exposure without mutations, including its listener, gateway and DNS conflicts. */
+export async function preflightTcpExposure({ project, options, providerAdapters }) {
   const dns = project.config.managedInventory.platform.dns;
   const proxy = project.config.managedInventory.platform.reverseProxy;
   const dnsRef = project.state.providerReferences[dns?.id];
@@ -73,6 +74,16 @@ export async function publishTcpExposure({ project, options, providerAdapters })
   if (before.managed.some((record) => record.record && !record.record.includes(` A ${request.ip}`))) {
     throw new Error(`DNS records for ${options.hostname} conflict with the TCP listener address.`);
   }
+  return { exposure, request, existing, dnsContext };
+}
+
+/** Publish a checked TCP exposure through the existing forwarding/DNS lifecycle and report transport health. */
+export async function publishTcpExposure({ project, options, providerAdapters }) {
+  const { exposure, request, existing, dnsContext } = await preflightTcpExposure({ project, options, providerAdapters });
+  const dns = project.config.managedInventory.platform.dns;
+  const adapter = providerAdapters.tcp;
+  const dnsAdapter = providerAdapters.technitium;
+  const dnsPlugin = getPlatformProvider("technitium");
   await adapter.publish(request);
   await dnsAdapter.publishRecord({ ...dnsContext, managedItemId: dns.id, hostname: options.hostname, ip: request.ip });
   const dnsInspection = await dnsPlugin.inspect(dnsAdapter, dns, dnsContext);

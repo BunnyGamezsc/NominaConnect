@@ -50,6 +50,7 @@ function endpointChoice(candidate) {
 /** Collect a Docker source and editable exposure through the existing HTTPS/TCP/SMB prompts, without writes. */
 export async function prepareDockerExposure(project, options, adapters) {
   const prompts = options.yes || options.reviewOnly ? undefined : adapters.prompts;
+  const { source: _source, dockerBinding: _binding, dockerApplication: _application, dockerEndpoint: _endpoint, ...manualOptions } = options;
   let source = options.source ?? (options.dockerBinding || options.dockerApplication || options.dockerEndpoint ? "docker" : undefined);
   if (source === undefined && prompts?.select && ![options.name, options.hostname, options.backendIp, options.redirectTo].some((value) => value !== undefined)) {
     source = await select(prompts, "Exposure source", [{ value: "manual", label: "Manual entry" }, { value: "docker", label: "From Docker", hint: "select and review a published endpoint" }]);
@@ -58,7 +59,7 @@ export async function prepareDockerExposure(project, options, adapters) {
   if (!["manual", "docker"].includes(source)) throw new Error("Exposure source must be manual or docker.");
   if (source === "manual") {
     if (options.dockerBinding || options.dockerApplication || options.dockerEndpoint || options.reviewOnly) throw new Error("Docker selection/review options require --source docker.");
-    return { options: await promptExposureOptions(project, options, adapters.prompts) };
+    return { options: await promptExposureOptions(project, options, prompts) };
   }
   if (options.redirectTo !== undefined || options.redirectCode !== undefined) throw new Error("Docker endpoints need a backend; use Manual entry for URL redirects.");
   const hosts = project.config.managedInventory.dockerHosts ?? [];
@@ -66,7 +67,7 @@ export async function prepareDockerExposure(project, options, adapters) {
     prompts?.info?.(NO_BINDINGS);
     if (!prompts?.select) throw new Error(NO_BINDINGS);
     const next = await select(prompts, "Create/connect a Docker LXC or continue manually", [{ value: MANUAL, label: "Continue with Manual entry" }, { value: CANCEL, label: "Cancel to create/connect a Docker LXC" }]);
-    return next === MANUAL ? { options: await promptExposureOptions(project, {}, prompts) } : { cancelled: true, stdout: `${NO_BINDINGS}\nExposure publication cancelled.\n` };
+    return next === MANUAL ? { options: await promptExposureOptions(project, manualOptions, prompts) } : { cancelled: true, stdout: `${NO_BINDINGS}\nExposure publication cancelled.\n` };
   }
   const bindingName = options.dockerBinding ?? await select(prompts, "Docker host binding", hosts.map((host) => ({ value: host.name, label: host.name, hint: project.state.dockerHostStates?.[host.id]?.status ?? "unknown" })));
   const binding = hosts.find((host) => host.name === bindingName);
@@ -88,7 +89,7 @@ export async function prepareDockerExposure(project, options, adapters) {
     }), { value: MANUAL, label: "Manual entry" }, { value: CANCEL, label: "Cancel" }]);
   }
   if (application === CANCEL) return { cancelled: true, stdout: "Exposure publication cancelled.\n" };
-  if (application === MANUAL) return { options: await promptExposureOptions(project, {}, prompts) };
+  if (application === MANUAL) return { options: await promptExposureOptions(project, manualOptions, prompts) };
   if (!applications.includes(application)) throw new Error("Docker application disappeared or was not found. Refresh discovery and selection; no exposure was published.");
   const endpoints = candidates.filter((candidate) => candidate.application === application);
   const endpoint = options.dockerEndpoint ?? await select(prompts, "Published Docker endpoint", endpoints.map(endpointChoice));
@@ -99,7 +100,7 @@ export async function prepareDockerExposure(project, options, adapters) {
     prompts?.info?.(reason);
     if (!prompts?.select) throw new Error(reason);
     const next = await select(prompts, "Endpoint unavailable", [{ value: MANUAL, label: "Continue with Manual entry", hint: "explicitly enter a reachable backend" }, { value: CANCEL, label: "Cancel and refresh selection" }]);
-    return next === MANUAL ? { options: await promptExposureOptions(project, {}, prompts) } : { cancelled: true, stdout: `Exposure publication cancelled. ${reason}\n` };
+    return next === MANUAL ? { options: await promptExposureOptions(project, manualOptions, prompts) } : { cancelled: true, stdout: `Exposure publication cancelled. ${reason}\n` };
   }
   const defaults = suggestDockerExposure(project, candidate, candidates);
   prompts?.info?.(`${endpointChoice(candidate).label}\n${candidate.connectionHint?.evidence ?? "Application protocol unknown. Choose the connection type explicitly."}\nClient-facing web access uses HTTPS; backend HTTP/HTTPS is chosen separately. Every proposed field is editable.`);
