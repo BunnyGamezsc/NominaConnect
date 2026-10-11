@@ -208,6 +208,7 @@ for (const menu of [false, true]) {
       return { "Service name": "files", "Full hostname": "files.bunnyhome.test", "Exposure protocol (https, tcp or smb)": "smb", "Backend IP": "198.51.100.21" }[question] ?? fallback;
     } };
     if (menu) fixture.adapters.prompts.select = async (options) => {
+      if (options.message === "Exposure source") return "manual";
       assert.ok(options.options.some((option) => option.value === "smb"));
       return "smb";
     };

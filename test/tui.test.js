@@ -180,6 +180,20 @@ test("interactive menu can route to exposure publish", async () => {
   assert.deepEqual(commands, [["exposure", "publish"]]);
 });
 
+for (const result of [{ cancelled: true }, { reviewOnly: true }]) {
+  test("interactive publication does not start tracking for " + JSON.stringify(result), async () => {
+    let tracked = false;
+    await runInteractiveApp({
+      filesystem: { exists: (path) => path === "/projects/home/nomina.yaml", read: () => "" },
+      cwd: "/projects/home",
+      interactive: { chooseAction: async () => "publish-exposure" },
+      runCommand: async () => ({ stdout: "", ...result }),
+      tracking: { run: () => { tracked = true; } }
+    });
+    assert.equal(tracked, false);
+  });
+}
+
 test("buildMenuOptions offers Caddy after Technitium is provisioned", () => {
   const project = {
     config: {

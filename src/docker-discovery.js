@@ -1,4 +1,28 @@
 import { isIP } from "node:net";
+import { createHash } from "node:crypto";
+
+/** Identify the exact observation reviewed by an operator, including current container identity and effective backend. */
+export function dockerEndpointId(candidate) {
+  return createHash("sha256").update(JSON.stringify([
+    candidate.containerId, candidate.application, candidate.instance, candidate.status, candidate.networkMode,
+    candidate.containerPort, candidate.bindAddress, candidate.hostPort, candidate.transport,
+    candidate.backendAddress, candidate.selectable, candidate.reasons
+  ])).digest("hex");
+}
+
+/** Offer protocol hints only for allowlisted image names and the image's documented application port. */
+export function dockerConnectionHint(image, containerPort, transport) {
+  const repository = image.toLowerCase().split("@")[0].replace(/:[^/]*$/, "").replace(/^(?:docker\.io\/)?library\//, "");
+  const rules = [
+    { images: ["nginx", "httpd", "caddy", "traefik"], port: 80, protocol: "https", backendTls: false },
+    { images: ["nginx", "httpd", "caddy", "traefik"], port: 443, protocol: "https", backendTls: true },
+    { images: ["dperson/samba", "ghcr.io/servercontainers/samba"], port: 445, protocol: "smb", backendTls: false },
+    { images: ["lscr.io/linuxserver/openssh-server", "linuxserver/openssh-server"], port: 2222, protocol: "tcp", backendTls: false }
+  ];
+  const rule = transport === "tcp" ? rules.find((entry) => entry.images.includes(repository) && entry.port === containerPort) : undefined;
+  return rule ? { protocol: rule.protocol, backendTls: rule.backendTls, evidence: `Allowlisted image ${repository}, application port ${containerPort}/tcp. Verify the application's configuration; this is an editable hint.` }
+    : { protocol: "unknown", evidence: "Published TCP/UDP transport and port numbers do not identify the application protocol. Choose the connection type." };
+}
 
 export const DOCKER_LIMITS = Object.freeze({ containers: 100, endpoints: 500, fieldLength: 256, outputBytes: 65536, durationMs: 60000 });
 export const COMPOSE_LABELS = Object.freeze([
@@ -14,6 +38,13 @@ function bounded(value, max = Number(DOCKER_LIMITS.fieldLength)) {
 /** Check whether a valid IP can represent a backend, excluding wildcard, loopback, link-local and IPv6 multicast addresses. */
 export function usableAddress(address) {
   if (!isIP(address ?? "")) return false;
+  if (isIP(address) === 6) {
+    try { address = new URL(`http://[${address}]`).hostname.slice(1, -1); }
+    catch { return false; } // Scoped IPv6 addresses need explicit manual correction.
+  }
+  // IPv4-mapped IPv6 needs an explicit ordinary address for current adapters.
+  if (address.toLowerCase().startsWith("::ffff:")) return false;
+  if (isIP(address) === 4 && (Number(address.split(".")[0]) === 0 || Number(address.split(".")[0]) >= 224)) return false;
   const lower = address.toLowerCase();
   return !["0.0.0.0", "::", "0:0:0:0:0:0:0:0", "::1", "0:0:0:0:0:0:0:1"].includes(lower)
     && !/^127\./.test(lower) && !/^169\.254\./.test(lower)
@@ -52,10 +83,14 @@ export function normalizeDockerDiscovery(observations, hostAddress, limits = DOC
     if (["macvlan", "ipvlan"].includes(observed.networkDriver) || observed.directRouting === true) commonReasons.push("Directly addressed Docker networks require manual entry.");
     if (observed.networkUnknown === true) commonReasons.push("Docker network reachability could not be inspected. Use manual entry.");
     let bindingCount = 0;
+    const seenBindings = new Set();
     for (const [portKey, bindings] of Object.entries(observed.ports ?? {})) {
       const match = portKey.match(/^(\d{1,5})\/(tcp|udp|sctp)$/);
       if (!match || Number(match[1]) < 1 || Number(match[1]) > 65535 || !Array.isArray(bindings)) continue;
       for (const binding of bindings) {
+        const tuple = JSON.stringify([portKey, bounded(binding.HostIp, 64), Number(binding.HostPort)]);
+        if (seenBindings.has(tuple)) continue;
+        seenBindings.add(tuple);
         bindingCount += 1;
         if (candidates.length >= limits.endpoints) { truncated = true; continue; }
         const hostPort = Number(binding.HostPort);
@@ -70,12 +105,13 @@ export function normalizeDockerDiscovery(observations, hostAddress, limits = DOC
           else reasons.push("Wildcard binding has no verified LXC address in this address family. Use manual entry.");
         } else if (usableAddress(bindAddress)) backendAddress = bindAddress;
         else reasons.push("Loopback, unspecified, or invalid bind address is not a reachable backend. Use manual entry.");
+        const connectionHint = dockerConnectionHint(container.image, Number(match[1]), transport);
         candidates.push({
           containerId: observed.id, application, name, instance: container.instance,
           status, networkMode, containerPort: Number(match[1]), bindAddress,
           hostPort: Number.isInteger(hostPort) && hostPort > 0 && hostPort <= 65535 ? hostPort : undefined,
           transport, backendAddress, selectable: reasons.length === 0, reasons,
-          connectionTypeHint: "unknown", // TCP alone never proves HTTP or HTTPS.
+          connectionTypeHint: connectionHint.protocol, connectionHint,
           suggestedHostnameLabel: name.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 63).replace(/-+$/, "") || "docker-app"
         });
       }
@@ -88,5 +124,5 @@ export function normalizeDockerDiscovery(observations, hostAddress, limits = DOC
       else truncated = true;
     }
   }
-  return { containers, candidates, truncated };
+  return { containers, candidates: candidates.map((candidate) => ({ ...candidate, endpointId: dockerEndpointId(candidate) })), truncated };
 }

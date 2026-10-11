@@ -2,6 +2,37 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { createCaddyAdapter } from "../src/caddy-adapter.js";
+import { createServer } from "node:http";
+import { createHttpClient as createRuntimeHttpClient } from "../src/adapter-runtime.js";
+
+test("Caddy publication uses fresh admin connections across configuration reloads", async (t) => {
+  const admin = new FakeCaddyAdmin({ admin: { listen: "0.0.0.0:2019" }, apps: { http: { servers: { srv0: { listen: [":80"], routes: [{ handle: [{ handler: "static_response", body: "OK" }] }] } } } } });
+  const connections = new Set();
+  let count = 0;
+  const server = createServer((request, response) => {
+    assert.equal(request.headers.connection, "close");
+    connections.add(request.socket.remotePort);
+    count += 1;
+    let body = "";
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      let result;
+      try { result = admin.request({ method: request.method, url: "http://localhost" + request.url, body }); }
+      catch (error) { result = { status: 400, body: error.message }; }
+      response.writeHead(result.status);
+      response.end(result.body);
+      if (request.method !== "GET") response.on("finish", () => request.socket.destroy());
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(undefined)));
+  t.after(() => server.close());
+  const port = /** @type {import("node:net").AddressInfo} */ (server.address()).port;
+  const adapter = createCaddyAdapter({ httpClient: createRuntimeHttpClient(), secretResolver: { resolve: () => "" } });
+  await adapter.publishRoute({ hostname: "docker.home.test", backendIp: "10.0.0.88", backendPort: 18080, endpoint: "http://127.0.0.1:" + port });
+  const resources = await adapter.inspect({ endpoint: "http://127.0.0.1:" + port });
+  assert.ok(resources.resources.some((resource) => resource.id === "docker.home.test"));
+  assert.equal(connections.size, count);
+});
 
 const ROUTE_FIELDS = new Set(["@id", "match", "handle", "terminal", "group"]);
 const POLICY_FIELDS = new Set(["subjects", "issuers"]);

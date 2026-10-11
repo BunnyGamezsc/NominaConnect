@@ -489,7 +489,10 @@ async function apiCall(httpClient, endpoint, method, path, body = undefined) {
     result = await httpClient.request({
       method,
       url,
-      headers: body === undefined ? {} : { "Content-Type": "application/json" },
+      // Config writes restart Caddy's admin server. Its old keep-alive socket
+      // can reset the next request after a successful mutation. Use a fresh
+      // connection rather than retrying a potentially applied write.
+      headers: { Connection: "close", ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       redactions: []
     });

@@ -285,7 +285,8 @@ test("discovery preserves effective tuples, EXPOSE distinction, replicas and saf
   assert.match(result.candidates[4].reasons.join(" "), /Loopback/);
   assert.equal(result.candidates[0].application, result.candidates[5].application);
   assert.notEqual(result.candidates[0].instance, result.candidates[5].instance);
-  assert.equal(result.candidates[0].connectionTypeHint, "unknown");
+  assert.equal(result.candidates[0].connectionTypeHint, "https");
+  assert.match(result.candidates[0].connectionHint.evidence, /Allowlisted image nginx/);
   assert.doesNotMatch(JSON.stringify(result), /PASSWORD|secret|\u001b/);
 });
 
@@ -313,7 +314,7 @@ test("normalization bounds fields, container count and total endpoints", () => {
   assert.equal(result.containers.length, 100);
   assert.equal(result.containers[0].name.length, 256);
   assert.equal(result.truncated, true);
-  const many = observation({ ports: { "80/tcp": Array.from({ length: 501 }, () => ({ HostIp: "0.0.0.0", HostPort: "8080" })) } });
+  const many = observation({ ports: { "80/tcp": Array.from({ length: 501 }, (_, index) => ({ HostIp: "0.0.0.0", HostPort: String(8080 + index) })) } });
   assert.equal(normalizeDockerDiscovery([many], "10.0.0.88").candidates.length, 500);
   assert.equal(normalizeDockerDiscovery([many], "10.0.0.88").truncated, true);
 });
