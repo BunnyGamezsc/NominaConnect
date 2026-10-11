@@ -1,5 +1,32 @@
 # Changelog
 
+## [2.5.0] - 2026-10-11
+
+### Added
+- Docker host bindings as optional inspection targets on the project's
+  configured Proxmox node, with guided and scripted create, connect, retry,
+  list, inspect, and disconnect workflows. Bindings stay outside destructive
+  service ownership, and background tracking never adopts Docker containers
+  or retargets exposures.
+- Bounded, read-only Docker endpoint discovery: Compose services grouped by
+  project/service with replica identity, standalone containers by name, each
+  with status, bind address, effective host port, container port, transport,
+  and unavailability reasons.
+- Publish editable exposures from Docker endpoints (HTTPS, generic TCP, SMB)
+  with guided/scripted parity, editable names, hostnames, backends, ports,
+  and Tailscale access, plus readiness review without publishing and
+  cancellation selected by default. Image/port allowlists suggest exposure
+  types; unknown protocols require an explicit choice.
+
+### Fixed
+- Preserve setup recovery errors during Docker binding creation.
+- Resolve DHCP leases and retry tracking writes for Docker exposures.
+- Align exposure menu and flag behavior: share TCP preflights across
+  readiness and publication, preserve supplied fields during manual
+  fallback, and suppress manual prompts with `--yes`.
+- Treat scoped IPv6 addresses as explained rejections instead of URL
+  parsing exceptions during Docker endpoint discovery.
+
 ## [2.4.0] - 2026-10-09
 
 ### Added
