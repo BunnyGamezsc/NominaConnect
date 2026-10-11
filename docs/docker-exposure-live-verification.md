@@ -2,6 +2,7 @@
 
 Verified on 2026-10-10 against the implementation of
 [#32 / PR #34](https://github.com/BunnyGamezsc/NominaConnect/pull/34).
+The exposure implementation is [PR #35](https://github.com/BunnyGamezsc/NominaConnect/pull/35).
 The #33 branch starts at `50372e3` on `feat/32-docker-lxc-bindings` and its
 stacked PR targets that branch. PR #34 merged before these checks completed.
 Merge order is #34, then #33; retarget #33 to `main` when integrating it.
@@ -9,9 +10,13 @@ Merge order is #34, then #33; retarget #33 to `main` when integrating it.
 ## Automated checks
 
 - Repository suite: 618 tests, 616 passed, 2 skipped, 0 failures.
+- Local skips were the PowerShell helper CLI and Linux socket-forwarder test.
+  PowerShell was unavailable. The TCP wire suite ran on Proxmox with all
+  7 tests passing, including real `systemd-socket-proxyd` byte forwarding.
 - `npm run typecheck`: passed.
-- Focused Docker exposure/Caddy wire tests passed again after the final review
-  evidence text change.
+- Focused Docker exposure/Caddy wire tests passed after the final review text
+  change. Docker exposure/host tests passed after scoped IPv6 addresses were
+  made an explained rejection instead of a URL parsing exception.
 - `npm run build:native`: Linux x64 baseline build passed.
 - The compiled Linux CLI passed version/help, scripted discovery, review with
   unchanged YAML/state, confirmed publication, HTTPS nginx content, HTTP 308
@@ -63,6 +68,11 @@ client checks. Its evidence and log are retained on the lab at
 Native CLI evidence and its tested binary SHA-256 are retained at
 `/opt/nomina-issue33-live/native-evidence.json` and
 `/opt/nomina-issue33-live/native-check.log`.
+The tested final Linux x64 binary SHA-256 is
+`1e319f8ec5b22b34f9130435c431e129bd3f5721c1ba58dd2e5667b0c9ecd454`.
+The native check script is retained at
+`/opt/nomina-issue33-live/nomina33-native-check.mjs`, and the TCP wire log at
+`/opt/nomina-issue33-live/tcp-wire.log`.
 
 ## Failures investigated
 
