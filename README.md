@@ -315,6 +315,148 @@ bash tools/lab/deploy-local-build.sh root@<proxmox-ip>
 The helper installs `/opt/nominaconnect-test/nomina-linux-x64`, verifies matching
 SHA-256 hashes and leaves the release `nomina` link alone.
 
+## Docker hosts and exposures
+
+Docker host bindings are optional inspection targets on the project's configured
+Proxmox node. They are separate from native service LXCs and managed exposures.
+Use them to discover published Docker endpoints, then publish them as HTTPS, TCP
+or SMB exposures. The interactive main menu has Docker hosts and
+Publish an exposure entries. Discovery is on demand; background tracking never
+adopts Docker containers or retargets exposures.
+
+### Manage Docker hosts
+
+Run as root on the configured node to create, connect, retry or inspect. Listing
+and disconnecting need only the local project files.
+
+```sh
+nomina docker create --name apps --ip 192.168.1.88 --gateway 192.168.1.3 --yes
+nomina docker connect --name existing --vmid 110 --socket /var/run/docker.sock --yes
+nomina docker list --json
+nomina docker inspect apps --json
+nomina docker retry apps --yes
+nomina docker disconnect apps --yes
+```
+
+Omit supplied values to use guided prompts. `--yes` confirms scripted mutations
+and uses recommendations for optional creation fields. A name and requested IP
+remain required for scripted creation; connection also requires a VMID. Use
+`--project-dir` to select a project explicitly for scripts, or let the CLI find
+`nomina.yaml` in the working directory or its parents.
+
+Creation accepts `--hostname`, `--template`, `--bridge`, `--storage`, `--gateway`,
+`--nameserver`, `--prefix-length`, `--cpus`, `--memory` and `--disk`. Memory is MiB,
+disk is GiB. Recommendations are 2 cores, 2048 MiB, 32 GiB and an editable `/24`.
+Bridge/storage come from the project. The resolver defaults to the managed
+Technitium IP, then the gateway. The template must be an available Debian 13
+standard volume. CPU, available memory, rootdir storage space, an UP Linux
+bridge, subnet addresses and configured-LXC IP collisions are checked before
+creation. External IP collisions remain unverified and produce a warning.
+
+Created CTs are unprivileged with nesting/keyctl enabled before their first
+start. Engine, Compose and Buildx come from Docker's official Debian apt
+repository. Installation runs only inside the created CT. Host packages,
+AppArmor confinement and storage-driver defaults are not changed.
+
+A setup failure leaves the CT in place with a pending phase. `retry` uses the
+recorded VMID, verifies the created hostname, IP and privilege mode, and resumes
+setup. It never creates a replacement. A missing or changed CT requires manual
+inspection. If allocation was never recorded, inspect Proxmox before
+disconnecting the pending binding and creating again. Completed setup cannot be
+retried as an upgrade.
+
+Connection attaches an existing running CT read-only: it requires a root-owned
+local Unix socket and a responsive rootful Engine. Existing privileged CTs are
+accepted without conversion. No install, restart, stack edit, stop, destroy or
+prune operation occurs on attachment. Socket access conveys full daemon
+authority, so treat the connection accordingly. Rootless and remote environments
+require manual exposure entry.
+
+`inspect` returns a transient discovery result for the exposure workflow.
+Containers list current full IDs, names, image references, status, network mode,
+EXPOSE metadata and four allowlisted Compose labels (project, service,
+container-number, oneoff). Candidates preserve every effective
+container-port/host-port/transport/bind-address tuple, plus application grouping
+and current instance identity. TCP candidates with a supported address provide
+`backendAddress` and `hostPort`; wildcards use a verified CT address of the same
+address family. Stopped containers, absent public bindings, loopback, UDP/SCTP,
+host networking and directly addressed or unverified networks stay visible with
+reasons and a manual-entry fallback. Each candidate has an `endpointId` for
+scripted selection; it expires on identity/mapping changes. Limits are
+100 containers, 500 endpoint candidates, 64 KiB per inspection command, a
+10-second inspection-command timeout and a 60-second discovery budget.
+Truncation and diagnostics are reported explicitly. Only projected inspection
+fields cross the adapter boundary; full inspect JSON, environment, mounts and
+arbitrary labels are not printed or persisted, and observations are never saved
+to the project.
+
+Disconnect removes only the binding and its local operational references. The
+LXC, applications and existing exposures remain independently managed, and the
+nuclear uninstall workflow excludes Docker-bound CTs from destruction.
+
+### Publish an exposure from Docker
+
+Run `nomina`, choose **Publish an exposure**, then **From Docker**. Select a
+Docker host binding, application and published endpoint. Compose services are
+grouped by project/service; replicas retain their container/instance identity.
+Standalone containers are listed by name. Each endpoint shows its status, bind
+address, effective host port, private container port, transport and any reason
+it is unavailable. Repeated identical binding tuples collapse. With no binding, create/connect a Docker LXC from
+**Docker hosts**, or continue with **Manual entry**.
+
+All proposals are editable: display name, full hostname, connection type,
+backend IP and effective published host port, backend HTTP/HTTPS, TCP listener
+port and Tailscale access when configured. A web exposure always uses HTTPS for
+clients; backend HTTP/HTTPS is a separate choice.
+
+```sh
+nomina docker inspect apps --json
+nomina exposure publish --source docker --docker-binding apps \
+  --docker-application 'suite/web' --docker-endpoint ENDPOINT_ID \
+  --protocol https --hostname web.bunny.internal --review-only
+```
+
+Review the output, then repeat the same selection and edits with `--yes`
+instead of `--review-only`. Both modes suppress interactive prompts. `--yes` also
+suppresses prompts for Manual entry, where missing required fields fail
+validation. Unknown
+applications require `--protocol https|tcp|smb`; known hints can be overridden.
+Optional flags include `--name`, `--hostname`, `--backend-ip`,
+`--backend-port`, `--backend-tls true|false`, `--listener-port` and
+`--tailnet true|false`. `--source manual` selects the existing manual flow.
+Switching to Manual entry retains supplied exposure fields and drops the Docker
+selectors. See `nomina exposure publish --help` for the flag summary.
+
+Allowlisted image/application-port pairs can suggest a type: official
+nginx/httpd/Caddy/Traefik on 80 or 443, known Samba images on 445, and the
+LinuxServer OpenSSH image on 2222. A TCP transport or familiar port alone never
+proves HTTP, SSH or SMB. SSH uses generic TCP with an editable listener;
+reserved administration ports stay reserved. SMB uses the existing
+client-port-445 preset while the Docker published backend port can differ;
+shares, users and permissions stay on the SMB server. Ordinary TCP selects a
+backend by listener address/port, not hostname; each listener is exclusive.
+
+At the final Docker review, choose **Publish this reviewed exposure**,
+**Check readiness without publishing**, or **Cancel**. Readiness review and
+cancellation perform no provider/configuration writes. Before publication the
+exact endpoint is reinspected, and the reviewed backend is checked from the
+managed proxy LXC. Explicit backend overrides stay exactly as entered and must
+pass that proxy-context reachability check. Transport reachability does not prove HTTP correctness,
+authentication, a share read or an application login.
+
+Names derive from the sanitized application and `baseLocalDomain`. Docker
+creation never overwrites an existing exposure, even when its hostname is
+entered explicitly; use **Edit an exposure** to update one. Unmanaged DNS
+records or proxy routes also block publication. Only the confirmed exposure is
+saved; no container ID, Docker environment, credentials or discovery snapshot
+is adopted. Docker changes never automatically retarget it.
+
+Wildcard bindings use the inspected CT address in the matching address family,
+then require a successful proxy-context probe. Loopback, multicast,
+link-local, UDP/SCTP, host networking, directly addressed networks and missing
+published ports show explanations and a manual-entry option. Current raw TCP
+forwarding requires IPv4 listener/backend addresses.
+
 ## Documentation
 
 - [Docker host bindings and endpoint discovery](docs/docker-hosts.md)
