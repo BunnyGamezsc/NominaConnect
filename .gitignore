@@ -3,5 +3,6 @@ node_modules/
 .DS_Store
 dist/
 .scratch/
+.local/production/
 clients/home-dns/
 bun.lock
