@@ -83,6 +83,7 @@ export async function runCli(argumentsList, adapters) {
   return commandResult;
 }
 
+/** Return a complete worker request when this operation could revoke its caller's SSH session. */
 function deferSshOperation(adapters, projectDirectory, args) {
   return adapters.sshOperations?.required() ? {
     stdout: "", sshOperation: { projectDirectory: path.resolve(projectDirectory), args: [...args, "--project-dir", path.resolve(projectDirectory)] }
@@ -123,6 +124,7 @@ async function runCommand(command, rest, adapters) {
   }
 }
 
+/** Resolve host SSH setup and key actions, deferring disruptive work until inputs are complete. */
 async function handleSshCommand(argumentsList, adapters) {
   const [action, ...rest] = argumentsList;
   assertProxmoxShell(adapters.runtime);
@@ -331,6 +333,7 @@ async function fetchStepCaRootPem(project, adapters) {
   throw new Error(`Could not fetch step-ca root certificate from LXC ${vmid}. Try: pct exec ${vmid} -- cat /var/lib/stepca/certs/root_ca.crt`);
 }
 
+/** Resolve a managed service's connection reference and replace its securely stored credential. */
 async function changeConnectionSecret(options, adapters) {
   const { filesystem, runtime } = adapters;
   assertProxmoxShell(runtime);
@@ -913,6 +916,7 @@ function requireTailnetEndpoints(project) {
   return { dnsIp, proxyIp };
 }
 
+/** Reconcile gateway DNS and existing web/stream exposures after Tailscale provisioning. */
 async function syncTailscaleTailnet(project, vpnReference, providerAdapter, adapters) {
   const { dnsIp, proxyIp } = requireTailnetEndpoints(project);
   const vpnService = project.config.managedInventory.platform.vpn;
@@ -1123,6 +1127,7 @@ async function upgradeService(serviceName, rawOptions, adapters) {
   };
 }
 
+/** Remove a selected managed integration while retaining shared DNS and unrelated access. */
 async function removeService(serviceName, rawOptions, adapters) {
   const { filesystem, runtime, proxmox, providerAdapters = {}, prompts } = adapters;
   assertProxmoxShell(runtime);
@@ -1275,6 +1280,7 @@ async function removeService(serviceName, rawOptions, adapters) {
   throw new Error(`Service ${resolvedServiceName} not found in managed inventory.`);
 }
 
+/** Confirm and destroy one recorded LXC, guarding the target again in detached workers. */
 async function destroyService(serviceName, rawOptions, adapters) {
   const { filesystem, runtime, proxmox, prompts } = adapters;
   assertProxmoxShell(runtime);
@@ -1636,6 +1642,7 @@ function parseDomainChangeOptions(rawOptions) {
   return options;
 }
 
+/** Rebuild integration references for existing exposures without changing their inventory IDs. */
 async function republishExposures(workingProject, services, providerAdapters, { verifyTailnetGuards = false } = {}) {
   const references = {};
   for (const service of services) {
@@ -1673,6 +1680,7 @@ async function republishExposures(workingProject, services, providerAdapters, { 
   return references;
 }
 
+/** Migrate managed hostnames and integrations while preserving each exposure's identity and keys. */
 async function changeBaseDomain(options, adapters) {
   const { filesystem, proxmox, providerAdapters = {}, prompts } = adapters;
   assertProxmoxShell(adapters.runtime);
@@ -1905,6 +1913,7 @@ function resolveDeletionTarget(target, { secretStorePath, statePath, projectDir 
   return target;
 }
 
+/** Parse uninstall confirmation and the expected target snapshot used by detached workers. */
 function parseUninstallOptions(rawOptions) {
   const options = {};
   const optionNames = new Map([
@@ -2384,6 +2393,7 @@ const parseServiceRecheckOptions = optionParser({
   flags: [["--ip", "ip"]]
 });
 
+/** Normalize the transport and reject missing or incompatible publication options. */
 function validateExposureOptions(options) {
   options.protocol ??= "https";
   if (!["https", "tcp", "ssh"].includes(options.protocol)) throw new Error("Exposure protocol must be https, tcp, smb or ssh.");

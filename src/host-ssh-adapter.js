@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 
 export const HOST_SSH_DIRECTORY = "/var/lib/nominaconnect/host-ssh";
 export const HOST_SSH_PORT = 22222;
+export const HOST_SSH_PID_FILE = "/run/nomina-host-ssh.pid";
 const UNIT = "nomina-host-ssh.service";
 
 // PAM can move authenticated shells into session scopes outside sshd's service
@@ -57,12 +58,14 @@ finally:
         os.close(handle)
 `;
 
+/** Accept only RFC 1918 IPv4 addresses for the dedicated LAN listener. */
 export function isPrivateIpv4(ip) {
   if (isIP(ip) !== 4) return false;
   const [a, b] = ip.split(".").map(Number);
   return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
 }
 
+/** Render isolated, key-only sshd settings for one existing account and private address. */
 export function hostSshConfig({ ip, user }, directory = HOST_SSH_DIRECTORY) {
   if (!isPrivateIpv4(ip)) throw new Error("Host SSH requires a private LAN IPv4 address.");
   if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(user)) throw new Error("Choose a valid existing OS account.");
@@ -71,7 +74,7 @@ Port ${HOST_SSH_PORT}
 AddressFamily inet
 ListenAddress ${ip}
 HostKey ${directory}/host_ed25519
-PidFile /run/nomina-host-ssh.pid
+PidFile ${HOST_SSH_PID_FILE}
 AllowUsers ${user}
 AuthenticationMethods publickey
 PubkeyAuthentication yes
@@ -94,6 +97,7 @@ Subsystem sftp internal-sftp
 `;
 }
 
+/** Render the dedicated daemon unit without inheriting the system SSH service. */
 export function hostSshUnit(directory = HOST_SSH_DIRECTORY) {
   return `[Unit]
 Description=Nomina host SSH access
@@ -117,9 +121,12 @@ WantedBy=multi-user.target
 /** Own only our dedicated daemon and keys; never edit the operating system SSH service. */
 export function createHostSshAdapter({ commandRunner, filesystem = fs, directory = HOST_SSH_DIRECTORY,
   unitDirectory = "/etc/systemd/system", isRoot = () => process.getuid?.() === 0 }) {
+  /** Resolve a managed key or recovery file inside the private SSH directory. */
   const file = (name) => path.join(directory, name);
   const unitPath = path.join(unitDirectory, UNIT);
+  /** Execute a host command with a bounded timeout through the injected runner. */
   const run = (binary, args, timeoutMs = 30_000) => commandRunner.run({ binary, args, timeoutMs });
+  /** Reject non-root callers and unsafe paths before reading or changing SSH secrets. */
   function guard() {
     if (!isRoot()) throw new Error("Host SSH can only be managed from the Proxmox root shell.");
     for (const target of [directory, path.dirname(directory), unitDirectory]) {
@@ -140,7 +147,9 @@ export function createHostSshAdapter({ commandRunner, filesystem = fs, directory
       }
     }
   }
+  /** Read the managed endpoint and disabled state, if setup has created a record. */
   const readRecord = () => filesystem.existsSync(file("record.json")) ? JSON.parse(filesystem.readFileSync(file("record.json"), "utf8")) : undefined;
+  /** Atomically replace a managed file using an exclusive private temporary file. */
   function write(name, content, mode = 0o600) {
     // The parent is root-owned; exclusive temporary files also avoid following symlinks.
     const temporary = `${file(name)}.${randomUUID()}.tmp`;
@@ -153,6 +162,7 @@ export function createHostSshAdapter({ commandRunner, filesystem = fs, directory
       filesystem.rmSync(temporary, { force: true });
     }
   }
+  /** Refuse changes when the dedicated configuration or unit differs from our record. */
   function assertOwned(record) {
     if (!record) throw new Error("Host SSH is not managed by Nomina.");
     if (filesystem.readFileSync(file("sshd_config"), "utf8") !== hostSshConfig(record, directory)
@@ -161,6 +171,7 @@ export function createHostSshAdapter({ commandRunner, filesystem = fs, directory
       throw new Error("Managed host SSH configuration changed outside Nomina; refusing to overwrite it.");
     }
   }
+  /** Require a local private address, existing login account and host SSH tooling. */
   async function validateEndpoint(request) {
     hostSshConfig(request, directory);
     const account = await run("getent", ["passwd", request.user]);
@@ -170,6 +181,7 @@ export function createHostSshAdapter({ commandRunner, filesystem = fs, directory
     if (!addresses.some((entry) => entry.addr_info?.some((address) => address.local === request.ip))) throw new Error("SSH host IP must be assigned to the machine running Nomina.");
     await run("/bin/bash", ["-c", "test -x /usr/sbin/sshd && test -x /usr/bin/python3 && command -v ssh-keygen >/dev/null && command -v ssh >/dev/null && command -v systemctl >/dev/null"]);
   }
+  /** Validate endpoint ownership and listener availability without creating credentials. */
   async function preflight(request) {
     guard();
     await validateEndpoint(request);
@@ -192,14 +204,17 @@ export function createHostSshAdapter({ commandRunner, filesystem = fs, directory
     if (fragment && (!current || fragment !== unitPath)) throw new Error("Host SSH systemd unit already exists outside Nomina; refusing to replace it.");
     return current;
   }
+  /** Generate an Ed25519 key pair and restrict the private key to root. */
   async function keygen(name) {
     await run("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", "Nomina host SSH", "-f", file(name)]);
     filesystem.chmodSync(file(name), 0o600);
   }
+  /** Delete both halves of a prepared replacement that is no longer usable. */
   function discardPendingKey() {
     filesystem.rmSync(file("pending_ed25519"), { force: true });
     filesystem.rmSync(file("pending_ed25519.pub"), { force: true });
   }
+  /** Remove authorization first, then terminate managed sessions and stop the daemon. */
   async function revoke() {
     guard();
     const current = readRecord();
@@ -220,6 +235,7 @@ export function createHostSshAdapter({ commandRunner, filesystem = fs, directory
     await run("/bin/bash", ["-c", `! systemctl is-active --quiet ${UNIT}`]);
     if (sessionError) throw new Error(`SSH keys revoked and service stopped, but session termination failed: ${sessionError.message}`);
   }
+  /** Verify the recorded daemon with a real key login and a pinned host identity. */
   async function healthCheckExposure(request) {
     try {
       guard();
@@ -237,6 +253,7 @@ export function createHostSshAdapter({ commandRunner, filesystem = fs, directory
       return { status: "unhealthy", ssh: "unverified", reason: error.message };
     }
   }
+  /** Enable the isolated daemon, retaining its host identity and revoking keys on failure. */
   async function publish(request, preparedKey = undefined) {
       const current = await preflight(request);
       if (current && !current.disabled && !preparedKey) return healthCheckExposure(request);
@@ -279,6 +296,7 @@ export function createHostSshAdapter({ commandRunner, filesystem = fs, directory
   }
   return Object.freeze({
     preflight,
+    /** Discover the host's private source address for reaching the managed proxy. */
     async suggestAddress(proxyIp) {
       guard();
       if (isIP(proxyIp) !== 4) throw new Error("Provision the proxy before configuring host SSH.");
@@ -287,6 +305,7 @@ export function createHostSshAdapter({ commandRunner, filesystem = fs, directory
     },
     publish: (request) => publish(request),
     revoke,
+    /** Export a pending replacement while leaving current credentials and sessions active. */
     async prepareKey({ output }) {
       guard();
       const current = readRecord();
@@ -308,6 +327,7 @@ export function createHostSshAdapter({ commandRunner, filesystem = fs, directory
         filesystem.closeSync(fd);
       }
     },
+    /** Validate the pending pair before replacing working authorization and sessions. */
     async activateKey(request) {
       const current = await preflight(request);
       if (!current || current.disabled) throw new Error("Host SSH must be enabled before activating a replacement key.");
@@ -324,6 +344,7 @@ export function createHostSshAdapter({ commandRunner, filesystem = fs, directory
       const preparedKey = { privateKey: filesystem.readFileSync(file("pending_ed25519")), publicKey: `${derived}\n` };
       return publish(request, preparedKey);
     },
+    /** Reserve a fresh export path before immediately revoking and replacing the client key. */
     async replaceKey(request) {
       await preflight(request);
       // Reserve the export before revoking the working key. A bad destination
@@ -341,6 +362,7 @@ export function createHostSshAdapter({ commandRunner, filesystem = fs, directory
         if (fd !== undefined) filesystem.closeSync(fd);
       }
     },
+    /** Export the active private key to a new mode-0600 file without overwriting downloads. */
     async exportKey({ output }) {
       guard();
       const current = readRecord();
@@ -352,6 +374,7 @@ export function createHostSshAdapter({ commandRunner, filesystem = fs, directory
       finally { filesystem.closeSync(fd); }
       return { output };
     },
+    /** Revoke access and remove owned unit/key files while preserving ordinary host SSH. */
     async uninstall() {
       guard();
       const current = readRecord();
@@ -366,6 +389,7 @@ export function createHostSshAdapter({ commandRunner, filesystem = fs, directory
     healthCheckExposure
   });
 
+  /** Exclusively open an absolute download path before any working key is revoked. */
   function reserveExport(output) {
     if (typeof output !== "string" || !path.isAbsolute(output)) throw new Error("Choose an absolute output path for the downloaded private key.");
     return filesystem.openSync(output, "wx", 0o600);

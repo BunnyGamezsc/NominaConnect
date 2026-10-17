@@ -15,6 +15,7 @@ export function proxyEndpointFor(proxyServiceName, ip) {
   return proxyServiceName === "traefik" ? `http://${ip}:8080` : `http://${ip}:2019`;
 }
 
+/** Publish one independent web/stream exposure and verify its managed integrations. */
 export async function publishManagedExposure({
   project,
   options,
@@ -341,6 +342,7 @@ function collectManagedDnsReferences(project, hostname) {
   return references;
 }
 
+/** Include the requested web route alongside existing managed proxy route references. */
 function collectManagedProxyReferences(project, hostname) {
   const references = project.config.managedInventory.services
     .filter((service) => isWebExposure(service.exposure))
@@ -352,6 +354,7 @@ function collectManagedProxyReferences(project, hostname) {
   return references;
 }
 
+/** Scope certificate inspection to managed web hostnames and the requested TLS endpoint. */
 function collectManagedCaReferences(project, hostname) {
   const references = project.config.managedInventory.services
     .filter((service) => isWebExposure(service.exposure))

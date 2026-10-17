@@ -9,6 +9,7 @@ import { runCli } from "../src/cli.js";
 
 const proxmoxRootRuntime = () => ({ isRoot: () => true, isProxmoxHost: () => true });
 
+/** Capture forwarding and DNS mutations for shared-hostname and optional VPN scenarios. */
 function tcpFixture({ proxy = "caddy", tailscale = false, conflict = false, reachable = true } = {}) {
   const filesystem = new FakeFilesystem();
   seedProvisionedProject(filesystem, "/projects/bunnyhome", { proxyService: proxy });
@@ -855,6 +856,7 @@ test("nomina exposure publish reports unhealthy connected exposure with Traefik"
 });
 
 
+/** Extend publication fixtures with host-key lifecycle observations and root-shell access. */
 function hostSshFixture(options = {}) {
   const fixture = tcpFixture(options);
   const host = { enabled: false, generation: 0, calls: [] };
@@ -867,7 +869,9 @@ function hostSshFixture(options = {}) {
     async exportKey({ output }) { if (!host.enabled) throw new Error("disabled"); fixture.filesystem.writeFile(output, `key-${host.generation}`); },
     async healthCheckExposure() { return { status: host.enabled ? "healthy" : "unhealthy", ssh: "key-login-verified" }; }
   };
+  /** Enable the fixture's host SSH exposure through the real CLI dispatch path. */
   const ssh = (extra = []) => runCli(["ssh", "enable", "--project-dir", "/projects/bunnyhome", "--hostname", "pve.bunnyhome.test", ...extra], fixture.adapters);
+  /** Publish the Proxmox web UI on the same hostname for independent-lifecycle tests. */
   const web = () => fixture.publish(["--protocol", "https", "--name", "proxmox-ui", "--hostname", "pve.bunnyhome.test", "--backend-ip", "192.168.1.10", "--backend-port", "8006", "--backend-tls"]);
   return { ...fixture, host, ssh, publishWeb: web };
 }

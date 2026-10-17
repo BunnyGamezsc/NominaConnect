@@ -9,6 +9,7 @@ const TAILNET_DIRECTORY = "/etc/nominaconnect/tcp-tailnet";
 const quote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
 const unit = (port) => `nomina-tcp-${port}`;
 
+/** Validate raw TCP endpoints, reserving platform ports except the dedicated host SSH listener. */
 export function validateTcpEndpoint({ ip, backendIp, backendPort, listenerPort, hostname, purpose = undefined }) {
   if (isIP(ip) !== 4 || isIP(backendIp) !== 4) {
     throw new Error("TCP exposures require recorded IPv4 listener and backend addresses.");
@@ -90,6 +91,7 @@ iptables -t nat -C POSTROUTING -j NOMINA_TCP_SNAT 2>/dev/null || iptables -t nat
 `;
 }
 
+/** Manage scoped proxy listeners and optional VPN forwarding with administration recovery. */
 export function createTcpAdapter({ exec, probe = probeTcp }) {
   const run = (vmid, script) => exec(vmid, { binary: "/bin/bash", args: ["-c", script], timeoutMs: 30_000 });
   const proxySsh = createProxySshAdapter({ exec });
@@ -140,6 +142,7 @@ grep -q /usr/local/sbin/nomina-tailnet-tcp /usr/local/sbin/nomina-tailnet-firewa
 /usr/local/sbin/nomina-tailnet-tcp`);
   }
   return Object.freeze({
+    /** Reject occupied or modified listeners before changing forwarding or proxy administration. */
     async preflight(request) {
       validateTcpEndpoint(request);
       if (!Number.isInteger(request.vmid)) throw new Error("TCP forwarding requires the managed proxy LXC.");
@@ -180,6 +183,7 @@ fi`.replaceAll("\n+", "\n"));
         }
       }
     },
+    /** Install owned TCP forwarding and restore relocated proxy SSH if publication fails. */
     async publish(request) {
       const existing = request.purpose === "host-ssh" ? (await records(request.vmid)).find((record) => record.listenerPort === request.listenerPort) : undefined;
       const relocated = request.purpose === "host-ssh" && !existing ? await proxySsh.prepare(request) : false;
@@ -227,6 +231,7 @@ systemctl daemon-reload`);
       return { locator: { ip: request.ip, port: request.listenerPort }, warnings: relocated
         ? [`Proxy administration remains available privately at ${request.ip}:${PROXY_SSH_ADMIN_PORT}; removing host SSH restores its original listener.`] : [] };
     },
+    /** Remove only the matching forwarding records and restore owned proxy administration. */
     async remove(request) {
       validateTcpEndpoint(request);
       const current = await records(request.vmid);

@@ -383,6 +383,7 @@ function warningTarget({ serviceName, platformKey, serviceId }) {
   };
 }
 
+/** Inspect managed integrations and report adoptable changes with verified service health. */
 export async function runAdoptionPass({ project, providerAdapters = {}, retryOptions = {} }) {
   const changes = [];
   const warnings = [];

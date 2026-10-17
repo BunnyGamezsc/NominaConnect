@@ -213,6 +213,7 @@ function readServiceList(lines, startIndex, parentIndent) {
   return { value: services, nextIndex: index };
 }
 
+/** Replace one inventory ID while preserving other exposures that share its hostname. */
 export function upsertManagedExposure(config, managedService) {
   const services = config.managedInventory.services.filter(
     (service) => service.id !== managedService.id
@@ -321,6 +322,7 @@ export function serializeProjectConfiguration(config) {
   return lines.join("\n");
 }
 
+/** Serialize managed applications and transport-specific exposure settings into project YAML. */
 function appendManagedServices(lines, services) {
   if (services.length === 0) {
     lines.push("  services: []");

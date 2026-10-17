@@ -44,6 +44,7 @@ fs.writeFileSync(file, JSON.stringify(state));
 process.exit(status);
 `;
 
+/** Run generated administration scripts against private local stubs without touching system services. */
 function lab(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "nomina-proxy-ssh-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -56,7 +57,9 @@ function lab(t) {
   fs.writeFileSync(path.join(config, "default/ssh"), 'SSHD_OPTS=""\n');
   for (const name of ["sshd", "ss", "systemctl", "stat"]) fs.writeFileSync(path.join(bin, name), SHIM, { mode: 0o755 });
   fs.writeFileSync(stateFile, JSON.stringify({ service: true, socket: true, calls: [] }));
+  /** Read the stubbed proxy service/listener state after a script runs. */
   const state = () => JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  /** Inject a proxy state change or failure for the next generated script. */
   const change = (values) => fs.writeFileSync(stateFile, JSON.stringify({ ...state(), ...values }));
   const adapter = createProxySshAdapter({ exec: async (_vmid, command) => {
     const script = command.args[1].replaceAll("/etc/nominaconnect", `${config}/nominaconnect`)

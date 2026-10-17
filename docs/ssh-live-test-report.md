@@ -239,3 +239,19 @@ run; it is a documented manual compatibility check, not a dependency on a
 Windows machine or a request to expose its SSH server. Existing SMB/Minecraft
 rules and transport availability were preserved; this SSH run did not repeat
 application-level SMB credentials or game-client sessions.
+
+## CodeRabbit follow-up — local verification only
+
+Managed-session detection previously depended on `SSH_CONNECTION`, which an
+elevated shell started by `sudo` or `su` can lose. It now falls back to Linux
+process ancestry using the dedicated daemon's root-owned PID file. Uncertain,
+unsafe or unreadable process metadata stops disruptive inline work; detached
+workers still bypass handoff to avoid recursion. Regression fixtures cover
+elevated sessions, independent consoles, command names containing parentheses,
+missing PID files, malformed metadata and ancestry cycles.
+
+Added JSDoc for changed named functions and production methods to address the
+review's documentation coverage warning. Local validation passed:
+`node --test test/*.test.js` (719 tests, 716 passed, 3 platform skips, 0 failures),
+`npm run typecheck`, `npm run build:native` and `git diff --check`.
+No additional live-server tests were run for this follow-up, as requested.

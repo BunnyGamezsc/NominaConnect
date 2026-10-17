@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { cliInvocation, createSshOperationController, isManagedSshSession, runSshOperationWorker } from "../src/ssh-operation.js";
 
+/** Isolate root-owned operation artifacts and capture commands without starting systemd. */
 function lab(t, run = async (_command) => {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "nomina-ssh-operation-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -16,11 +17,56 @@ function lab(t, run = async (_command) => {}) {
   return { root, filesystem, controller, calls, notices };
 }
 
+/** Model a managed login whose sudo/su shell has lost SSH_CONNECTION. */
+function elevatedSession({ managed = true, unreadable = false, cycle = false, missing = false, unsafe = false, malformed = false } = {}) {
+  const files = {
+    "/run/nomina-host-ssh.pid": "100\n",
+    "/proc/500/stat": malformed ? "invalid" : "500 (nomina) R 400 500 500 0",
+    "/proc/400/stat": `400 (sudo (or su)) S ${cycle ? 500 : 300} 400 400 0`,
+    "/proc/300/stat": `300 (shell) S ${managed ? 200 : 1} 300 300 0`,
+    "/proc/200/stat": "200 (sshd: user) S 100 200 200 0"
+  };
+  const filesystem = /** @type {typeof fs} */ (/** @type {unknown} */ ({
+    ...fs,
+    lstatSync() {
+      if (missing) throw Object.assign(new Error("No managed daemon"), { code: "ENOENT" });
+      return { isSymbolicLink: () => false, isFile: () => true, uid: 0, mode: unsafe ? 0o666 : 0o644 };
+    },
+    readFileSync(file) {
+      if (unreadable || files[file] === undefined) throw Object.assign(new Error("Process information unavailable"), { code: "EACCES" });
+      return files[file];
+    }
+  }));
+  return { filesystem, pid: 500, platform: /** @type {const} */ ("linux") };
+}
+
+test("sudo and su managed sessions still require handoff without SSH environment variables", () => {
+  const options = elevatedSession();
+  assert.equal(isManagedSshSession({}, options), true);
+  assert.equal(isManagedSshSession({ SSH_CONNECTION: "10.0.0.1 12345 192.168.1.10 22" }, options), true);
+  assert.equal(isManagedSshSession({ NOMINA_SSH_OPERATION_WORKER: "1" }, options), false);
+  assert.equal(isManagedSshSession({}, elevatedSession({ managed: false })), false);
+});
+
+test("uncertain process ancestry blocks inline disruption instead of guessing it is safe", () => {
+  assert.throws(() => isManagedSshSession({}, elevatedSession({ unreadable: true })), /SSH session/);
+  assert.throws(() => isManagedSshSession({}, elevatedSession({ cycle: true })), /SSH session/);
+  assert.throws(() => isManagedSshSession({}, elevatedSession({ malformed: true })), /SSH session/);
+  assert.throws(() => isManagedSshSession({}, elevatedSession({ unsafe: true })), /SSH session/);
+});
+
+test("absent managed daemon and non-Linux consoles do not require handoff", () => {
+  assert.equal(isManagedSshSession({}, elevatedSession({ missing: true })), false);
+  assert.equal(isManagedSshSession({}, { ...elevatedSession({ unreadable: true }), platform: "darwin" }), false);
+  assert.equal(isManagedSshSession({ NOMINA_SSH_OPERATION_WORKER: "1" }, elevatedSession({ unreadable: true })), false);
+});
+
 test("only managed SSH connections require handoff and workers never recurse", () => {
-  assert.equal(isManagedSshSession({ SSH_CONNECTION: "10.0.0.1 12345 192.168.1.10 22222" }), true);
-  assert.equal(isManagedSshSession({ SSH_CONNECTION: "10.0.0.1 12345 192.168.1.10 22" }), false);
-  assert.equal(isManagedSshSession({}), false);
-  assert.equal(isManagedSshSession({ SSH_CONNECTION: "10.0.0.1 12345 192.168.1.10 22222", NOMINA_SSH_OPERATION_WORKER: "1" }), false);
+  const options = elevatedSession({ missing: true });
+  assert.equal(isManagedSshSession({ SSH_CONNECTION: "10.0.0.1 12345 192.168.1.10 22222" }, options), true);
+  assert.equal(isManagedSshSession({ SSH_CONNECTION: "10.0.0.1 12345 192.168.1.10 22" }, options), false);
+  assert.equal(isManagedSshSession({}, options), false);
+  assert.equal(isManagedSshSession({ SSH_CONNECTION: "10.0.0.1 12345 192.168.1.10 22222", NOMINA_SSH_OPERATION_WORKER: "1" }, options), false);
   assert.deepEqual(cliInvocation("/usr/bin/node", ["node", "/opt/nomina/bin/nomina.js"]), ["/usr/bin/node", "/opt/nomina/bin/nomina.js"]);
   assert.deepEqual(cliInvocation("/usr/local/bin/nomina", ["nomina", "/$bunfs/root/bin/nomina.js"]), ["/usr/local/bin/nomina"]);
 });
@@ -45,6 +91,7 @@ test("worker records success and failure even after the command removes its proj
     const { operation } = await controller.launch({ args: ["uninstall", "--yes"], projectDirectory: root });
     const project = path.join(root, "project");
     fs.mkdirSync(project);
+    /** Simulate a command that deletes its project before either succeeding or failing. */
     const run = async () => { fs.rmdirSync(project); if (fail) throw new Error("provider removal failed"); return { stdout: "done" }; };
     const options = { filesystem, environment: { NOMINA_SSH_OPERATION_WORKER: "1", NOMINA_SSH_OPERATION_STATUS: operation.status } };
     if (fail) await assert.rejects(runSshOperationWorker(run, options), /provider removal failed/);

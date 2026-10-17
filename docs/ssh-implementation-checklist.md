@@ -23,6 +23,7 @@ the separate live-server verification below.
 - [x] Generate/export the private key through root-only files; never print key material.
 - [x] Prepare/download a replacement before activation; preserve working access until activation.
 - [x] Complete disruptive operations independently of the SSH connection being revoked.
+- [x] Detect managed sessions after `sudo`/`su` clears SSH variables; stop if ancestry is uncertain.
 - [x] Replace/revoke keys and terminate managed sessions when disabling access.
 - [x] Forward private client port 22 through the proxy to the host sshd.
 - [x] Reconcile SSH when VPN is added later; preserve web, DNS and other TCP rules.
@@ -31,7 +32,7 @@ the separate live-server verification below.
 
 ## Local verification — 2026-10-17
 
-- [x] Full macOS `node --test` suite: 717 tests, 714 passed, 3 skipped, 0 failures.
+- [x] Latest macOS `node --test test/*.test.js` run: 719 tests, 716 passed, 3 skipped, 0 failures.
 - [x] `npm run typecheck`.
 - [x] `npm run build:native`: compiled the Linux x64 binary.
 - [x] `git diff --check`.
@@ -39,6 +40,11 @@ the separate live-server verification below.
 - [x] Local OpenSSH effective-configuration validation (`sshd -T`).
 - [x] Generated forwarding/firewall scripts exercised in isolated local fixtures.
 - [x] Shared web/SSH/SMB/TCP lifecycle, later VPN provisioning and domain changes.
+
+CodeRabbit follow-up adds local process-tree regressions for elevated managed
+sessions, independent consoles, worker recursion and unsafe/unreadable process
+metadata. These follow-up changes were verified locally; no additional live
+server tests were run.
 
 The three macOS skips require Linux's systemd-socket-proxyd, Linux pidfds and
 PowerShell respectively. The Linux adapter/wire suite passed 36 tests with no

@@ -96,6 +96,11 @@ Commands that would disconnect their own managed SSH connection continue in a
 separate systemd operation. Nomina displays private status and log paths before
 scheduling the change; a disconnected terminal does not cancel it. After
 reconnecting, the status file records whether the operation succeeded or failed.
+This also applies after entering a root shell through `sudo` or `su`: Nomina
+checks Linux process ancestry when those commands clear the SSH environment.
+If the managed daemon's PID file or process ancestry cannot be verified, the
+disruptive command stops before revoking access; retry from an independent
+administrator connection or the host console after resolving the inspection error.
 
 Immediate replacement is also available from the host console or independent
 administrator connection, where the exported file remains retrievable after

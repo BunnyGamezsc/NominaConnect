@@ -45,6 +45,7 @@ const adapters = {
 const fromInteractiveMenu = process.argv.length <= 2;
 
 try {
+  /** Run the selected CLI action, allowing detached workers to record its final result. */
   const run = () => runCli(process.argv.slice(2), adapters);
   const result = await (process.env.NOMINA_SSH_OPERATION_WORKER === "1" ? runSshOperationWorker(run) : run());
   if (result.stdout) {

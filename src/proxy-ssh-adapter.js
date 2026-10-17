@@ -4,8 +4,10 @@ export const PROXY_SSH_ADMIN_PORT = 22223;
 const DIRECTORY = "/etc/nominaconnect/proxy-ssh";
 const SERVICE = "/etc/systemd/system/ssh.service.d/nomina-host-ssh.conf";
 const SOCKET = "/etc/systemd/system/ssh.socket.d/nomina-host-ssh.conf";
+/** Quote a single shell argument in generated proxy administration scripts. */
 const quote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
 
+/** Render owned service/socket drop-ins for the proxy's private administration port. */
 function settings(ip) {
   return {
     service: `[Service]\nExecStart=\nExecStart=/usr/sbin/sshd -D -p ${PROXY_SSH_ADMIN_PORT} -o ListenAddress=${ip}\n`,
@@ -16,11 +18,14 @@ function settings(ip) {
 // Only the explicitly managed proxy is changed. Its original SSH configuration,
 // keys, enabled state and authenticated sessions remain intact. Two owned
 // drop-ins temporarily relocate its administrative listener to a private port.
+/** Temporarily relocate stock proxy SSH administration while preserving operator settings. */
 export function createProxySshAdapter({ exec }) {
+  /** Execute a bounded script only against the explicitly managed private proxy LXC. */
   const run = (request, script) => {
     if (!Number.isInteger(request.vmid) || !isPrivateIpv4(request.ip)) throw new Error("Proxy SSH administration requires the managed private proxy LXC.");
     return exec(request.vmid, { binary: "/bin/bash", args: ["-c", `set -eu\n${script}`], timeoutMs: 30_000 });
   };
+  /** Render ownership checks that reject unsafe files or unrelated systemd overrides. */
   function guard(request) {
     const expected = settings(request.ip);
     return `
@@ -48,6 +53,7 @@ for dropin in $(systemctl show --property=DropInPaths --value ssh.service ssh.so
 done
 `;
   }
+  /** Classify port 22 as clear, already managed or safely relocatable without mutations. */
   async function preflight(request) {
     const result = await run(request, `${guard(request)}
 if [ -d ${DIRECTORY} ]; then echo managed; exit 0; fi
@@ -81,6 +87,7 @@ test "$(/usr/sbin/sshd -T -p ${PROXY_SSH_ADMIN_PORT} -o ListenAddress=${request.
 echo relocate`);
     return String(result.stdout ?? "").trim();
   }
+  /** Remove owned drop-ins and restore recorded service/socket activity after forwarding stops. */
   async function restore(request) {
     await run(request, `
 if [ ! -d ${DIRECTORY} ]; then exit 0; fi
@@ -99,6 +106,7 @@ rmdir /etc/systemd/system/ssh.service.d /etc/systemd/system/ssh.socket.d 2>/dev/
   }
   return Object.freeze({
     preflight,
+    /** Relocate stock administration and restore it if preparation fails. */
     async prepare(request) {
       const state = await preflight(request);
       if (state === "clear") return false;

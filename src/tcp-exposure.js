@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { getPlatformProvider } from "./providers.js";
 import { validateTcpEndpoint } from "./tcp-adapter.js";
 
+/** Resolve recorded proxy/VPN endpoints while preserving a stream exposure's transport purpose. */
 export function tcpRequest(project, exposure) {
   const proxy = project.config.managedInventory.platform.reverseProxy;
   const proxyRef = project.state.providerReferences[proxy?.id];

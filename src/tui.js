@@ -98,6 +98,7 @@ export function canRecheckProvisioning(project) {
   return false;
 }
 
+/** Require provisioned DNS and proxy services before offering TCP or host SSH setup. */
 function canPublishStreamExposure(project) {
   const dnsService = project?.config.managedInventory.platform.dns;
   const proxyService = project?.config.managedInventory.platform.reverseProxy;
@@ -107,6 +108,7 @@ function canPublishStreamExposure(project) {
     && project.state.providerReferences[proxyService.id] !== undefined;
 }
 
+/** Offer web publication once its selected certificate authority is also provisioned. */
 export function canPublishExposure(project) {
   const caService = project?.config.managedInventory.platform.certificateAuthority;
   const caProvisioned = caService === null || caService === undefined
@@ -809,6 +811,7 @@ export async function promptExposureOptions(project, existingOptions, prompts, d
   return { ...existingOptions, name, hostname, protocol, tailnet, backendIp, backendPort, backendTls, ...(listenerPort === undefined ? {} : { listenerPort }) };
 }
 
+/** Preserve the optional VPN preference before provisioning and prompt when Tailscale is available. */
 async function promptTailnetAccess(project, stored, prompts) {
   const available = project.config.managedInventory.platform.vpn?.service === "tailscale";
   if (!available) return stored ?? true;

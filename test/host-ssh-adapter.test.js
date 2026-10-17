@@ -33,6 +33,7 @@ test("Linux revocation terminates daemon descendants outside its process group a
   assert.doesNotThrow(() => process.kill(daemon.pid, 0));
 });
 
+/** Simulate host commands and root-owned files for isolated SSH lifecycle regressions. */
 function lab(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "nomina-host-ssh-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -232,6 +233,7 @@ test("two-phase rotation leaves the old key usable for download and activates th
   const oldPrivate = fs.readFileSync(path.join(directory, "client_ed25519"), "utf8");
   const oldAuthorization = fs.readFileSync(path.join(directory, "authorized_keys"), "utf8");
   const hostIdentity = fs.readFileSync(path.join(directory, "host_ed25519"), "utf8");
+  /** Count session-termination attempts separately from service stop commands. */
   const revocations = () => calls.filter((command) => command.binary === "/usr/bin/python3").length;
   const before = revocations();
   const output = path.join(root, "prepared-download");

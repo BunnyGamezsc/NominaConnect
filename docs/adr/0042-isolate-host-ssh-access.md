@@ -29,5 +29,10 @@ When a command would disrupt its own managed SSH connection, resolve its inputs
 and confirmation first, release project locks, then hand the complete operation
 to a separate systemd service. Persist root-private completion status outside
 project/secret directories so removal can finish after the caller disconnects.
+When `sudo` or `su` clears SSH environment variables, identify managed sessions
+by their Linux process ancestry and the dedicated daemon's root-owned PID file.
+An uncertain ancestry check blocks inline disruption rather than assuming the
+caller is an independent administrator connection. Detached workers bypass this
+check so they do not reschedule themselves.
 Offer staged replacement-key preparation and activation: the current key stays
 usable while the replacement is downloaded, and activation alone revokes it.

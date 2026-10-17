@@ -1,6 +1,8 @@
 /** A hostname is shared DNS; inventory ID and transport/listener identify its services. */
 export const isWebExposure = (exposure) => exposure !== undefined && (exposure.protocol ?? "https") === "https";
+/** Identify TCP-based exposures that own a listener rather than an HTTP route. */
 export const isStreamExposure = (exposure) => ["tcp", "ssh"].includes(exposure?.protocol);
+/** Compare complete DNS names case-insensitively without treating missing values as equal. */
 export const sameHostname = (left, right) => typeof left === "string" && typeof right === "string" && left.toLowerCase() === right.toLowerCase();
 
 /** SOA/NS/TXT records can coexist with an A record; alternate address routes cannot. */
@@ -12,6 +14,7 @@ export function conflictingDnsRecords(records, ip) {
   });
 }
 
+/** Find a publication target by inventory identity or an unambiguous hostname/transport slot. */
 export function findExposure(project, options) {
   const services = project.config.managedInventory.services.filter((service) => service.exposure);
   const explicit = services.find((service) => service.id === options.serviceId || service.name === options.name);
@@ -28,6 +31,7 @@ export function findExposure(project, options) {
   return matches[0];
 }
 
+/** Resolve a name/ID before trying a hostname, rejecting shared-hostname ambiguity. */
 export function resolveExposure(services, selector) {
   const explicit = services.find((service) => service.id === selector) ?? services.find((service) => service.name === selector);
   if (explicit) return explicit;
@@ -36,6 +40,7 @@ export function resolveExposure(services, selector) {
   return matches[0];
 }
 
+/** Reject duplicate names, web routes and TCP ports while allowing compatible hostname sharing. */
 export function assertExposureSlot(project, options, existing) {
   const protocol = options.protocol ?? existing?.exposure.protocol ?? "https";
   if (existing && (existing.exposure.protocol ?? "https") !== protocol) {
