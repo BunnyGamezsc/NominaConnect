@@ -1,3 +1,4 @@
+import { findExposure, assertExposureSlot, sameHostname, conflictingDnsRecords } from "./exposure-identity.js";
 import { randomUUID } from "node:crypto";
 import { getPlatformProvider } from "./providers.js";
 import { validateTcpEndpoint } from "./tcp-adapter.js";
@@ -9,6 +10,7 @@ export function tcpRequest(project, exposure) {
   const vpnRef = vpn?.service === "tailscale" ? project.state.providerReferences[vpn.id] : undefined;
   return {
     hostname: exposure.hostname,
+    ...(exposure.protocol === "ssh" ? { purpose: "host-ssh" } : {}),
     ip: proxyRef?.ip,
     vmid: proxyRef?.vmid,
     backendIp: exposure.backend?.ip,
@@ -25,10 +27,7 @@ export async function preflightTcpExposure({ project, options, providerAdapters 
   const dns = project.config.managedInventory.platform.dns;
   const proxy = project.config.managedInventory.platform.reverseProxy;
   const dnsRef = project.state.providerReferences[dns?.id];
-  const existing = project.config.managedInventory.services.find((service) => service.exposure?.hostname === options.hostname);
-  if (existing && (existing.exposure.protocol ?? "https") !== "tcp") {
-    throw new Error("Remove the HTTPS exposure before changing its transport to TCP.");
-  }
+  const existing = findExposure(project, options);
   if (dns?.service !== "technitium" || !dnsRef || !["caddy", "traefik"].includes(proxy?.service)) {
     throw new Error("Provision Technitium and Caddy or Traefik before publishing TCP.");
   }
@@ -41,14 +40,16 @@ export async function preflightTcpExposure({ project, options, providerAdapters 
   }
   const exposure = {
     hostname: options.hostname,
-    protocol: "tcp",
+    protocol: options.protocol === "ssh" ? "ssh" : "tcp",
+    ...(options.protocol === "ssh" ? { ssh: { user: options.sshUser ?? existing?.exposure.ssh?.user ?? "root" } } : {}),
     ...(preset !== undefined ? { preset } : {}),
     listenerPort: preset === "smb" ? 445 : options.listenerPort ?? Number(existing?.exposure.listenerPort ?? options.backendPort),
     backend: { ip: options.backendIp, port: options.backendPort },
     tailnet: options.tailnet ?? existing?.exposure.tailnet ?? true
   };
   const request = tcpRequest(project, exposure);
-  exposure.tailnet = request.tailnet;
+  // Keep the access preference even before the optional VPN is provisioned.
+  assertExposureSlot(project, { ...options, listenerPort: request.listenerPort }, existing);
   validateTcpEndpoint(request);
 
   for (const service of project.config.managedInventory.services) {
@@ -70,8 +71,9 @@ export async function preflightTcpExposure({ project, options, providerAdapters 
   };
   const dnsPlugin = getPlatformProvider("technitium");
   const before = await dnsPlugin.inspect(dnsAdapter, dns, dnsContext);
-  if (!existing && before.managed.length) throw new Error(`DNS hostname ${options.hostname} already has unmanaged records.`);
-  if (before.managed.some((record) => record.record && !record.record.includes(` A ${request.ip}`))) {
+  const sharedDns = project.config.managedInventory.services.some((service) => sameHostname(service.exposure?.hostname, options.hostname));
+  if (!existing && !sharedDns && before.managed.length) throw new Error(`DNS hostname ${options.hostname} already has unmanaged records.`);
+  if (conflictingDnsRecords(before.managed, request.ip).length) {
     throw new Error(`DNS records for ${options.hostname} conflict with the TCP listener address.`);
   }
   return { exposure, request, existing, dnsContext };
@@ -84,7 +86,7 @@ export async function publishTcpExposure({ project, options, providerAdapters })
   const adapter = providerAdapters.tcp;
   const dnsAdapter = providerAdapters.technitium;
   const dnsPlugin = getPlatformProvider("technitium");
-  await adapter.publish(request);
+  const forwarding = await adapter.publish(request);
   await dnsAdapter.publishRecord({ ...dnsContext, managedItemId: dns.id, hostname: options.hostname, ip: request.ip });
   const dnsInspection = await dnsPlugin.inspect(dnsAdapter, dns, dnsContext);
   const tcpInspection = await adapter.inspect(request);
@@ -92,7 +94,7 @@ export async function publishTcpExposure({ project, options, providerAdapters })
   const tcpHealth = await adapter.healthCheckExposure(request);
   const managedService = { id: existing?.id ?? `nc_${randomUUID()}`, name: options.name, exposure };
   return {
-    managedService, isUpdate: !!existing, warnings: [], dnsInspection, tcpInspection,
+    managedService, isUpdate: !!existing, warnings: forwarding?.warnings ?? [], dnsInspection, tcpInspection,
     health: { status: dnsHealth?.status === "healthy" && tcpHealth.status === "healthy" ? "healthy" : "unhealthy", dns: dnsHealth, tcp: tcpHealth },
     integrationReferences: { dns: options.hostname, tcp: { ip: request.ip, port: request.listenerPort } }
   };

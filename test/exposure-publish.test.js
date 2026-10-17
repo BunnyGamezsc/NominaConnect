@@ -30,15 +30,15 @@ function tcpFixture({ proxy = "caddy", tailscale = false, conflict = false, reac
     },
     async publish(request) {
       calls.push(["publish", request]);
-      const index = resources.findIndex((item) => item.hostname === request.hostname);
+      const index = resources.findIndex((item) => item.listenerPort === request.listenerPort);
       if (index >= 0) resources.splice(index, 1);
       resources.push({ ...request, id: request.hostname });
     },
     async inspect() { return { resources }; },
     async healthCheckExposure() { return reachable ? { status: "healthy", tcp: "reachable", application: "not-verified" } : { status: "unhealthy", tcp: "unreachable", reason: "TCP backend is unreachable." }; },
-    async remove(request) { calls.push(["remove", request]); resources.splice(resources.findIndex((item) => item.hostname === request.hostname), 1); }
+    async remove(request) { calls.push(["remove", request]); resources.splice(resources.findIndex((item) => item.listenerPort === request.listenerPort), 1); }
   };
-  const adapters = { filesystem, runtime: proxmoxRootRuntime(), providerAdapters: { technitium, [proxy]: web, tcp } };
+  const adapters = { filesystem, runtime: proxmoxRootRuntime(), providerAdapters: /** @type {Record<string, any>} */ ({ technitium, [proxy]: web, tcp }) };
   const publish = (extra = []) => runCli(["exposure", "publish", "--project-dir", "/projects/bunnyhome", "--name", "minecraft", "--hostname", "mc.bunnyhome.test", "--backend-ip", "192.168.1.50", "--backend-port", "25565", ...extra], adapters);
   const config = () => parseProjectConfiguration(filesystem.read("/projects/bunnyhome/nomina.yaml"));
   return { filesystem, adapters, tcp, web, technitium, calls, resources, publish, config };
@@ -117,9 +117,9 @@ test("TCP endpoint conflicts are rejected before DNS mutation or saved-state cha
 test("TCP cannot share a listener by using another hostname and reserves administration ports", async () => {
   const fixture = tcpFixture();
   await fixture.publish(["--protocol", "tcp"]);
-  await assert.rejects(fixture.publish(["--protocol", "tcp", "--hostname", "other.bunnyhome.test"]), /cannot route by hostname/);
+  await assert.rejects(fixture.publish(["--protocol", "tcp", "--name", "other", "--hostname", "other.bunnyhome.test"]), /cannot route by hostname/);
   for (const port of [22, 53, 80, 443, 2019, 5380, 8080, 9000]) {
-    await assert.rejects(fixture.publish(["--protocol", "tcp", "--hostname", "other.bunnyhome.test", "--listener-port", String(port)]), /reserved/);
+    await assert.rejects(fixture.publish(["--protocol", "tcp", "--name", "other", "--hostname", "other.bunnyhome.test", "--listener-port", String(port)]), /reserved/);
   }
   assert.equal(fixture.technitium.publishCalls.length, 1);
 });
@@ -214,7 +214,7 @@ for (const menu of [false, true]) {
     };
     const result = await runCli(["exposure", "publish", "--project-dir", "/projects/bunnyhome"], fixture.adapters);
     assert.equal(result.managedService.exposure.preset, "smb");
-    assert.equal(result.managedService.exposure.tailnet, false);
+    assert.equal(result.managedService.exposure.tailnet, true, "retain VPN opt-in even before a VPN is configured");
     assert.equal(result.managedService.exposure.backend.port, 445);
     assert.equal(result.managedService.exposure.listenerPort, 445);
     assert.ok(questions.some(([question, fallback]) => question === "Backend port" && fallback === "445"));
@@ -852,4 +852,136 @@ test("nomina exposure publish reports unhealthy connected exposure with Traefik"
 
   assert.equal(result.health.status, "unhealthy");
   assert.match(result.stdout, /unhealthy/i);
+});
+
+
+function hostSshFixture(options = {}) {
+  const fixture = tcpFixture(options);
+  const host = { enabled: false, generation: 0, calls: [] };
+  fixture.adapters.providerAdapters.hostSsh = {
+    async suggestAddress() { return "192.168.1.10"; },
+    async publish(request) { host.calls.push(["publish", request]); if (!host.enabled) host.generation += 1; host.enabled = true; return { status: "healthy" }; },
+    async revoke() { host.calls.push(["revoke"]); host.enabled = false; },
+    async replaceKey(request) { host.calls.push(["replace", request]); host.generation += 1; fixture.filesystem.writeFile(request.output, `key-${host.generation}`); },
+    async exportKey({ output }) { if (!host.enabled) throw new Error("disabled"); fixture.filesystem.writeFile(output, `key-${host.generation}`); },
+    async healthCheckExposure() { return { status: host.enabled ? "healthy" : "unhealthy", ssh: "key-login-verified" }; }
+  };
+  const ssh = (extra = []) => runCli(["ssh", "enable", "--project-dir", "/projects/bunnyhome", "--hostname", "pve.bunnyhome.test", ...extra], fixture.adapters);
+  const web = () => fixture.publish(["--protocol", "https", "--name", "proxmox-ui", "--hostname", "pve.bunnyhome.test", "--backend-ip", "192.168.1.10", "--backend-port", "8006", "--backend-tls"]);
+  return { ...fixture, host, ssh, publishWeb: web };
+}
+
+for (const proxy of ["caddy", "traefik"]) {
+  for (const first of ["ssh", "web"]) {
+    test(`${proxy}: ${first} first shares its hostname, and removing SSH preserves web and DNS`, async () => {
+      const fixture = hostSshFixture({ proxy });
+      if (first === "web") await fixture.publishWeb();
+      await fixture.ssh();
+      if (first === "ssh") await fixture.publishWeb();
+      const services = fixture.config().managedInventory.services;
+      assert.equal(services.length, 2);
+      const ssh = services.find((service) => service.exposure.protocol === "ssh");
+      const web = services.find((service) => service.exposure.protocol === "https");
+      assert.equal(ssh.exposure.backend.ip, "192.168.1.10");
+      assert.equal(ssh.exposure.backend.port, "22222");
+      assert.equal(ssh.exposure.listenerPort, "22");
+      assert.equal(ssh.exposure.ssh.user, "root");
+      assert.equal(ssh.exposure.tailnet, true, "VPN access preference survives creation before VPN setup");
+      assert.notEqual(ssh.id, web.id);
+      assert.match((await fixture.ssh()).stdout, /updated/);
+      assert.equal(fixture.host.generation, 1);
+      await assert.rejects(runCli(["service", "remove", "pve.bunnyhome.test", "--project-dir", "/projects/bunnyhome"], fixture.adapters), /Multiple exposures/);
+      await runCli(["ssh", "disable", "--project-dir", "/projects/bunnyhome"], fixture.adapters);
+      assert.equal(fixture.host.enabled, false);
+      assert.equal(fixture.config().managedInventory.services[0].id, web.id);
+      assert.equal(fixture.calls.some(([kind]) => kind === "delete-dns"), false);
+      assert.ok((await fixture.web.inspect()).resources.some((resource) => resource.id === "pve.bunnyhome.test"));
+      await fixture.ssh();
+      assert.equal(fixture.host.generation, 2, "re-enabling requires a fresh key");
+    });
+  }
+}
+
+test("web, SMB and multiple TCP ports share DNS without replacing each other's identities", async () => {
+  const fixture = hostSshFixture();
+  await fixture.publishWeb();
+  await fixture.ssh();
+  await fixture.publish(["--protocol", "smb", "--name", "files", "--hostname", "pve.bunnyhome.test", "--backend-port", "445"]);
+  await fixture.publish(["--protocol", "tcp", "--name", "minecraft", "--hostname", "pve.bunnyhome.test", "--listener-port", "25565"]);
+  const before = fixture.config().managedInventory.services;
+  assert.equal(before.length, 4);
+  await fixture.publish(["--protocol", "tcp", "--name", "minecraft", "--hostname", "pve.bunnyhome.test", "--backend-port", "25566"]);
+  const updated = fixture.config().managedInventory.services;
+  assert.equal(updated.length, 4);
+  assert.deepEqual(new Set(updated.map((service) => service.id)), new Set(before.map((service) => service.id)));
+  await runCli(["service", "remove", "files", "--project-dir", "/projects/bunnyhome"], fixture.adapters);
+  assert.deepEqual(fixture.resources.map((item) => item.listenerPort).sort((a, b) => a - b), [22, 25565]);
+  assert.ok(!fixture.calls.some(([kind]) => kind === "delete-dns"));
+});
+
+test("removing the web exposure first leaves SSH and DNS until the final SSH exposure is removed", async () => {
+  const fixture = hostSshFixture();
+  await fixture.ssh(); await fixture.publishWeb();
+  const unpublish = [];
+  fixture.web.unpublishRoute = (request) => unpublish.push(request);
+  await runCli(["service", "remove", "proxmox-ui", "--project-dir", "/projects/bunnyhome"], fixture.adapters);
+  assert.equal(unpublish.length, 1);
+  assert.equal(fixture.host.enabled, true);
+  assert.ok(!fixture.calls.some(([kind]) => kind === "delete-dns"));
+  await runCli(["ssh", "disable", "--project-dir", "/projects/bunnyhome"], fixture.adapters);
+  assert.equal(fixture.calls.filter(([kind]) => kind === "delete-dns").length, 1);
+  assert.equal(unpublish.length, 1);
+});
+
+test("SSH setup checks DNS and listener conflicts before generating a key", async () => {
+  const fixture = hostSshFixture({ conflict: true });
+  await assert.rejects(fixture.ssh(), /conflict/);
+  assert.equal(fixture.host.calls.length, 0);
+  const dnsConflict = hostSshFixture();
+  await dnsConflict.technitium.publishRecord({ hostname: "pve.bunnyhome.test", ip: "10.0.0.99" });
+  await assert.rejects(dnsConflict.ssh(), /unmanaged records/);
+  assert.equal(dnsConflict.host.calls.length, 0);
+});
+
+test("SSH key download and rotation keep private material out of config, state and output", async () => {
+  const fixture = hostSshFixture();
+  await fixture.ssh(["--ssh-user", "admin"]);
+  assert.equal(fixture.config().managedInventory.services[0].exposure.ssh.user, "admin");
+  const result = await runCli(["ssh", "replace-key", "--output", "/downloads/new-key", "--project-dir", "/projects/bunnyhome"], fixture.adapters);
+  assert.equal(fixture.filesystem.read("/downloads/new-key"), "key-2");
+  assert.ok(!result.stdout.includes("key-2"));
+  assert.match(result.stdout, /ssh admin@pve/);
+  assert.ok(!fixture.filesystem.read("/projects/bunnyhome/nomina.yaml").includes("key-2"));
+  assert.ok(!fixture.filesystem.read("/projects/bunnyhome/.nomina/state.json").includes("key-2"));
+  await assert.rejects(runCli(["ssh", "replace-key", "--output", "relative", "--project-dir", "/projects/bunnyhome"], fixture.adapters), /absolute/);
+  assert.equal(fixture.host.generation, 2);
+});
+
+test("a domain change migrates every exposure sharing a name and retains the host key", async () => {
+  const fixture = hostSshFixture();
+  await fixture.ssh(); await fixture.publishWeb();
+  await fixture.publish(["--protocol", "smb", "--name", "files", "--hostname", "pve.bunnyhome.test", "--backend-port", "445"]);
+  const ids = fixture.config().managedInventory.services.map((service) => service.id);
+  const webRemoved = [];
+  fixture.web.unpublishRoute = (request) => webRemoved.push(request.hostname);
+  await runCli(["domain", "change", "new.internal", "--project-dir", "/projects/bunnyhome"], fixture.adapters);
+  const services = fixture.config().managedInventory.services;
+  assert.deepEqual(services.map((service) => service.id), ids);
+  assert.ok(services.every((service) => service.exposure.hostname === "pve.new.internal"));
+  assert.equal(fixture.host.generation, 1);
+  assert.equal(fixture.host.enabled, true);
+  assert.equal(fixture.calls.filter(([kind]) => kind === "delete-dns").length, 1);
+  assert.deepEqual(webRemoved, ["pve.bunnyhome.test"]);
+  const state = JSON.parse(fixture.filesystem.read("/projects/bunnyhome/.nomina/state.json"));
+  assert.ok(ids.every((id) => state.providerReferences[id].dns === "pve.new.internal"));
+});
+
+test("sharing preserves unrelated DNS records and refuses a conflicting address before web writes", async () => {
+  const fixture = hostSshFixture();
+  await fixture.ssh();
+  const count = fixture.web.publishCalls.length;
+  await fixture.technitium.publishRecord({ hostname: "pve.bunnyhome.test", ip: "10.0.0.99" });
+  await assert.rejects(fixture.publishWeb(), /shared listener address/);
+  assert.equal(fixture.web.publishCalls.length, count);
+  assert.equal(fixture.host.enabled, true);
 });

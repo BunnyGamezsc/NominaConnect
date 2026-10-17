@@ -1,3 +1,5 @@
+import { HOST_SSH_PORT } from "./host-ssh-adapter.js";
+import { findExposure, resolveExposure, sameHostname, isWebExposure, isStreamExposure } from "./exposure-identity.js";
 import { tcpRequest, preflightTcpExposure } from "./tcp-exposure.js";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -85,7 +87,7 @@ async function runCommand(command, rest, adapters) {
   if (command === "--version" || command === "-v" || command === "version") {
     return { stdout: `${VERSION}\n` };
   }
-  if (command === "--help" || command === "help" || command === "-h") return { stdout: "nomina exposure publish --name NAME --protocol https|tcp|smb --hostname HOST --backend-ip IP [--backend-port PORT] [--listener-port PORT] [--tailnet true|false]\nHTTPS is the default. HTTPS and generic TCP require a backend port. TCP listens on the backend port by default; Minecraft Java uses 25565. Raw TCP selects a backend by listener address and port.\nSMB uses client TCP 445, with backend port 445 by default, and supports existing Samba/NAS/VM servers. Windows: \\\\files.bunny.internal\\SHARE. macOS: smb://files.bunny.internal/SHARE. Shares, credentials and permissions stay on the server. Configure Samba hostname aliases; see docs/smb-live-verification.md.\nRemove with: nomina service remove NAME\n" + DOCKER_EXPOSURE_HELP };
+  if (command === "--help" || command === "help" || command === "-h") return { stdout: "nomina ssh enable [--hostname HOST] [--ssh-user root] [--host-ip PRIVATE_IP]\nnomina ssh export --output /absolute/path/nomina_ssh\nnomina ssh replace-key --output /absolute/path/new_nomina_ssh\nnomina ssh disable\nHost SSH uses one generated key, LAN and optional Nomina VPN access; no router port forwarding.\nnomina exposure publish --name NAME --protocol https|tcp|smb|ssh --hostname HOST --backend-ip IP [--backend-port PORT] [--listener-port PORT] [--tailnet true|false]\nHTTPS is the default. HTTPS and generic TCP require a backend port. TCP listens on the backend port by default; Minecraft Java uses 25565. Raw TCP selects a backend by listener address and port.\nSMB uses client TCP 445, with backend port 445 by default, and supports existing Samba/NAS/VM servers. Windows: \\\\files.bunny.internal\\SHARE. macOS: smb://files.bunny.internal/SHARE. Shares, credentials and permissions stay on the server. Configure Samba hostname aliases; see docs/smb-live-verification.md.\nRemove with: nomina service remove NAME\n" + DOCKER_EXPOSURE_HELP };
   switch (command) {
     case "docker":
       return handleDockerCommand(rest, adapters);
@@ -93,6 +95,8 @@ async function runCommand(command, rest, adapters) {
       return initializeProject(parseInitOptions(rest), adapters);
     case "service":
       return handleServiceCommand(rest, adapters);
+    case "ssh":
+      return handleSshCommand(rest, adapters);
     case "exposure":
       return handleExposureCommand(rest, adapters);
     case "domain":
@@ -110,6 +114,32 @@ async function runCommand(command, rest, adapters) {
     default:
       throw new Error("Unknown command. Run nomina for the interactive menu.");
   }
+}
+
+async function handleSshCommand(argumentsList, adapters) {
+  const [action, ...rest] = argumentsList;
+  assertProxmoxShell(adapters.runtime);
+  const parse = optionParser({ flags: [["--output", "output"], ["--name", "name"], ["--hostname", "hostname"], ["--ssh-user", "sshUser"], ["--host-ip", "backendIp"]] });
+  const options = parse(rest);
+  const project = loadProject(adapters.filesystem, options.projectDir ?? findProjectDirectory(adapters.filesystem, adapters.cwd ?? "."));
+  const service = project.config.managedInventory.services.find((item) => item.exposure?.protocol === "ssh");
+  if (action === "enable") {
+    if (options.sshUser === undefined && !service && adapters.prompts?.ask) options.sshUser = await adapters.prompts.ask("Host OS account", "root");
+    if (options.hostname === undefined && !service && adapters.prompts?.ask) options.hostname = await adapters.prompts.ask("Full hostname", `${project.config.proxmox.node}.${project.config.baseLocalDomain}`);
+    return publishExposure({ ...options, protocol: "ssh", name: options.name ?? service?.name ?? "host-ssh",
+      hostname: options.hostname ?? service?.exposure.hostname ?? `${project.config.proxmox.node}.${project.config.baseLocalDomain}` }, adapters);
+  }
+  if (!["export", "replace-key", "disable"].includes(action)) throw new Error("Use nomina ssh enable, export, replace-key or disable.");
+  if (!service) throw new Error("Host SSH is not enabled. Run nomina ssh enable first.");
+  if (action === "disable") return removeService(service.id, ["--project-dir", project.projectDirectory], adapters);
+  let output = options.output;
+  if (output === undefined && adapters.prompts?.ask) output = await adapters.prompts.ask("Save private key to absolute path", undefined);
+  if (typeof output !== "string" || !path.isAbsolute(output)) throw new Error("Choose an absolute --output path for the private key.");
+  const hostSsh = adapters.providerAdapters?.hostSsh;
+  if (!hostSsh?.exportKey) throw new Error("Host SSH adapter is unavailable.");
+  if (action === "replace-key") await hostSsh.replaceKey({ ip: service.exposure.backend.ip, user: service.exposure.ssh.user, output });
+  else await hostSsh.exportKey({ output });
+  return { stdout: `SSH private key saved to ${output} (mode 0600). Transfer it securely to your computer.\nInstall it as ~/.ssh/nomina_ssh, then add to ~/.ssh/config:\nHost ${service.exposure.hostname}\n  User ${service.exposure.ssh.user}\n  IdentityFile ~/.ssh/nomina_ssh\n  IdentitiesOnly yes\nConnect with: ssh ${service.exposure.ssh.user}@${service.exposure.hostname}\n${action === "replace-key" ? "The previous key is revoked and previous managed sessions were disconnected.\n" : ""}`, output };
 }
 
 async function handleServiceCommand(argumentsList, adapters) {
@@ -302,9 +332,7 @@ async function changeConnectionSecret(options, adapters) {
         label = matchedPlatform[1].service;
         reference = project.config.connectionSecretReferences[serviceId];
       } else {
-        const svc = (project.config.managedInventory.services ?? []).find(
-          (s) => s.name === serviceId || s.id === serviceId || s.exposure?.hostname === serviceId
-        );
+        const svc = resolveExposure(project.config.managedInventory.services ?? [], serviceId);
         if (svc) {
           serviceId = svc.id;
           label = svc.name;
@@ -878,7 +906,7 @@ async function syncTailscaleTailnet(project, vpnReference, providerAdapter, adap
     }
   };
   // Install opt-out guards before sending tailnet web traffic to the proxy.
-  const republishedReferences = await republishExposures(workingProject, project.config.managedInventory.services.filter((service) => service.exposure?.protocol !== "tcp"), adapters.providerAdapters,
+  const republishedReferences = await republishExposures(workingProject, project.config.managedInventory.services.filter((service) => isWebExposure(service.exposure)), adapters.providerAdapters,
     { verifyTailnetGuards: true });
   if (project.config.managedInventory.platform.reverseProxy.service === "caddy") {
     await persistCaddyLiveConfig(adapters.proxmox, project.state.providerReferences[project.config.managedInventory.platform.reverseProxy.id]?.vmid);
@@ -891,7 +919,7 @@ async function syncTailscaleTailnet(project, vpnReference, providerAdapter, adap
     adminSecretReference,
     saveDnsSnapshot: (snapshot, gatewayIp, options) => saveTailnetDnsSnapshot(project, adapters, snapshot, gatewayIp, options)
   });
-  Object.assign(republishedReferences, await republishExposures(workingProject, project.config.managedInventory.services.filter((service) => service.exposure?.protocol === "tcp"), adapters.providerAdapters, { verifyTailnetGuards: true }));
+  Object.assign(republishedReferences, await republishExposures(workingProject, project.config.managedInventory.services.filter((service) => isStreamExposure(service.exposure)), adapters.providerAdapters, { verifyTailnetGuards: true }));
   return {
     references: republishedReferences,
     warnings: tailnetResult?.warnings ?? []
@@ -1145,9 +1173,7 @@ async function removeService(serviceName, rawOptions, adapters) {
     };
   }
 
-  const matchedService = (project.config.managedInventory.services ?? []).find(
-    (s) => s.id === resolvedServiceName || s.name === resolvedServiceName || s.exposure?.hostname === resolvedServiceName
-  );
+  const matchedService = resolveExposure(project.config.managedInventory.services ?? [], resolvedServiceName);
 
   if (matchedService) {
     const hostname = matchedService.exposure?.hostname;
@@ -1156,11 +1182,16 @@ async function removeService(serviceName, rawOptions, adapters) {
       const dnsRef = project.state.providerReferences[dnsService?.id];
       const proxyService = project.config.managedInventory.platform.reverseProxy;
       const proxyRef = project.state.providerReferences[proxyService?.id];
-      if (matchedService.exposure.protocol === "tcp") {
+      if (matchedService.exposure.protocol === "ssh") {
+        if (!providerAdapters.hostSsh?.revoke) throw new Error("Host SSH adapter is unavailable; key revocation is required before removal.");
+        await providerAdapters.hostSsh.revoke();
+      }
+      if (isStreamExposure(matchedService.exposure)) {
         if (!providerAdapters.tcp?.remove) throw new Error("TCP forwarding adapter is unavailable.");
         await providerAdapters.tcp.remove(tcpRequest(project, matchedService.exposure));
       }
-      if (providerAdapters.technitium?.deleteRecord) {
+      const sharedDns = project.config.managedInventory.services.some((service) => service.id !== matchedService.id && sameHostname(service.exposure?.hostname, hostname));
+      if (!sharedDns && providerAdapters.technitium?.deleteRecord) {
         await providerAdapters.technitium.deleteRecord({
           hostname,
           zone: project.config.baseLocalDomain,
@@ -1169,7 +1200,7 @@ async function removeService(serviceName, rawOptions, adapters) {
           connectionSecretReference: project.config.connectionSecretReferences[dnsService?.id]
         });
       }
-      if (matchedService.exposure.protocol !== "tcp" && proxyService && providerAdapters[proxyService.service]?.unpublishRoute) {
+      if (isWebExposure(matchedService.exposure) && proxyService && providerAdapters[proxyService.service]?.unpublishRoute) {
         await providerAdapters[proxyService.service].unpublishRoute({
           hostname,
           ip: proxyRef?.ip,
@@ -1177,7 +1208,7 @@ async function removeService(serviceName, rawOptions, adapters) {
           endpoint: proxyEndpointFor(proxyService.service, proxyRef?.ip)
         });
       }
-      if (matchedService.exposure.protocol !== "tcp" && proxyService?.service === "caddy") {
+      if (isWebExposure(matchedService.exposure) && proxyService?.service === "caddy") {
         persistCaddyLiveConfig(proxmox, project.state.providerReferences[proxyService.id]?.vmid);
       }
     }
@@ -1578,6 +1609,8 @@ async function republishExposures(workingProject, services, providerAdapters, { 
       project: workingProject,
       options: {
         name: service.name,
+        serviceId: service.id,
+        sshUser: service.exposure.ssh?.user,
         protocol: service.exposure.protocol ?? "https",
         listenerPort: service.exposure.listenerPort !== undefined ? Number(service.exposure.listenerPort) : undefined,
         hostname: service.exposure.hostname,
@@ -1593,6 +1626,10 @@ async function republishExposures(workingProject, services, providerAdapters, { 
     if (verifyTailnetGuards && service.exposure.tailnet === false &&
         ("tcp" in result.health ? result.health.tcp : result.health.reverseProxy)?.status !== "healthy") {
       throw new Error(`The reverse proxy could not verify tailnet denial for ${service.exposure.hostname}; routes were not advertised.`);
+    }
+    if (service.exposure.protocol === "ssh") {
+      const ssh = await providerAdapters.hostSsh?.healthCheckExposure?.({ ip: service.exposure.backend.ip, user: service.exposure.ssh.user });
+      if (ssh?.status !== "healthy") throw new Error(ssh?.reason ?? "Host SSH key authentication could not be verified during reconciliation.");
     }
     references[result.managedService.id] = result.integrationReferences;
   }
@@ -1664,18 +1701,21 @@ async function changeBaseDomain(options, adapters) {
     (service) => service.exposure?.hostname !== undefined
   );
 
+  const removedDns = new Set();
   for (const service of exposures) {
     const oldHost = service.exposure.hostname;
     try {
-      if (technitiumAdapter.deleteRecord !== undefined) {
+      if (!removedDns.has(oldHost.toLowerCase()) && technitiumAdapter.deleteRecord !== undefined) {
         await technitiumAdapter.deleteRecord({
           hostname: oldHost,
+          zone: oldDomain,
           ip: proxyRef?.ip,
           endpoint: dnsRef?.ip ? `http://${dnsRef.ip}:5380` : undefined,
           connectionSecretReference: project.config.connectionSecretReferences[dnsService.id]
         });
+        removedDns.add(oldHost.toLowerCase());
       }
-      if (service.exposure.protocol === "tcp") {
+      if (isStreamExposure(service.exposure)) {
         await providerAdapters.tcp.remove(tcpRequest(project, service.exposure));
       } else await proxyAdapter.unpublishRoute({
         hostname: oldHost,
@@ -1725,7 +1765,8 @@ async function changeBaseDomain(options, adapters) {
     await ensureCaddyTrustsStepCa(workingProject, adapters);
   }
 
-  await republishExposures(workingProject, renamedServices, providerAdapters);
+  const republishedReferences = await republishExposures(workingProject, renamedServices, providerAdapters);
+  Object.assign(state.providerReferences, republishedReferences);
 
   if (proxyService.service === "caddy") {
     persistCaddyLiveConfig(proxmox, proxyRef?.vmid);
@@ -1752,6 +1793,8 @@ async function changeBaseDomain(options, adapters) {
   }
 
   writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(workingProject.config));
+  writeAtomically(filesystem, project.statePath, `${JSON.stringify(state, null, 2)}\n`);
+  filesystem.chmod(project.statePath, 0o600);
 
   return {
     stdout: `Local domain changed to ${newDomain}. Migrated ${exposures.length} exposure(s). Health checks passed per exposure.${warnings.length > 0 ? `\nWarning: ${warnings.join("\nWarning: ")}` : ""}\n`,
@@ -1892,6 +1935,10 @@ async function uninstallEverything(options, adapters) {
 
   const destroyed = [];
   const failed = [];
+  if (project?.config.managedInventory.services.some((service) => service.exposure?.protocol === "ssh") && !adapters.providerAdapters?.hostSsh?.uninstall) {
+    throw new Error("Host SSH cleanup is unavailable; uninstall stopped before deleting recovery state.");
+  }
+  await adapters.providerAdapters?.hostSsh?.uninstall?.();
 
   // Tailnet DNS is admin-console state, not LXC state, so this is the last
   // moment it can be put back: the recovery snapshot lives in the state file
@@ -1992,10 +2039,12 @@ async function publishExposure(options, adapters) {
   assertProxmoxShell(adapters.runtime);
 
   const project = loadProject(filesystem, options.projectDir ?? findProjectDirectory(filesystem, adapters.cwd ?? "."));
+  if (options.protocol === "ssh" && options.source === "docker") throw new Error("Host SSH only targets the machine running Nomina; choose Manual entry.");
   const prepared = await prepareDockerExposure(project, options, adapters);
   if (prepared.cancelled) return { stdout: prepared.stdout, cancelled: true };
   const resolvedOptions = prepared.options;
-  const storedExposure = project.config.managedInventory.services.find((service) => service.exposure?.hostname === resolvedOptions.hostname)?.exposure;
+  if (resolvedOptions.protocol === "ssh" && prepared.selection) throw new Error("Host SSH only targets the machine running Nomina; choose Manual entry.");
+  const storedExposure = findExposure(project, resolvedOptions)?.exposure;
   if (resolvedOptions.protocol === "smb" || (resolvedOptions.protocol === "tcp" && storedExposure?.preset === "smb")) {
     resolvedOptions.protocol = "tcp";
     resolvedOptions.preset = "smb";
@@ -2005,6 +2054,20 @@ async function publishExposure(options, adapters) {
     }
     resolvedOptions.listenerPort = 445;
   }
+  if (resolvedOptions.protocol === "ssh") {
+    const hostSsh = providerAdapters.hostSsh;
+    if (!hostSsh?.publish) throw new Error("Host SSH adapter is unavailable.");
+    if (resolvedOptions.redirectTo || resolvedOptions.backendTls || resolvedOptions.preset ||
+        (resolvedOptions.listenerPort !== undefined && resolvedOptions.listenerPort !== 22) ||
+        (resolvedOptions.backendPort !== undefined && resolvedOptions.backendPort !== HOST_SSH_PORT)) throw new Error("Host SSH uses client port 22 and its dedicated host service; backend/redirect overrides are unsupported.");
+    const proxy = project.config.managedInventory.platform.reverseProxy;
+    const proxyIp = project.state.providerReferences[proxy?.id]?.ip;
+    resolvedOptions.backendIp ??= storedExposure?.backend?.ip ?? await hostSsh.suggestAddress(proxyIp);
+    resolvedOptions.sshUser ??= storedExposure?.ssh?.user ?? "root";
+    resolvedOptions.backendPort = HOST_SSH_PORT;
+    resolvedOptions.listenerPort = 22;
+    resolvedOptions.tailnet ??= storedExposure?.tailnet ?? true;
+  }
   validateExposureOptions(resolvedOptions);
 
   let dockerReview = "";
@@ -2012,7 +2075,7 @@ async function publishExposure(options, adapters) {
   let reviewOnly = options.reviewOnly === true;
   if (prepared.selection) {
     validateDockerExposure(project, resolvedOptions);
-    resolvedOptions.tailnet = project.config.managedInventory.platform.vpn?.service === "tailscale" && (resolvedOptions.tailnet ?? true);
+    resolvedOptions.tailnet ??= true;
     dockerReview = (prepared.discovery?.truncated ? "Warning: Docker discovery is truncated or incomplete; only observed endpoints were offered.\n" : "")
       + (prepared.discovery?.diagnostics ?? []).map((diagnostic) => `Warning: ${diagnostic}\n`).join("")
       + (prepared.advisory ?? "") + formatDockerExposureReview(resolvedOptions, prepared.selection);
@@ -2039,13 +2102,31 @@ async function publishExposure(options, adapters) {
     }
   }
 
-  if (resolvedOptions.protocol !== "tcp") await ensureCaddyTrustsStepCa(project, adapters);
+  if (resolvedOptions.protocol === "ssh") {
+    // Check forwarding/DNS conflicts before creating any host credentials or listener.
+    await preflightTcpExposure({ project, options: resolvedOptions, providerAdapters });
+    await providerAdapters.hostSsh.publish({ ip: resolvedOptions.backendIp, user: resolvedOptions.sshUser });
+  }
+  if (resolvedOptions.protocol === "https") await ensureCaddyTrustsStepCa(project, adapters);
 
-  const result = await publishManagedExposure({
-    project,
-    options: resolvedOptions,
-    providerAdapters
-  });
+  let result;
+  try {
+    result = await publishManagedExposure({ project, options: resolvedOptions, providerAdapters });
+  } catch (error) {
+    if (resolvedOptions.protocol === "ssh" && !storedExposure) {
+      try { await providerAdapters.hostSsh.revoke(); }
+      catch (cleanup) { throw new Error(`${error.message}; SSH key revocation failed: ${cleanup.message}`); }
+    }
+    throw error;
+  }
+  if (resolvedOptions.protocol === "ssh") {
+    const ssh = await providerAdapters.hostSsh.healthCheckExposure({ ip: resolvedOptions.backendIp, user: resolvedOptions.sshUser });
+    Object.assign(result.health, { ssh });
+    if (ssh.status !== "healthy") {
+      result.health.status = "unhealthy";
+      result.warnings.push(ssh.reason ?? "Host SSH authentication could not be verified.");
+    }
+  }
 
   const updatedConfig = upsertManagedExposure(project.config, result.managedService);
   const updatedState = {
@@ -2061,7 +2142,7 @@ async function publishExposure(options, adapters) {
   filesystem.chmod(project.statePath, 0o600);
 
   const proxyServiceForPersistence = project.config.managedInventory.platform.reverseProxy;
-  if (result.managedService.exposure.protocol !== "tcp" && proxyServiceForPersistence?.service === "caddy") {
+  if (isWebExposure(result.managedService.exposure) && proxyServiceForPersistence?.service === "caddy") {
     persistCaddyLiveConfig(adapters.proxmox, project.state.providerReferences[proxyServiceForPersistence.id]?.vmid);
   }
 
@@ -2078,7 +2159,9 @@ async function publishExposure(options, adapters) {
   ];
   const warningLines = warnings.map((warning) => `Warning: ${warning}\n`).join("");
   const smb = "preset" in result.managedService.exposure && result.managedService.exposure.preset === "smb";
-  const clientInstructions = smb
+  const clientInstructions = resolvedOptions.protocol === "ssh"
+    ? `Download your key with: nomina ssh export --output /absolute/path/nomina_ssh\nAfter installing the key once: ssh ${resolvedOptions.sshUser}@${resolvedOptions.hostname}\n`
+    : smb
     ? `Windows: \\\\${resolvedOptions.hostname}\\SHARE. macOS: smb://${resolvedOptions.hostname}/SHARE.\nShares, credentials and permissions stay on the SMB server. Configure its hostname alias for ${resolvedOptions.hostname}; see docs/smb-live-verification.md.\n`
     : "";
   const destination = resolvedOptions.redirectTo !== undefined && resolvedOptions.redirectTo !== ""
@@ -2188,7 +2271,7 @@ const parseExposurePublishOptions = optionParser({
   flags: [
     ["--source", "source"], ["--docker-binding", "dockerBinding"], ["--docker-application", "dockerApplication"], ["--docker-endpoint", "dockerEndpoint"],
     ["--yes", "yes"], ["--review-only", "reviewOnly"],
-    ["--name", "name"], ["--hostname", "hostname"], ["--protocol", "protocol"], ["--listener-port", "listenerPort"], ["--backend-ip", "backendIp"],
+    ["--ssh-user", "sshUser"], ["--name", "name"], ["--hostname", "hostname"], ["--protocol", "protocol"], ["--listener-port", "listenerPort"], ["--backend-ip", "backendIp"],
     ["--backend-port", "backendPort"], ["--backend-tls", "backendTls"],
     ["--redirect-to", "redirectTo"], ["--redirect-code", "redirectCode"],
     ["--tailnet", "tailnet"]
@@ -2230,7 +2313,7 @@ const parseServiceRecheckOptions = optionParser({
 
 function validateExposureOptions(options) {
   options.protocol ??= "https";
-  if (!["https", "tcp"].includes(options.protocol)) throw new Error("Exposure protocol must be https, tcp or smb.");
+  if (!["https", "tcp", "ssh"].includes(options.protocol)) throw new Error("Exposure protocol must be https, tcp, smb or ssh.");
   if (options.protocol === "tcp" && (options.redirectTo || options.backendTls)) throw new Error("TCP does not accept HTTPS backend TLS or URL redirect options.");
   if (options.protocol === "https" && options.listenerPort !== undefined) throw new Error("Listener port is only available for TCP exposures.");
   for (const field of ["name", "hostname"]) {

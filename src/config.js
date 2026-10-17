@@ -215,7 +215,7 @@ function readServiceList(lines, startIndex, parentIndent) {
 
 export function upsertManagedExposure(config, managedService) {
   const services = config.managedInventory.services.filter(
-    (service) => service.exposure?.hostname !== managedService.exposure.hostname
+    (service) => service.id !== managedService.id
   );
   return {
     ...config,
@@ -356,6 +356,9 @@ function appendManagedServices(lines, services) {
       );
       if (service.exposure.listenerPort !== undefined) {
         lines.push(`        listenerPort: ${service.exposure.listenerPort}`);
+      }
+      if (service.exposure.ssh !== undefined) {
+        lines.push("        ssh:", `          user: ${yamlScalar(service.exposure.ssh.user)}`);
       }
       if (service.exposure.preset !== undefined) {
         lines.push(`        preset: ${yamlScalar(service.exposure.preset)}`);

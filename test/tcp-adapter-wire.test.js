@@ -6,7 +6,7 @@ import path from "node:path";
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createServer, createConnection } from "node:net";
-import { createTcpAdapter, tcpTailnetScript, tcpUnits } from "../src/tcp-adapter.js";
+import { createTcpAdapter, tcpTailnetScript, tcpUnits, validateTcpEndpoint } from "../src/tcp-adapter.js";
 import { firewallInstallScript } from "../src/tailscale-tailnet.js";
 
 const execute = promisify(execFile);
@@ -124,6 +124,26 @@ test("TCP generated scripts persist forwarding, update backend and scope tailnet
   assert.equal((await adapter.inspect(other)).resources.length, 1);
   assert.deepEqual(lab.state(122).rules["nat:UNMANAGED"], gateway.rules["nat:UNMANAGED"]);
   assert.equal(fs.existsSync(path.join(lab.locations(121).config, "systemd/system/nomina-tcp-25565.socket")), false);
+});
+
+test("only managed host SSH can use port 22, preserving other private forwarding on removal", async (t) => {
+  const lab = scriptLab(t);
+  const adapter = createTcpAdapter({ exec: lab.exec });
+  const ssh = { ...request, purpose: "host-ssh", listenerPort: 22, backendPort: 22222 };
+  assert.throws(() => validateTcpEndpoint({ ...ssh, purpose: undefined }), /reserved/);
+  assert.throws(() => validateTcpEndpoint({ ...ssh, listenerPort: 443 }), /client port 22/);
+  await adapter.preflight(ssh); await adapter.publish(ssh);
+  const minecraft = { ...request, hostname: ssh.hostname };
+  await adapter.preflight(minecraft); await adapter.publish(minecraft);
+  assert.equal((await adapter.inspect(ssh)).resources.length, 2);
+  assert.match(fs.readFileSync(path.join(lab.locations(121).config, "systemd/system/nomina-tcp-22.service"), "utf8"), /192.168.1.50:22222/);
+  const rules = lab.state(122).rules;
+  assert.ok(rules["nat:NOMINA_TCP_DNAT"].some((line) => line.includes("--to-destination 192.168.1.86:22")));
+  await adapter.remove(ssh);
+  await adapter.remove(ssh); // A failed later DNS/state write can safely retry removal.
+  assert.equal((await adapter.inspect(minecraft)).resources[0].listenerPort, 25565);
+  assert.ok(!lab.state(122).rules["nat:NOMINA_TCP_DNAT"].some((line) => /:22$/.test(line)));
+  assert.ok(lab.state(122).rules["nat:NOMINA_TCP_DNAT"].some((line) => /:25565$/.test(line)));
 });
 
 test("TCP preflight rejects process listeners, unmanaged forwarding and edited units without writes", async (t) => {

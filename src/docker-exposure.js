@@ -1,3 +1,4 @@
+import { assertExposureSlot, sameHostname, conflictingDnsRecords } from "./exposure-identity.js";
 import { isIP } from "node:net";
 import { createDockerAdapter } from "./docker-adapter.js";
 import { dockerEndpointId, usableAddress } from "./docker-discovery.js";
@@ -116,7 +117,12 @@ export async function prepareDockerExposure(project, options, adapters) {
 export function validateDockerExposure(project, options) {
   const hostname = options.hostname;
   if (typeof hostname !== "string" || hostname.length > 253 || !hostname.split(".").every((part) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(part))) throw new Error("Invalid exposure hostname. Use valid DNS labels of at most 63 characters.");
-  if (project.config.managedInventory.services.some((service) => service.exposure?.hostname?.toLowerCase() === hostname.toLowerCase())) throw new Error(`Exposure ${hostname} already exists. Choose an additional hostname; Docker selection never overwrites an existing exposure. Use Edit an exposure to update it.`);
+  const services = project.config.managedInventory.services;
+  const sameTransport = services.some((service) => sameHostname(service.exposure?.hostname, hostname)
+    && (service.exposure.protocol ?? "https") === options.protocol
+    && (options.protocol === "https" || Number(service.exposure.listenerPort ?? service.exposure.backend?.port) === Number(options.listenerPort ?? options.backendPort)));
+  if (sameTransport) throw new Error(`Exposure ${hostname} already exists. Docker selection never overwrites an existing exposure. Use Edit an exposure to update it.`);
+  assertExposureSlot(project, { ...options, listenerPort: options.listenerPort ?? options.backendPort });
   if (!usableAddress(options.backendIp)) throw new Error("Backend address is wildcard, loopback, multicast, link-local or unsupported. Enter an explicit reachable address or use Manual entry.");
 }
 
@@ -140,7 +146,9 @@ export async function verifyDockerExposure(selection, docker, options, project, 
   const dnsAdapter = adapters.providerAdapters?.technitium;
   if (!dnsRef?.ip || !dnsAdapter?.inspect) throw new Error("DNS conflict inspection is unavailable; no exposure was published.");
   const observedDns = await getPlatformProvider("technitium").inspect(dnsAdapter, dns, { providerReferences: [options.hostname], zone: project.config.baseLocalDomain, ip: dnsRef.ip, endpoint: `http://${dnsRef.ip}:5380`, connectionSecretReference: project.config.connectionSecretReferences[dns.id] });
-  if ([...observedDns.managed, ...observedDns.unmanaged].some((record) => record.id?.toLowerCase() === options.hostname.toLowerCase())) throw new Error(`DNS hostname ${options.hostname} already has records. Choose a distinct hostname; no exposure was published.`);
+  const shared = project.config.managedInventory.services.some((service) => sameHostname(service.exposure?.hostname, options.hostname));
+  const records = [...observedDns.managed, ...observedDns.unmanaged].filter((record) => sameHostname(record.id, options.hostname));
+  if (records.length && (!shared || conflictingDnsRecords(records, reference.ip).length)) throw new Error(`DNS hostname ${options.hostname} already has conflicting records. Choose a distinct hostname; no exposure was published.`);
   if (options.protocol === "https") {
     const proxyAdapter = adapters.providerAdapters?.[proxy?.service];
     if (!proxyAdapter?.inspect) throw new Error("Proxy route conflict inspection is unavailable; no exposure was published.");

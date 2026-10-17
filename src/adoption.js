@@ -1,3 +1,4 @@
+import { isWebExposure, isStreamExposure } from "./exposure-identity.js";
 import { tcpRequest } from "./tcp-exposure.js";
 import { getPlatformProvider } from "./providers.js";
 
@@ -411,7 +412,7 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
     const providerReferences = platformKey === "dns"
       ? [project.config.baseLocalDomain, ...(project.config.managedInventory.services ?? []).map((s) => s.exposure?.hostname).filter(Boolean)]
       : platformKey === "reverseProxy" || platformKey === "certificateAuthority"
-      ? (project.config.managedInventory.services ?? []).map((s) => s.exposure?.hostname).filter(Boolean)
+      ? (project.config.managedInventory.services ?? []).filter((service) => isWebExposure(service.exposure)).map((s) => s.exposure.hostname)
       // A VPN's managed resource is the node NominaConnect enrolled. Its
       // provider-native locator is the only way to tell it apart from the
       // unmanaged peers the same client reports.
@@ -561,22 +562,28 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
       changes.push(...dnsAdoption.changes);
       warnings.push(...dnsAdoption.warnings);
     }
-    if (service.exposure.protocol === "tcp") {
+    if (isStreamExposure(service.exposure)) {
       try {
         const request = tcpRequest(project, service.exposure);
         const tcp = providerAdapters["tcp"];
         if (!tcp?.inspect) throw new Error("TCP forwarding adapter is unavailable");
         const inspection = await withBoundedRetry(() => tcp.inspect(request), retryOptions);
-        const matches = inspection.resources.filter((resource) => resource.hostname === hostname);
+        const matches = inspection.resources.filter((resource) => resource.hostname === hostname && Number(resource.listenerPort) === request.listenerPort);
         if (matches.length !== 1) throw new Error("TCP forwarding is missing or ambiguous");
         const observed = matches[0];
         if (observed.ip !== request.ip || Number(observed.listenerPort) !== request.listenerPort) {
           throw new Error("TCP listener differs from its recorded endpoint; managed configuration was preserved");
         }
-        const after = { ...service.exposure, backend: { ip: observed.backendIp, port: observed.backendPort }, tailnet: observed.tailnet };
-        const changed = observed.backendIp !== request.backendIp || Number(observed.backendPort) !== request.backendPort || observed.tailnet !== request.tailnet;
+        if (service.exposure.protocol === "ssh" && (observed.backendIp !== request.backendIp || Number(observed.backendPort) !== request.backendPort)) throw new Error("Managed host SSH target changed; refusing to adopt a different host");
+        const observedTailnet = request.gatewayVmid ? observed.tailnet : service.exposure.tailnet;
+        const after = { ...service.exposure, backend: { ip: observed.backendIp, port: observed.backendPort }, tailnet: observedTailnet };
+        const changed = observed.backendIp !== request.backendIp || Number(observed.backendPort) !== request.backendPort || observedTailnet !== service.exposure.tailnet;
         const health = await tcp.healthCheckExposure({ ...request, backendIp: observed.backendIp, backendPort: Number(observed.backendPort), tailnet: observed.tailnet });
         if (health.status !== "healthy") warnings.push({ serviceId: service.id, serviceName: service.name, platformKey: "tcp", message: health.reason ?? "TCP transport health check failed; application access is not verified." });
+        if (service.exposure.protocol === "ssh") {
+          const sshHealth = await providerAdapters["hostSsh"]?.healthCheckExposure?.({ ip: request.backendIp, user: service.exposure.ssh?.user });
+          if (sshHealth?.status !== "healthy") warnings.push({ serviceId: service.id, serviceName: service.name, platformKey: "ssh", message: sshHealth?.reason ?? "Host SSH authentication could not be verified." });
+        }
         if (changed) changes.push({ kind: "exposure-changed", serviceId: service.id, serviceName: service.name, before: service.exposure, after, fields: ["backend", "tailnet"], health, verified: health.status === "healthy", timestamp: new Date().toISOString() });
       } catch (error) {
         warnings.push({ serviceId: service.id, serviceName: service.name, platformKey: "tcp", message: `Failed to inspect TCP exposure for ${hostname}: ${error.message}.` });

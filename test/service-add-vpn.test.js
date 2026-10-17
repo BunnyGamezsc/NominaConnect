@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { loadProject, serializeProjectConfiguration } from "../src/config.js";
 
 import {
   runCli
@@ -778,6 +779,44 @@ function seedProvisionedTailnet(filesystem) {
 }
 
 const SELF_ENROLLED = [{ id: "node-self", self: true, locator: { id: "node-self" }, tailscaleIps: ["100.64.0.5"] }];
+
+test("provisioning Nomina VPN later republishes shared host SSH after gateway setup without replacing its key", async () => {
+  const filesystem = new FakeFilesystem();
+  seedProvisionedTailnet(filesystem);
+  const project = loadProject(filesystem, "/projects/bunnyhome");
+  const hostname = "pve.bunnyhome.test";
+  project.config.managedInventory.services = [
+    { id: "nc_web", name: "proxmox-ui", exposure: { hostname, protocol: "https", backend: { ip: "10.0.0.10", port: 8006, tls: true }, tailnet: true } },
+    { id: "nc_ssh", name: "host-ssh", exposure: { hostname, protocol: "ssh", listenerPort: 22, backend: { ip: "10.0.0.10", port: 22222 }, ssh: { user: "root" }, tailnet: true } },
+    { id: "nc_smb", name: "files", exposure: { hostname, protocol: "tcp", preset: "smb", listenerPort: 445, backend: { ip: "10.0.0.20", port: 445 }, tailnet: true } }
+  ];
+  filesystem.writeFile(project.configPath, serializeProjectConfiguration(project.config));
+  const events = [];
+  const records = [{ id: hostname, record: `${hostname} A 10.0.0.54` }];
+  const requests = [];
+  const providerAdapters = {
+    tailscale: { ...createTailscaleAdapter({ resources: SELF_ENROLLED }), async configureTailnet() { events.push("gateway"); } },
+    technitium: { inspect: () => ({ resources: records }), publishRecord() {}, healthCheckExposure: () => ({ status: "healthy" }) },
+    caddy: { inspect: () => ({ resources: [] }), publishRoute() { events.push("web"); }, healthCheckExposure: () => ({ status: "healthy" }) },
+    hostSsh: { publish() { throw new Error("VPN provisioning must retain the existing host SSH key"); }, healthCheckExposure: () => ({ status: "healthy" }) },
+    tcp: {
+      preflight(request) { assert.ok(events.includes("gateway")); requests.push(request); },
+      publish() { events.push("tcp"); },
+      inspect: () => ({ resources: [] }), healthCheckExposure: () => ({ status: "healthy" })
+    }
+  };
+  await runCli(["service", "add", "tailscale", "--project-dir", project.projectDirectory, "--ip", "10.0.0.60"], {
+    filesystem, runtime: proxmoxRootRuntime(), proxmox: createProxmoxAdapter(), providerAdapters, secretStore: { has: () => true }
+  });
+  assert.deepEqual(events, ["web", "gateway", "tcp", "tcp"]);
+  assert.deepEqual(requests.map((request) => request.listenerPort), [22, 445]);
+  assert.equal(requests[0].purpose, "host-ssh");
+  assert.equal(requests[0].gatewayVmid, 130);
+  assert.equal(requests[0].tailnet, true);
+  const after = loadProject(filesystem, project.projectDirectory);
+  assert.deepEqual(after.state.providerReferences.nc_ssh.tcp, { ip: "10.0.0.54", port: 22 });
+  assert.equal(after.config.managedInventory.services.length, 3);
+});
 
 test("a failed tailnet setup keeps the enrolled LXC recorded so it can be taken back", async () => {
   const filesystem = new FakeFilesystem();

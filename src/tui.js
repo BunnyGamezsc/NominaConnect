@@ -1,3 +1,4 @@
+import { findExposure, resolveExposure, isWebExposure } from "./exposure-identity.js";
 import * as clack from "@clack/prompts";
 import { INITIAL_PLATFORM_CATALOG } from "./catalog.js";
 import { canShowCaTrustGuide } from "./ca-guide.js";
@@ -97,18 +98,20 @@ export function canRecheckProvisioning(project) {
   return false;
 }
 
-export function canPublishExposure(project) {
+function canPublishStreamExposure(project) {
   const dnsService = project?.config.managedInventory.platform.dns;
   const proxyService = project?.config.managedInventory.platform.reverseProxy;
-  const caService = project?.config.managedInventory.platform.certificateAuthority;
-  const caProvisioned = caService === null || caService === undefined
-    || project.state.providerReferences[caService.id] !== undefined;
-
   return dnsService?.service === "technitium"
     && (proxyService?.service === "caddy" || proxyService?.service === "traefik")
     && project.state.providerReferences[dnsService.id] !== undefined
-    && project.state.providerReferences[proxyService.id] !== undefined
-    && caProvisioned;
+    && project.state.providerReferences[proxyService.id] !== undefined;
+}
+
+export function canPublishExposure(project) {
+  const caService = project?.config.managedInventory.platform.certificateAuthority;
+  const caProvisioned = caService === null || caService === undefined
+    || project.state.providerReferences[caService.id] !== undefined;
+  return canPublishStreamExposure(project) && caProvisioned;
 }
 
 export function hasExposures(project) {
@@ -168,6 +171,7 @@ const MENU_ENTRIES = Object.freeze([
     hint: "redirect plain :80 hits to HTTPS (308)",
     when: canToggleHttpRedirect
   },
+  { value: "enable-host-ssh", label: "Enable host SSH", hint: "key-only access over LAN and Nomina VPN", when: (project) => canPublishStreamExposure(project) && !(project.config.managedInventory.services ?? []).some((service) => service.exposure?.protocol === "ssh") },
   { value: "view-ca-guide", label: "View step-ca trust guide", hint: "install CA root on devices", when: canShowCaTrustGuide },
   { value: "export-ca-cert", label: "Export step-ca root certificate", hint: "save cert + scp/install steps", when: canShowCaTrustGuide },
   { value: "upgrade-service", label: "Upgrade a managed service", hint: "explicit service upgrade with snapshot", when: hasProvisionedServices },
@@ -329,6 +333,11 @@ export async function runInteractiveApp(adapters) {
     }
     return result;
   }
+  if (action === "enable-host-ssh") {
+    const result = await adapters.runCommand(["ssh", "enable"], adapters);
+    clack.outro("Host SSH enabled. Download its key from Edit an exposure.");
+    return result;
+  }
   if (action === "publish-exposure") {
     const result = await adapters.runCommand(["exposure", "publish"], adapters);
     clack.outro(result.cancelled ? "Exposure publication cancelled." : result.reviewOnly ? "Exposure reviewed." : "Exposure published.");
@@ -340,17 +349,24 @@ export async function runInteractiveApp(adapters) {
   if (action === "edit-exposure") {
     const serviceName = await promptExposureServiceName(project, adapters.prompts);
     const projectForEdit = loadProject(adapters.filesystem, projectDirectory);
-    const svc = (projectForEdit.config.managedInventory.services ?? []).find(
-      (s) => s.name === serviceName || s.exposure?.hostname === serviceName || s.id === serviceName
-    );
+    const svc = resolveExposure(projectForEdit.config.managedInventory.services ?? [], serviceName);
     if (!svc?.exposure) {
       throw new Error(`Exposure ${serviceName} not found.`);
+    }
+    if (svc.exposure.protocol === "ssh") {
+      const action = await adapters.prompts.select({ message: "Host SSH", options: [
+        { value: "export", label: "Download SSH key" },
+        { value: "replace-key", label: "Replace SSH key", hint: "revokes the old key and disconnects existing sessions" }
+      ] });
+      const result = await adapters.runCommand(["ssh", action], adapters);
+      clack.outro("SSH key ready.");
+      return result;
     }
     // The edit wizard can convert between backend and redirect exposures, so
     // ask for the desired type first and default every later prompt from the
     // stored values of that type (which may not exist yet after a conversion).
     let wantRedirect = svc.exposure.redirect !== undefined;
-    if (svc.exposure.protocol !== "tcp" && adapters.prompts !== undefined) {
+    if (isWebExposure(svc.exposure) && adapters.prompts !== undefined) {
       wantRedirect = await confirmPrompt(
         adapters.prompts,
         "Is this a redirect to another URL? (no backend, e.g. apex bunny.internal -> home.bunny.internal)",
@@ -401,7 +417,7 @@ export async function runInteractiveApp(adapters) {
     }
     // Ask with the stored value as default so edits can flip the TLS setting.
     let backendTls = svc.exposure.backend?.tls === true;
-    if (svc.exposure.protocol !== "tcp" && adapters.prompts !== undefined) {
+    if (isWebExposure(svc.exposure) && adapters.prompts !== undefined) {
       backendTls = await confirmPrompt(
         adapters.prompts,
         "Does the backend serve HTTPS/TLS itself? (e.g. Proxmox :8006, OPNsense)",
@@ -732,7 +748,7 @@ export async function promptNetBirdOptions(project, existingOptions, prompts, av
 /** Collect editable exposure fields, honoring supplied flags and keeping Docker proposals separate from explicit overrides. */
 export async function promptExposureOptions(project, existingOptions, prompts, defaults = undefined) {
   if (prompts?.ask === undefined) {
-    const stored = (project.config.managedInventory.services ?? []).find((service) => service.exposure?.hostname === existingOptions.hostname)?.exposure;
+    const stored = findExposure(project, existingOptions)?.exposure;
     const protocol = existingOptions.protocol ?? defaults?.protocol ?? stored?.preset ?? stored?.protocol ?? "https";
     return { ...defaults, ...existingOptions, protocol, ...(defaults ? { backendTls: existingOptions.backendTls ?? (protocol === "https" && defaults.backendTls === true) } : {}) };
   }
@@ -740,16 +756,19 @@ export async function promptExposureOptions(project, existingOptions, prompts, d
   const name = existingOptions.name ?? await askPrompt(prompts, "Service name", defaults?.name ?? "app");
   const suggestedHostname = defaults?.hostname ?? `${name}.${project.config.baseLocalDomain}`;
   const hostname = existingOptions.hostname ?? await askPrompt(prompts, "Full hostname", suggestedHostname);
-  const existingExposure = (project.config.managedInventory.services ?? [])
-    .find((service) => service.exposure?.hostname === hostname)?.exposure;
+  const existingExposure = findExposure(project, { ...existingOptions, name, hostname })?.exposure;
   const scriptedSmbProtocol = !defaults && existingExposure?.preset === "smb"
     && existingOptions.name && existingOptions.hostname && existingOptions.backendIp
     ? "smb"
     : undefined;
   const protocol = existingOptions.protocol ?? scriptedSmbProtocol ?? (prompts.select
-    ? await prompts.select({ message: "Exposure protocol", initialValue: defaults ? defaults.protocol : existingExposure?.preset ?? existingExposure?.protocol ?? "https", options: [{ value: "https", label: "HTTPS", hint: "web service; backend HTTP/HTTPS is chosen separately" }, { value: "tcp", label: "TCP", hint: "raw TCP, including SSH and Minecraft Java" }, { value: "smb", label: "SMB", hint: "file shares over TCP 445; credentials stay on the server" }] })
+    ? await prompts.select({ message: "Exposure protocol", initialValue: defaults ? defaults.protocol : existingExposure?.preset ?? existingExposure?.protocol ?? "https", options: [{ value: "https", label: "HTTPS", hint: "web service; backend HTTP/HTTPS is chosen separately" }, { value: "tcp", label: "TCP", hint: "raw TCP, including Minecraft Java" }, { value: "smb", label: "SMB", hint: "file shares over TCP 445; credentials stay on the server" }, ...(defaults ? [] : [{ value: "ssh", label: "Host SSH", hint: "key-only shell access to the machine running Nomina" }])] })
     : await askPrompt(prompts, "Exposure protocol (https, tcp or smb)", defaults ? defaults.protocol : existingExposure?.preset ?? existingExposure?.protocol ?? "https"));
-  if (!["https", "tcp", "smb"].includes(protocol)) throw new Error("Choose https, tcp or smb explicitly for an unknown Docker application protocol.");
+  if (!["https", "tcp", "smb", ...(defaults ? [] : ["ssh"])].includes(protocol)) throw new Error("Choose https, tcp or smb explicitly for an unknown Docker application protocol.");
+  if (protocol === "ssh") {
+    const sshUser = existingOptions.sshUser ?? await askPrompt(prompts, "Host OS account", existingExposure?.ssh?.user ?? "root");
+    return { ...existingOptions, name, hostname, protocol, sshUser, tailnet: existingOptions.tailnet ?? existingExposure?.tailnet ?? true };
+  }
   const isTcp = protocol === "tcp" || protocol === "smb";
   const isSmb = protocol === "smb" || (protocol === "tcp" && existingExposure?.preset === "smb");
   const tailnet = existingOptions.tailnet ?? await promptTailnetAccess(project, existingExposure?.tailnet, prompts);
@@ -791,7 +810,7 @@ export async function promptExposureOptions(project, existingOptions, prompts, d
 
 async function promptTailnetAccess(project, stored, prompts) {
   const available = project.config.managedInventory.platform.vpn?.service === "tailscale";
-  if (!available) return false;
+  if (!available) return stored ?? true;
   if (prompts === undefined) return stored ?? true;
   return confirmPrompt(prompts, "Allow this exposure over Tailscale?", stored ?? true);
 }

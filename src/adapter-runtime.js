@@ -1,3 +1,4 @@
+import { createHostSshAdapter } from "./host-ssh-adapter.js";
 import { spawn as spawnProcess } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
@@ -240,6 +241,7 @@ export function createProductionAdapters(options = {}) {
     }
   });
   const providerAdapters = Object.freeze({
+    hostSsh: createHostSshAdapter({ commandRunner }),
     tcp: createTcpAdapter({ exec: (vmid, command) => proxmox.pctExec(vmid, command) }),
     technitium: createTechnitiumAdapter({
       httpClient,
