@@ -1,14 +1,16 @@
 import { isIP, createConnection } from "node:net";
+import { isPrivateIpv4, HOST_SSH_PORT } from "./host-ssh-adapter.js";
+import { createProxySshAdapter, PROXY_SSH_ADMIN_PORT } from "./proxy-ssh-adapter.js";
 
-// These ports belong to platform services or gateway administration. SSH is
-// deliberately deferred until it has its own administration-preserving policy.
+// Generic TCP cannot claim platform ports; only managed host SSH may use 22.
 const RESERVED_PORTS = new Set([22, 53, 80, 443, 2019, 5380, 8080, 9000]);
 const DIRECTORY = "/etc/nominaconnect/tcp";
 const TAILNET_DIRECTORY = "/etc/nominaconnect/tcp-tailnet";
 const quote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
 const unit = (port) => `nomina-tcp-${port}`;
 
-export function validateTcpEndpoint({ ip, backendIp, backendPort, listenerPort, hostname }) {
+/** Validate raw TCP endpoints, reserving platform ports except the dedicated host SSH listener. */
+export function validateTcpEndpoint({ ip, backendIp, backendPort, listenerPort, hostname, purpose = undefined }) {
   if (isIP(ip) !== 4 || isIP(backendIp) !== 4) {
     throw new Error("TCP exposures require recorded IPv4 listener and backend addresses.");
   }
@@ -16,7 +18,11 @@ export function validateTcpEndpoint({ ip, backendIp, backendPort, listenerPort, 
   for (const port of [backendPort, listenerPort]) {
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("TCP ports must be between 1 and 65535.");
   }
-  if (RESERVED_PORTS.has(listenerPort)) throw new Error(`TCP listener port ${listenerPort} is reserved for platform services or gateway administration.`);
+  if (purpose === "host-ssh" && listenerPort !== 22) throw new Error("Host SSH requires client port 22.");
+  if (purpose === "host-ssh" && (!isPrivateIpv4(ip) || !isPrivateIpv4(backendIp) || backendPort !== HOST_SSH_PORT)) {
+    throw new Error("Host SSH forwarding requires private LAN addresses and the dedicated host SSH port.");
+  }
+  if (RESERVED_PORTS.has(listenerPort) && !(listenerPort === 22 && purpose === "host-ssh")) throw new Error(`TCP listener port ${listenerPort} is reserved for platform services or gateway administration.`);
   if (backendIp === ip && backendPort === listenerPort) throw new Error("TCP backend cannot point back at its own listener.");
 }
 
@@ -85,8 +91,10 @@ iptables -t nat -C POSTROUTING -j NOMINA_TCP_SNAT 2>/dev/null || iptables -t nat
 `;
 }
 
+/** Manage scoped proxy listeners and optional VPN forwarding with administration recovery. */
 export function createTcpAdapter({ exec, probe = probeTcp }) {
   const run = (vmid, script) => exec(vmid, { binary: "/bin/bash", args: ["-c", script], timeoutMs: 30_000 });
+  const proxySsh = createProxySshAdapter({ exec });
   async function records(vmid) {
     const result = await run(vmid, `for file in ${DIRECTORY}/*.json; do [ ! -f "$file" ] || cat "$file"; done`);
     return String(result?.stdout ?? "").trim().split("\n").filter(Boolean).map((line) => {
@@ -134,6 +142,7 @@ grep -q /usr/local/sbin/nomina-tailnet-tcp /usr/local/sbin/nomina-tailnet-firewa
 /usr/local/sbin/nomina-tailnet-tcp`);
   }
   return Object.freeze({
+    /** Reject occupied or modified listeners before changing forwarding or proxy administration. */
     async preflight(request) {
       validateTcpEndpoint(request);
       if (!Number.isInteger(request.vmid)) throw new Error("TCP forwarding requires the managed proxy LXC.");
@@ -148,7 +157,10 @@ command -v ss >/dev/null || { echo 'iproute2 (ss) is required in the proxy LXC' 
 ${owned ? "" : `test ! -e /etc/systemd/system/${name}.socket\ntest ! -e /etc/systemd/system/${name}.service`}
 ss -H -ltn 'sport = :${request.listenerPort}'
 ${owned ? `systemctl is-active --quiet ${name}.socket || test -z "$(ss -H -ltn 'sport = :${request.listenerPort}')"` : ""}`);
-      if (!owned && String(result?.stdout ?? "").trim()) throw new Error(`TCP listener port ${request.listenerPort} conflicts with an existing listener.`);
+      if (!owned && String(result?.stdout ?? "").trim()) {
+        if (request.purpose === "host-ssh") await proxySsh.preflight(request);
+        else throw new Error(`TCP listener port ${request.listenerPort} conflicts with an existing listener.`);
+      }
       if (request.gatewayVmid) {
         await gatewayAddress(request);
         if (isIP(request.gatewayIp) !== 4) throw new Error("The Tailscale gateway IP is missing.");
@@ -157,7 +169,9 @@ if [ -e ${TAILNET_DIRECTORY}/${request.listenerPort} ]; then
   ${owned ? `test "$(cat ${TAILNET_DIRECTORY}/${request.listenerPort})" = ${quote(request.ip)}` : `echo 'Gateway forwarding port is already occupied' >&2; exit 1`}
 fi`.replaceAll("\n+", "\n"));
         const listeners = await run(request.gatewayVmid, `set -eu\nss -H -ltn 'sport = :${request.listenerPort}'\ntest -x /usr/local/sbin/nomina-tailnet-firewall`);
-        if (String(listeners?.stdout ?? "").trim()) throw new Error(`Gateway port ${request.listenerPort} conflicts with an existing listener.`);
+        // Gateway port 22 was already denied on tailscale0 by the base firewall.
+        // DNAT only its VPN address, retaining any LAN administration listener.
+        if (request.purpose !== "host-ssh" && String(listeners?.stdout ?? "").trim()) throw new Error(`Gateway port ${request.listenerPort} conflicts with an existing listener.`);
         const nat = await run(request.gatewayVmid, "iptables-save -t nat");
         for (const line of String(nat?.stdout ?? "").split("\n")) {
           if (!/ -j (DNAT|REDIRECT)\b/.test(line) || line.startsWith("-A NOMINA_TCP_")) continue;
@@ -169,13 +183,17 @@ fi`.replaceAll("\n+", "\n"));
         }
       }
     },
+    /** Install owned TCP forwarding and restore relocated proxy SSH if publication fails. */
     async publish(request) {
-      const record = Object.fromEntries(["hostname", "ip", "listenerPort", "backendIp", "backendPort", "tailnet"].map((key) => [key, request[key]]));
+      const existing = request.purpose === "host-ssh" ? (await records(request.vmid)).find((record) => record.listenerPort === request.listenerPort) : undefined;
+      const relocated = request.purpose === "host-ssh" && !existing ? await proxySsh.prepare(request) : false;
+      const record = Object.fromEntries(["hostname", "ip", "listenerPort", "backendIp", "backendPort", "tailnet", "purpose"].map((key) => [key, request[key]]));
       const name = unit(record.listenerPort);
       const units = tcpUnits(record);
       // Close remote access before changing the backend or opting out.
-      await gateway(request, true);
-      await run(request.vmid, `set -eu
+      try {
+        await gateway(request, true);
+        await run(request.vmid, `set -eu
 install -m 0700 -d ${DIRECTORY}
 cat > /etc/systemd/system/${name}.socket <<'NOMINA_SOCKET'
 ${units.socket}NOMINA_SOCKET
@@ -187,14 +205,55 @@ systemctl enable ${name}.socket
 systemctl restart ${name}.socket
 printf '%s\\n' ${quote(JSON.stringify(record))} > ${DIRECTORY}/${record.listenerPort}.json
 systemctl is-active --quiet ${name}.socket`);
-      await gateway(request);
-      return { locator: { ip: request.ip, port: request.listenerPort }, warnings: [] };
+        await gateway(request);
+      } catch (error) {
+        if (request.purpose === "host-ssh" && !existing) {
+          try {
+            await run(request.vmid, `set -eu
+for suffix in socket service; do
+  if [ -e /etc/systemd/system/${name}.$suffix ]; then
+    case "$suffix" in
+      socket) test "$(cat /etc/systemd/system/${name}.socket)" = ${quote(units.socket.trimEnd())} ;;
+      service) test "$(cat /etc/systemd/system/${name}.service)" = ${quote(units.service.trimEnd())} ;;
+    esac
+  fi
+done
+systemctl disable --now ${name}.socket 2>/dev/null || true
+systemctl stop ${name}.service 2>/dev/null || true
+rm -f /etc/systemd/system/${name}.socket /etc/systemd/system/${name}.service ${DIRECTORY}/${record.listenerPort}.json
+systemctl daemon-reload`);
+            await gateway(request, true);
+            await proxySsh.restore(request);
+          } catch (cleanup) { throw new Error(`${error.message}; SSH forwarding recovery requires attention: ${cleanup.message}`); }
+        }
+        throw error;
+      }
+      return { locator: { ip: request.ip, port: request.listenerPort }, warnings: relocated
+        ? [`Proxy administration remains available privately at ${request.ip}:${PROXY_SSH_ADMIN_PORT}; removing host SSH restores its original listener.`] : [] };
     },
+    /** Remove only the matching forwarding records and restore owned proxy administration. */
     async remove(request) {
       validateTcpEndpoint(request);
       const current = await records(request.vmid);
       const record = current.find((item) => item.hostname === request.hostname && item.listenerPort === request.listenerPort);
-      if (!record) throw new Error(`TCP forwarding for ${request.hostname} is missing; refusing unscoped removal.`);
+      if (!record) {
+        if (current.some((item) => item.listenerPort === request.listenerPort)) throw new Error("TCP listener belongs to another exposure; refusing removal.");
+        const name = unit(request.listenerPort);
+        // A previous attempt may have removed forwarding before DNS/state
+        // cleanup failed. Retry only when the units really are gone.
+        await run(request.vmid, `set -eu
+test ! -e /etc/systemd/system/${name}.socket
+test ! -e /etc/systemd/system/${name}.service
+! systemctl is-active --quiet ${name}.socket
+! systemctl is-active --quiet ${name}.service`);
+        if (request.gatewayVmid) await run(request.gatewayVmid, `set -eu
+if [ -f ${TAILNET_DIRECTORY}/${request.listenerPort} ]; then
+  test "$(cat ${TAILNET_DIRECTORY}/${request.listenerPort})" = ${quote(request.ip)}
+fi`);
+        await gateway(request, true);
+        if (request.purpose === "host-ssh") await proxySsh.restore(request);
+        return;
+      }
       await checkOwnership(request, record);
       await gateway(request, true);
       const name = unit(record.listenerPort);
@@ -203,6 +262,7 @@ systemctl disable --now ${name}.socket
 systemctl stop ${name}.service
 rm -f /etc/systemd/system/${name}.socket /etc/systemd/system/${name}.service ${DIRECTORY}/${record.listenerPort}.json
 systemctl daemon-reload`);
+      if (request.purpose === "host-ssh") await proxySsh.restore(request);
     },
     async inspect(request) {
       await gatewayAddress(request);

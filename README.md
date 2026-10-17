@@ -528,3 +528,10 @@ stage. A healthy TCP endpoint does not verify SMB authentication or file access.
 SMB, Minecraft and HTTPS can coexist. Another backend cannot use the same port
 445 listener. Updates, restart persistence, `--tailnet false`, tracking and
 `nomina service remove files` use the existing TCP lifecycle.
+
+### Host SSH
+
+Nomina can publish key-only SSH access to its own Proxmox host, sharing a hostname
+with HTTPS, SMB and other TCP services. LAN access works before the optional
+Nomina VPN is provisioned. See [Host SSH setup and key management](docs/host-ssh.md)
+and the [implementation and server verification checklists](docs/ssh-implementation-checklist.md).

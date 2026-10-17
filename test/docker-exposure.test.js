@@ -127,6 +127,24 @@ test("existing backend is advisory; distinct names work but implicit or explicit
   assert.equal(f.project().config.managedInventory.services[0].id, "old");
 });
 
+test("an explicitly selected Docker TCP exposure can share managed web DNS without replacing it", async () => {
+  const f = fixture();
+  f.config.managedInventory.services.push({ id: "web", name: "existing-ui", exposure: { hostname: "pve.home.test", protocol: "https", backend: { ip: "10.0.0.10", port: 8006 } } });
+  f.dns.push({ id: "pve.home.test", record: "pve.home.test A 10.0.0.54" });
+  f.save();
+  const result = await f.publish(["--yes", "--name", "docker-files", "--hostname", "pve.home.test", "--protocol", "smb"]);
+  assert.equal(result.managedService.exposure.preset, "smb");
+  assert.equal(f.project().config.managedInventory.services.length, 2);
+  assert.equal(f.project().config.managedInventory.services[0].id, "web");
+  assert.equal(f.routes.length, 0);
+});
+
+test("Docker selections cannot enable host SSH even with explicit scripted flags", async () => {
+  const f = fixture();
+  await assert.rejects(f.publish(["--yes", "--protocol", "ssh"]), /Host SSH only targets/);
+  assert.deepEqual(f.mutations, []);
+});
+
 test("review-only and cancellation do not mutate providers, configuration or tracking", async () => {
   const f = fixture(), reviewed = await f.publish(["--review-only"]);
   assert.equal(reviewed.reviewOnly, true); assert.match(reviewed.stdout, /No exposure published/);

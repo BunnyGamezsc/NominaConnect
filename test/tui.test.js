@@ -241,8 +241,29 @@ test("buildMenuOptions offers exposure publish when DNS and Caddy are provisione
   assert.equal(canPublishExposure(project), true);
   assert.deepEqual(
     buildMenuOptions(project).map((option) => option.value),
-    ["docker-hosts", "publish-exposure", "toggle-http-redirect", "upgrade-service", "remove-service", "destroy-service", "nuclear-uninstall", "init", "exit"]
+    ["docker-hosts", "publish-exposure", "toggle-http-redirect", "enable-host-ssh", "upgrade-service", "remove-service", "destroy-service", "nuclear-uninstall", "init", "exit"]
   );
+});
+
+test("host SSH setup stays available before a selected CA or VPN is provisioned", () => {
+  for (const provider of ["caddy", "traefik"]) {
+    const project = {
+      config: { managedInventory: {
+        platform: {
+          dns: { id: "dns", service: "technitium" },
+          reverseProxy: { id: "proxy", service: provider },
+          certificateAuthority: { id: "ca", service: "step-ca" },
+          vpn: { id: "vpn", service: "tailscale" }
+        },
+        services: []
+      } },
+      state: { providerReferences: { dns: { ip: "10.0.0.53" }, proxy: { ip: "10.0.0.54" } } }
+    };
+    assert.equal(canPublishExposure(project), false);
+    assert.ok(buildMenuOptions(project).some((option) => option.value === "enable-host-ssh"));
+    project.config.managedInventory.services.push({ exposure: { protocol: "ssh" } });
+    assert.ok(!buildMenuOptions(project).some((option) => option.value === "enable-host-ssh"));
+  }
 });
 
 test("nomina service add caddy can prompt for the static IP", async () => {
@@ -658,7 +679,7 @@ test("buildMenuOptions offers exposure publish when DNS and Traefik are provisio
   assert.equal(canPublishExposure(project), true);
   assert.deepEqual(
     buildMenuOptions(project).map((option) => option.value),
-    ["docker-hosts", "publish-exposure", "upgrade-service", "remove-service", "destroy-service", "nuclear-uninstall", "init", "exit"]
+    ["docker-hosts", "publish-exposure", "enable-host-ssh", "upgrade-service", "remove-service", "destroy-service", "nuclear-uninstall", "init", "exit"]
   );
 });
 

@@ -295,3 +295,20 @@ _Avoid_: hostname-based TCP routing, successful application login
 **Exposure listener port**:
 The client-facing port of a TCP exposure, retained when its backend port changes.
 _Avoid_: backend port, hostname routing key
+
+**Host SSH exposure**:
+Key-authenticated shell access to an explicitly chosen operating-system account
+on the machine running NominaConnect, available on the home network and through
+the optional NominaConnect VPN.
+_Avoid_: LXC administrator connection, arbitrary remote SSH backend
+
+**Host SSH key**:
+The sole active client credential for a host SSH exposure. A prepared replacement
+remains inactive until activation; replacing or removing access revokes the
+previous credential.
+_Avoid_: server identity key, LXC administrator key, per-device identity
+
+**Shared exposure hostname**:
+A DNS name used by multiple independently managed, compatible exposures.
+Removing one exposure preserves the name while another exposure still needs it.
+_Avoid_: exposure identity, hostname-based TCP routing

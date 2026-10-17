@@ -1,3 +1,4 @@
+import { findExposure, assertExposureSlot, isWebExposure, sameHostname, conflictingDnsRecords } from "./exposure-identity.js";
 import { publishTcpExposure } from "./tcp-exposure.js";
 import { randomUUID } from "node:crypto";
 import { withHealthyRetry } from "./adoption.js";
@@ -14,17 +15,19 @@ export function proxyEndpointFor(proxyServiceName, ip) {
   return proxyServiceName === "traefik" ? `http://${ip}:8080` : `http://${ip}:2019`;
 }
 
+/** Publish one independent web/stream exposure and verify its managed integrations. */
 export async function publishManagedExposure({
   project,
   options,
   providerAdapters,
   healthRetryOptions = {}
 }) {
-  const storedExposure = project.config.managedInventory.services.find((service) => service.exposure?.hostname === options.hostname)?.exposure;
-  if ((options.protocol ?? storedExposure?.protocol ?? "https") === "tcp") {
+  const existingService = findExposure(project, options);
+  const storedExposure = existingService?.exposure;
+  if ((options.protocol ?? storedExposure?.protocol ?? "https") === "tcp" || options.protocol === "ssh") {
     return publishTcpExposure({ project, options, providerAdapters });
   }
-  if (storedExposure?.protocol === "tcp") throw new Error("Remove the TCP exposure before changing its transport to HTTPS.");
+  assertExposureSlot(project, { ...options, protocol: "https" }, existingService);
   const dnsService = project.config.managedInventory.platform.dns;
   const proxyService = project.config.managedInventory.platform.reverseProxy;
   const caService = project.config.managedInventory.platform.certificateAuthority;
@@ -63,12 +66,7 @@ export async function publishManagedExposure({
   }
 
   const { name, hostname, backendIp, backendPort } = options;
-  const existingService = project.config.managedInventory.services.find(
-    (service) => service.exposure?.hostname === hostname
-  );
-  const tailnet = vpnService?.service === "tailscale"
-    ? (options.tailnet ?? existingService?.exposure?.tailnet ?? true)
-    : false;
+  const tailnet = options.tailnet ?? existingService?.exposure?.tailnet ?? true;
   if (tailnet === false && vpnService?.service === "tailscale" &&
       project.state.providerReferences[vpnService.id] !== undefined && tailnetGatewayIp === undefined) {
     throw new Error("The Tailscale gateway IP is missing; refusing to publish an unprotected exposure.");
@@ -129,6 +127,25 @@ export async function publishManagedExposure({
     endpoint: proxyEndpointFor(proxyService.service, proxyRef?.ip),
     connectionSecretReference: project.config.connectionSecretReferences[proxyService.id]
   };
+
+  if (project.config.managedInventory.services.some((service) => service.id !== existingService?.id && sameHostname(service.exposure?.hostname, hostname))) {
+    const beforeDns = await getPlatformProvider("technitium").inspect(technitiumAdapter, dnsService, {
+      providerReferences: [hostname], zone: project.config.baseLocalDomain,
+      ip: dnsRef?.ip, endpoint: publishRequest.endpoint,
+      connectionSecretReference: publishRequest.connectionSecretReference
+    });
+    if (conflictingDnsRecords(beforeDns.managed, publishRequest.ip).length) {
+      throw new Error(`DNS records for ${hostname} conflict with its shared listener address.`);
+    }
+    if (!existingService) {
+      const beforeProxy = await getPlatformProvider(proxyService.service).inspect(proxyAdapter, proxyService, {
+        providerReferences: [hostname], ip: proxyRef?.ip, vmid: proxyRef?.vmid,
+        endpoint: routeRequest.endpoint,
+        connectionSecretReference: routeRequest.connectionSecretReference
+      });
+      if (beforeProxy.managed.length) throw new Error(`An existing web route already owns ${hostname}; it was preserved.`);
+    }
+  }
 
   await technitiumAdapter.publishRecord(publishRequest);
   const publishedRoute = await proxyAdapter.publishRoute(routeRequest);
@@ -325,9 +342,10 @@ function collectManagedDnsReferences(project, hostname) {
   return references;
 }
 
+/** Include the requested web route alongside existing managed proxy route references. */
 function collectManagedProxyReferences(project, hostname) {
   const references = project.config.managedInventory.services
-    .filter((service) => service.exposure?.protocol !== "tcp")
+    .filter((service) => isWebExposure(service.exposure))
     .map((service) => service.exposure?.hostname)
     .filter((value) => value !== undefined);
   if (!references.includes(hostname)) {
@@ -336,9 +354,10 @@ function collectManagedProxyReferences(project, hostname) {
   return references;
 }
 
+/** Scope certificate inspection to managed web hostnames and the requested TLS endpoint. */
 function collectManagedCaReferences(project, hostname) {
   const references = project.config.managedInventory.services
-    .filter((service) => service.exposure?.protocol !== "tcp")
+    .filter((service) => isWebExposure(service.exposure))
     .map((service) => service.exposure?.hostname)
     .filter((value) => value !== undefined);
   if (!references.includes(hostname)) {
