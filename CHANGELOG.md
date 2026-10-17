@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.5.2] - 2026-10-17
+
+### Added
+- Key-only SSH access to the Nomina host over the LAN and optional Tailscale
+  VPN, using a dedicated private SSH daemon that preserves the host's ordinary
+  administrative SSH service.
+- Shared hostnames for SSH, HTTPS, and compatible TCP/SMB exposures, with
+  independent lifecycle management so adding or removing one exposure keeps
+  the others available.
+- Client-key preparation, secure export, activation, rotation, and revocation,
+  with managed disruptive operations completing through detached systemd jobs.
+
+### Fixed
+- Preserve proxy administration, custom operator policies, and unrelated
+  listeners through SSH setup, removal, and recovery.
+- Detect elevated managed SSH sessions after `sudo` or `su` clears connection
+  variables, and fail safely when process metadata is uncertain.
+
 ## [2.5.1] - 2026-10-11
 
 ### Fixed
