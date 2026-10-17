@@ -863,6 +863,7 @@ function hostSshFixture(options = {}) {
     async publish(request) { host.calls.push(["publish", request]); if (!host.enabled) host.generation += 1; host.enabled = true; return { status: "healthy" }; },
     async revoke() { host.calls.push(["revoke"]); host.enabled = false; },
     async replaceKey(request) { host.calls.push(["replace", request]); host.generation += 1; fixture.filesystem.writeFile(request.output, `key-${host.generation}`); },
+    async activateKey(request) { host.calls.push(["activate", request]); host.generation += 1; },
     async exportKey({ output }) { if (!host.enabled) throw new Error("disabled"); fixture.filesystem.writeFile(output, `key-${host.generation}`); },
     async healthCheckExposure() { return { status: host.enabled ? "healthy" : "unhealthy", ssh: "key-login-verified" }; }
   };
@@ -870,6 +871,58 @@ function hostSshFixture(options = {}) {
   const web = () => fixture.publish(["--protocol", "https", "--name", "proxmox-ui", "--hostname", "pve.bunnyhome.test", "--backend-ip", "192.168.1.10", "--backend-port", "8006", "--backend-tls"]);
   return { ...fixture, host, ssh, publishWeb: web };
 }
+
+test("SSH transport changes hand off complete canonical operations after releasing project locks", async () => {
+  for (const command of [["ssh", "replace-key", "--output", "/root/new-key"], ["ssh", "activate-key"], ["ssh", "disable"],
+    ["service", "remove", "host-ssh"], ["service", "remove", "caddy"], ["service", "destroy", "caddy", "--yes"],
+    ["ssh", "enable"], ["domain", "change", "bunny.new"], ["uninstall", "--yes"]]) {
+    const fixture = hostSshFixture();
+    await fixture.ssh();
+    let locks = 0;
+    const operations = [];
+    Object.assign(fixture.adapters.filesystem, { acquireProjectLock: async () => { locks++; return () => { locks--; }; } });
+    fixture.adapters.sshOperations = { required: () => true, async launch(operation) {
+      assert.equal(locks, 0, "the worker must be able to acquire both project locks");
+      operations.push(operation);
+      return { stdout: "scheduled", detached: true };
+    } };
+    const calls = fixture.host.calls.length;
+    const forwarding = fixture.calls.length;
+    const config = fixture.filesystem.read("/projects/bunnyhome/nomina.yaml");
+    const result = await runCli([...command, "--project-dir", "/projects/bunnyhome"], fixture.adapters);
+    assert.equal(result.detached, true);
+    assert.equal(operations.length, 1);
+    assert.equal(fixture.host.calls.length, calls, "no host mutation occurs in the SSH caller");
+    assert.equal(fixture.calls.length, forwarding, "no forwarding mutation occurs in the SSH caller");
+    assert.equal(fixture.filesystem.read("/projects/bunnyhome/nomina.yaml"), config);
+    assert.ok(operations[0].args.includes("--project-dir"));
+    if (command[1] === "disable" || command[1] === "remove") assert.deepEqual(operations[0].args.slice(0, 2), ["service", "remove"]);
+    if (command[1] === "enable") assert.deepEqual(operations[0].args.slice(0, 2), ["exposure", "publish"]);
+  }
+});
+
+test("queued destruction refuses a changed VMID before any handoff or deletion", async () => {
+  const fixture = hostSshFixture();
+  fixture.adapters.sshOperations = { required: () => true, async launch() { throw new Error("must not schedule changed target"); } };
+  await assert.rejects(runCli(["service", "destroy", "caddy", "--yes", "--expected-vmid", "999", "--project-dir", "/projects/bunnyhome"], fixture.adapters), /target changed after confirmation/);
+  assert.equal(fixture.config().managedInventory.platform.reverseProxy.service, "caddy");
+});
+
+test("interactive rotation resolves the output path before handoff and cancelled uninstall never hands off", async () => {
+  const fixture = hostSshFixture();
+  await fixture.ssh();
+  const operations = [];
+  fixture.adapters.prompts = { ask: async () => "/root/prompted-key", confirm: async () => false };
+  fixture.adapters.sshOperations = { required: () => true, async launch(operation) { operations.push(operation); return { stdout: "scheduled", detached: true }; } };
+  fixture.adapters.interactive = { run: (adapters) => runCli(["ssh", "replace-key", "--project-dir", "/projects/bunnyhome"], adapters) };
+  assert.equal((await runCli([], fixture.adapters)).detached, true);
+  assert.deepEqual(operations[0].args.slice(0, 4), ["ssh", "replace-key", "--output", "/root/prompted-key"]);
+  assert.equal((await runCli(["uninstall", "--project-dir", "/projects/bunnyhome"], fixture.adapters)).cancelled, true);
+  assert.equal(operations.length, 1);
+  fixture.adapters.prompts.confirm = async () => true;
+  assert.equal((await runCli(["uninstall", "--project-dir", "/projects/bunnyhome"], fixture.adapters)).detached, true);
+  assert.deepEqual(operations[1].args.slice(0, 2), ["uninstall", "--yes"]);
+});
 
 for (const proxy of ["caddy", "traefik"]) {
   for (const first of ["ssh", "web"]) {
@@ -943,6 +996,20 @@ test("SSH setup checks DNS and listener conflicts before generating a key", asyn
   assert.equal(dnsConflict.host.calls.length, 0);
 });
 
+test("failed SSH DNS publication removes forwarding, revokes its key and preserves shared web DNS", async () => {
+  for (const shared of [false, true]) {
+    const fixture = hostSshFixture();
+    if (shared) await fixture.publishWeb();
+    fixture.technitium.publishRecord = () => { throw new Error("DNS write interrupted"); };
+    await assert.rejects(fixture.ssh(), /DNS write interrupted/);
+    assert.equal(fixture.host.enabled, false);
+    assert.equal(fixture.resources.length, 0, "forwarding and proxy administration must be rolled back");
+    assert.equal(fixture.config().managedInventory.services.length, shared ? 1 : 0);
+    assert.equal(fixture.calls.filter(([kind]) => kind === "delete-dns").length, shared ? 0 : 1);
+    if (shared) assert.ok((await fixture.web.inspect()).resources.some((resource) => resource.id === "pve.bunnyhome.test"));
+  }
+});
+
 test("SSH key download and rotation keep private material out of config, state and output", async () => {
   const fixture = hostSshFixture();
   await fixture.ssh(["--ssh-user", "admin"]);
@@ -984,4 +1051,22 @@ test("sharing preserves unrelated DNS records and refuses a conflicting address 
   await assert.rejects(fixture.publishWeb(), /shared listener address/);
   assert.equal(fixture.web.publishCalls.length, count);
   assert.equal(fixture.host.enabled, true);
+});
+
+test("SSH adoption verifies changes only when both forwarding and key authentication are healthy", async () => {
+  for (const [tcpHealthy, sshStatus] of [[true, "healthy"], [true, "unhealthy"], [true, undefined], [false, "healthy"]]) {
+    const fixture = hostSshFixture({ tailscale: true, reachable: tcpHealthy });
+    await fixture.ssh();
+    fixture.resources[0].tailnet = false;
+    fixture.adapters.providerAdapters.hostSsh.healthCheckExposure = async () => sshStatus === undefined
+      ? undefined : { status: sshStatus, reason: "Managed key authentication failed." };
+    const project = { config: fixture.config(), state: JSON.parse(fixture.filesystem.read("/projects/bunnyhome/.nomina/state.json")) };
+    const result = await runAdoptionPass({ project, providerAdapters: fixture.adapters.providerAdapters, retryOptions: { maxAttempts: 1 } });
+    const change = result.changes.find((item) => item.kind === "exposure-changed");
+    assert.ok(change, "observed VPN access change remains recorded");
+    assert.equal(change.after.tailnet, false);
+    assert.equal(change.verified, tcpHealthy && sshStatus === "healthy");
+    assert.equal(change.health.status, change.verified ? "healthy" : "unhealthy");
+    if (sshStatus !== "healthy") assert.ok(result.warnings.some((warning) => warning.platformKey === "ssh"));
+  }
 });

@@ -24,3 +24,10 @@ setup work without disabling administration or changing the host OS sshd.
 PAM can move authenticated shells out of the daemon's service cgroup. Revocation
 captures dedicated-daemon descendants and terminates them using Linux pidfds
 before stopping the daemon, checking process identities to avoid PID reuse.
+
+When a command would disrupt its own managed SSH connection, resolve its inputs
+and confirmation first, release project locks, then hand the complete operation
+to a separate systemd service. Persist root-private completion status outside
+project/secret directories so removal can finish after the caller disconnects.
+Offer staged replacement-key preparation and activation: the current key stays
+usable while the replacement is downloaded, and activation alone revokes it.

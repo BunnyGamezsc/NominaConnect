@@ -130,12 +130,13 @@ export function createHostSshAdapter({ commandRunner, filesystem = fs, directory
       }
     }
     if (filesystem.existsSync(directory)) {
-      for (const name of ["record.json", "sshd_config", "authorized_keys", "client_ed25519", "client_ed25519.pub", "host_ed25519", "host_ed25519.pub", "known_hosts"]) {
+      for (const name of ["record.json", "sshd_config", "authorized_keys", "client_ed25519", "client_ed25519.pub", "pending_ed25519", "pending_ed25519.pub", "host_ed25519", "host_ed25519.pub", "known_hosts"]) {
         const target = file(name);
-        if (!filesystem.existsSync(target)) continue;
-        const stat = filesystem.lstatSync(target);
+        let stat;
+        try { stat = filesystem.lstatSync(target); }
+        catch (error) { if (error.code === "ENOENT") continue; throw error; }
         if (stat.isSymbolicLink() || !stat.isFile() || stat.uid !== 0 || (stat.mode & 0o022)) throw new Error(`Unsafe host SSH file ${target}.`);
-        if (["client_ed25519", "host_ed25519"].includes(name) && (stat.mode & 0o077)) throw new Error("SSH private keys must have mode 0600.");
+        if (["client_ed25519", "pending_ed25519", "host_ed25519"].includes(name) && (stat.mode & 0o077)) throw new Error("SSH private keys must have mode 0600.");
       }
     }
   }
@@ -175,19 +176,29 @@ export function createHostSshAdapter({ commandRunner, filesystem = fs, directory
     const current = readRecord();
     if (current) {
       assertOwned(current);
-      if (current.ip !== request.ip || current.user !== request.user) throw new Error("Remove host SSH before changing its account or host address.");
-      const dropins = await run("systemctl", ["show", "--property=DropInPaths", "--value", UNIT]);
-      if (String(dropins.stdout ?? "").trim()) throw new Error("Managed SSH has unsupported systemd overrides.");
+      if (!current.disabled && (current.ip !== request.ip || current.user !== request.user)) throw new Error("Remove host SSH before changing its account or host address.");
     } else {
       if (filesystem.existsSync(unitPath) || filesystem.existsSync(directory)) throw new Error("Host SSH files already exist without a recovery record; inspect them before enabling SSH.");
       const listener = await run("ss", ["-H", "-ltn", `sport = :${HOST_SSH_PORT}`]);
       if (String(listener.stdout ?? "").trim()) throw new Error(`Host SSH port ${HOST_SSH_PORT} is already occupied.`);
     }
+    // A drop-in can exist before the base unit is installed, when systemd may
+    // not yet report it. Never inherit operator settings for our dedicated unit.
+    if (filesystem.existsSync(`${unitPath}.d`)) throw new Error("Managed SSH has unsupported systemd overrides.");
+    const dropins = await run("systemctl", ["show", "--property=DropInPaths", "--value", UNIT]);
+    if (String(dropins.stdout ?? "").trim()) throw new Error("Managed SSH has unsupported systemd overrides.");
+    const loadedUnit = await run("systemctl", ["show", "--property=FragmentPath", "--value", UNIT]);
+    const fragment = String(loadedUnit.stdout ?? "").trim();
+    if (fragment && (!current || fragment !== unitPath)) throw new Error("Host SSH systemd unit already exists outside Nomina; refusing to replace it.");
     return current;
   }
   async function keygen(name) {
     await run("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", "Nomina host SSH", "-f", file(name)]);
     filesystem.chmodSync(file(name), 0o600);
+  }
+  function discardPendingKey() {
+    filesystem.rmSync(file("pending_ed25519"), { force: true });
+    filesystem.rmSync(file("pending_ed25519.pub"), { force: true });
   }
   async function revoke() {
     guard();
@@ -197,6 +208,7 @@ export function createHostSshAdapter({ commandRunner, filesystem = fs, directory
     write("authorized_keys", "");
     filesystem.rmSync(file("client_ed25519"), { force: true });
     filesystem.rmSync(file("client_ed25519.pub"), { force: true });
+    discardPendingKey();
     write("record.json", `${JSON.stringify({ ...current, disabled: true })}\n`);
     let sessionError;
     try {
@@ -225,17 +237,9 @@ export function createHostSshAdapter({ commandRunner, filesystem = fs, directory
       return { status: "unhealthy", ssh: "unverified", reason: error.message };
     }
   }
-  return Object.freeze({
-    preflight,
-    async suggestAddress(proxyIp) {
-      guard();
-      if (isIP(proxyIp) !== 4) throw new Error("Provision the proxy before configuring host SSH.");
-      const routes = JSON.parse(String((await run("ip", ["-j", "-4", "route", "get", proxyIp])).stdout));
-      return routes[0]?.prefsrc;
-    },
-    async publish(request) {
+  async function publish(request, preparedKey = undefined) {
       const current = await preflight(request);
-      if (current && !current.disabled) return healthCheckExposure(request);
+      if (current && !current.disabled && !preparedKey) return healthCheckExposure(request);
       if (current) await revoke();
       if (!current) {
         filesystem.mkdirSync(path.dirname(directory), { recursive: true, mode: 0o755 });
@@ -245,10 +249,19 @@ export function createHostSshAdapter({ commandRunner, filesystem = fs, directory
         filesystem.writeFileSync(unitPath, hostSshUnit(directory), { flag: "wx", mode: 0o644 });
       }
       try {
+        if (current && (current.ip !== request.ip || current.user !== request.user)) {
+          // Disabled access can be set up again for another account/address.
+          // Revocation above stopped the old daemon; retain its server identity.
+          write("sshd_config", hostSshConfig(request, directory));
+          write("record.json", `${JSON.stringify({ ip: request.ip, user: request.user, disabled: true })}\n`);
+        }
         if (!filesystem.existsSync(file("host_ed25519"))) await keygen("host_ed25519");
         filesystem.rmSync(file("client_ed25519"), { force: true });
         filesystem.rmSync(file("client_ed25519.pub"), { force: true });
-        await keygen("client_ed25519");
+        if (preparedKey) {
+          write("client_ed25519", preparedKey.privateKey);
+          write("client_ed25519.pub", preparedKey.publicKey);
+        } else await keygen("client_ed25519");
         write("authorized_keys", filesystem.readFileSync(file("client_ed25519.pub"), "utf8"));
         write("known_hosts", `[${request.ip}]:${HOST_SSH_PORT} ${filesystem.readFileSync(file("host_ed25519.pub"), "utf8").trim()}\n`);
         await run("/bin/mkdir", ["-p", "/run/sshd"]);
@@ -263,8 +276,54 @@ export function createHostSshAdapter({ commandRunner, filesystem = fs, directory
         try { await revoke(); } catch (cleanup) { throw new Error(`SSH setup failed: ${error.message}; key revoked but service cleanup failed: ${cleanup.message}`); }
         throw error;
       }
+  }
+  return Object.freeze({
+    preflight,
+    async suggestAddress(proxyIp) {
+      guard();
+      if (isIP(proxyIp) !== 4) throw new Error("Provision the proxy before configuring host SSH.");
+      const routes = JSON.parse(String((await run("ip", ["-j", "-4", "route", "get", proxyIp])).stdout));
+      return routes[0]?.prefsrc;
     },
+    publish: (request) => publish(request),
     revoke,
+    async prepareKey({ output }) {
+      guard();
+      const current = readRecord();
+      if (!current || current.disabled) throw new Error("Host SSH must be enabled before preparing a replacement key.");
+      await preflight(current);
+      if (filesystem.existsSync(file("pending_ed25519")) || filesystem.existsSync(file("pending_ed25519.pub"))) {
+        throw new Error("An SSH replacement key is already prepared. Download its exported copy and activate it, or disable SSH to discard it.");
+      }
+      const fd = reserveExport(output);
+      try {
+        await keygen("pending_ed25519");
+        filesystem.writeFileSync(fd, filesystem.readFileSync(file("pending_ed25519")));
+        return { output };
+      } catch (error) {
+        discardPendingKey();
+        filesystem.rmSync(output, { force: true });
+        throw error;
+      } finally {
+        filesystem.closeSync(fd);
+      }
+    },
+    async activateKey(request) {
+      const current = await preflight(request);
+      if (!current || current.disabled) throw new Error("Host SSH must be enabled before activating a replacement key.");
+      if (!filesystem.existsSync(file("pending_ed25519")) || !filesystem.existsSync(file("pending_ed25519.pub"))) {
+        throw new Error("No complete SSH replacement key is prepared. Run ssh prepare-key and download its exported copy first.");
+      }
+      // Validate the pair before touching working authorization. Derive the
+      // sole authorization line instead of trusting extra lines in a public file.
+      const derived = String((await run("ssh-keygen", ["-y", "-f", file("pending_ed25519")])).stdout).trim();
+      const publicKey = filesystem.readFileSync(file("pending_ed25519.pub"), "utf8").trim();
+      if (publicKey.split("\n").length !== 1 || publicKey.split(/\s+/).slice(0, 2).join(" ") !== derived.split(/\s+/).slice(0, 2).join(" ")) {
+        throw new Error("Prepared SSH key pair does not match; working access was preserved.");
+      }
+      const preparedKey = { privateKey: filesystem.readFileSync(file("pending_ed25519")), publicKey: `${derived}\n` };
+      return publish(request, preparedKey);
+    },
     async replaceKey(request) {
       await preflight(request);
       // Reserve the export before revoking the working key. A bad destination

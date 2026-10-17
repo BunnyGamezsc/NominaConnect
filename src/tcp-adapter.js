@@ -3,7 +3,7 @@ import { isPrivateIpv4, HOST_SSH_PORT } from "./host-ssh-adapter.js";
 import { createProxySshAdapter, PROXY_SSH_ADMIN_PORT } from "./proxy-ssh-adapter.js";
 
 // Generic TCP cannot claim platform ports; only managed host SSH may use 22.
-const RESERVED_PORTS = new Set([22, 53, 80, 443, 2019, 5380, 8080, 9000, PROXY_SSH_ADMIN_PORT]);
+const RESERVED_PORTS = new Set([22, 53, 80, 443, 2019, 5380, 8080, 9000]);
 const DIRECTORY = "/etc/nominaconnect/tcp";
 const TAILNET_DIRECTORY = "/etc/nominaconnect/tcp-tailnet";
 const quote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;

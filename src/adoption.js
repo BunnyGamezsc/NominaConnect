@@ -578,11 +578,15 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
         const observedTailnet = request.gatewayVmid ? observed.tailnet : service.exposure.tailnet;
         const after = { ...service.exposure, backend: { ip: observed.backendIp, port: observed.backendPort }, tailnet: observedTailnet };
         const changed = observed.backendIp !== request.backendIp || Number(observed.backendPort) !== request.backendPort || observedTailnet !== service.exposure.tailnet;
-        const health = await tcp.healthCheckExposure({ ...request, backendIp: observed.backendIp, backendPort: Number(observed.backendPort), tailnet: observed.tailnet });
+        let health = await tcp.healthCheckExposure({ ...request, backendIp: observed.backendIp, backendPort: Number(observed.backendPort), tailnet: observed.tailnet });
         if (health.status !== "healthy") warnings.push({ serviceId: service.id, serviceName: service.name, platformKey: "tcp", message: health.reason ?? "TCP transport health check failed; application access is not verified." });
         if (service.exposure.protocol === "ssh") {
           const sshHealth = await providerAdapters["hostSsh"]?.healthCheckExposure?.({ ip: request.backendIp, user: service.exposure.ssh?.user });
-          if (sshHealth?.status !== "healthy") warnings.push({ serviceId: service.id, serviceName: service.name, platformKey: "ssh", message: sshHealth?.reason ?? "Host SSH authentication could not be verified." });
+          if (sshHealth?.status !== "healthy") {
+            const reason = sshHealth?.reason ?? "Host SSH authentication could not be verified.";
+            warnings.push({ serviceId: service.id, serviceName: service.name, platformKey: "ssh", message: reason });
+            health = { ...health, status: "unhealthy", reason };
+          }
         }
         if (changed) changes.push({ kind: "exposure-changed", serviceId: service.id, serviceName: service.name, before: service.exposure, after, fields: ["backend", "tailnet"], health, verified: health.status === "healthy", timestamp: new Date().toISOString() });
       } catch (error) {

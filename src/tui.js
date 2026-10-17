@@ -263,8 +263,8 @@ export async function runInteractiveApp(adapters) {
   }
   if (action === "nuclear-uninstall") {
     const result = await adapters.runCommand(["uninstall"], adapters);
-    clack.outro(result.cancelled ? "Nuclear uninstall cancelled." : "Nuclear uninstall complete.");
-    if (adapters.tracking) {
+    clack.outro(result.cancelled ? "Nuclear uninstall cancelled." : result.detached ? "Nuclear uninstall scheduled. See the operation status." : "Nuclear uninstall complete.");
+    if (adapters.tracking && !result.detached) {
       adapters.tracking.run(adapters);
     }
     return result;
@@ -335,13 +335,13 @@ export async function runInteractiveApp(adapters) {
   }
   if (action === "enable-host-ssh") {
     const result = await adapters.runCommand(["ssh", "enable"], adapters);
-    clack.outro("Host SSH enabled. Download its key from Edit an exposure.");
+    clack.outro(result.detached ? "Host SSH publication scheduled. See the operation status." : "Host SSH enabled. Download its key from Edit an exposure.");
     return result;
   }
   if (action === "publish-exposure") {
     const result = await adapters.runCommand(["exposure", "publish"], adapters);
-    clack.outro(result.cancelled ? "Exposure publication cancelled." : result.reviewOnly ? "Exposure reviewed." : "Exposure published.");
-    if (adapters.tracking && !result.cancelled && !result.reviewOnly) {
+    clack.outro(result.cancelled ? "Exposure publication cancelled." : result.reviewOnly ? "Exposure reviewed." : result.detached ? "Exposure publication scheduled. See the operation status." : "Exposure published.");
+    if (adapters.tracking && !result.cancelled && !result.reviewOnly && !result.detached) {
       adapters.tracking.run(adapters);
     }
     return result;
@@ -356,10 +356,11 @@ export async function runInteractiveApp(adapters) {
     if (svc.exposure.protocol === "ssh") {
       const action = await adapters.prompts.select({ message: "Host SSH", options: [
         { value: "export", label: "Download SSH key" },
-        { value: "replace-key", label: "Replace SSH key", hint: "revokes the old key and disconnects existing sessions" }
+        { value: "prepare-key", label: "Prepare replacement SSH key", hint: "download the new key before activation; the current key remains active" },
+        { value: "activate-key", label: "Activate prepared SSH key", hint: "after downloading; revokes the old key and disconnects existing sessions" }
       ] });
       const result = await adapters.runCommand(["ssh", action], adapters);
-      clack.outro("SSH key ready.");
+      clack.outro(result.detached ? "SSH key activation scheduled. See the operation status." : action === "prepare-key" ? "Replacement key prepared. Download it before activation." : action === "activate-key" ? "SSH key activated." : "SSH key ready.");
       return result;
     }
     // The edit wizard can convert between backend and redirect exposures, so
@@ -439,8 +440,8 @@ export async function runInteractiveApp(adapters) {
   if (action === "remove-exposure") {
     const serviceName = await promptExposureServiceName(project, adapters.prompts);
     const result = await adapters.runCommand(["service", "remove", serviceName], adapters);
-    clack.outro("Exposure removed.");
-    if (adapters.tracking) {
+    clack.outro(result.detached ? "Exposure removal scheduled. See the operation status." : "Exposure removed.");
+    if (adapters.tracking && !result.detached) {
       adapters.tracking.run(adapters);
     }
     return result;
@@ -458,8 +459,8 @@ export async function runInteractiveApp(adapters) {
   }
   if (action === "change-domain") {
     const result = await adapters.runCommand(["domain", "change"], adapters);
-    clack.outro("Local domain changed. Exposures migrated.");
-    if (adapters.tracking) {
+    clack.outro(result.detached ? "Domain change scheduled. See the operation status." : "Local domain changed. Exposures migrated.");
+    if (adapters.tracking && !result.detached) {
       adapters.tracking.run(adapters);
     }
     return result;
@@ -497,16 +498,16 @@ export async function runInteractiveApp(adapters) {
   }
   if (action === "remove-service") {
     const result = await adapters.runCommand(["service", "remove"], adapters);
-    clack.outro("Service removal complete.");
-    if (adapters.tracking) {
+    clack.outro(result.detached ? "Service removal scheduled. See the operation status." : "Service removal complete.");
+    if (adapters.tracking && !result.detached) {
       adapters.tracking.run(adapters);
     }
     return result;
   }
   if (action === "destroy-service") {
     const result = await adapters.runCommand(["service", "destroy"], adapters);
-    clack.outro("Service destruction complete.");
-    if (adapters.tracking) {
+    clack.outro(result.cancelled ? "Service destruction cancelled." : result.detached ? "Service destruction scheduled. See the operation status." : "Service destruction complete.");
+    if (adapters.tracking && !result.cancelled && !result.detached) {
       adapters.tracking.run(adapters);
     }
     return result;

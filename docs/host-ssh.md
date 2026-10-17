@@ -61,7 +61,9 @@ temporarily moves that administrative listener to the proxy's private address
 on port 22223. Its SSH configuration, keys, enabled states and existing sessions
 are preserved. Two scoped systemd drop-ins are removed when host SSH is removed,
 restoring the original administrative listener. The Proxmox host's ordinary SSH
-service is unaffected. Port 22223 is reserved for this private administration.
+service is unaffected. Port 22223 is occupied by private administration while
+this relocation is active; an existing TCP exposure on that port is preserved
+and blocks relocation instead of being overwritten.
 Custom SSH overrides/options, unrelated port-22 processes and an occupied
 administration port are rejected before host credentials are created.
 A gateway's LAN administrative SSH listener is
@@ -69,6 +71,35 @@ preserved because forwarding matches only the gateway's VPN address. Existing
 unmanaged gateway forwarding also produces a conflict error.
 
 ## Replace, disable and remove
+
+For remote administration through Nomina SSH, prepare and download the new key
+before activation. Preparation leaves the current key and sessions working:
+
+```sh
+nomina ssh prepare-key --output /root/new_nomina_ssh
+```
+
+From your computer, securely copy that file using the current key, then activate
+it from the Nomina project directory on the host:
+
+```sh
+nomina ssh activate-key
+```
+
+Activation revokes the old key and disconnects its sessions. Reconnect with the
+downloaded replacement, then update your SSH configuration to use it. The
+interactive exposure menu offers **Prepare replacement SSH key** and
+**Activate prepared SSH key** as separate actions. Disabling access discards
+any pending replacement.
+
+Commands that would disconnect their own managed SSH connection continue in a
+separate systemd operation. Nomina displays private status and log paths before
+scheduling the change; a disconnected terminal does not cancel it. After
+reconnecting, the status file records whether the operation succeeded or failed.
+
+Immediate replacement is also available from the host console or independent
+administrator connection, where the exported file remains retrievable after
+revocation:
 
 ```sh
 nomina ssh replace-key --output /root/new_nomina_ssh
@@ -88,6 +119,8 @@ remove/edit by exposure name or inventory ID; hostname-only selection is
 rejected as ambiguous. Nuclear uninstall also removes the dedicated host unit
 and its keys before deleting recovery state.
 
-Local automated checks do not establish real Proxmox or remote Tailscale login.
-Complete the [server verification checklist](ssh-implementation-checklist.md)
-before treating this as validated on a live server.
+Real Proxmox, macOS/Linux OpenSSH, fresh Tailscale provisioning, native DNS and
+relay access were tested on the development lab. See the
+[live test report](ssh-live-test-report.md) and
+[verification checklist](ssh-implementation-checklist.md) for evidence and
+client coverage.

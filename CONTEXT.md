@@ -303,8 +303,9 @@ the optional NominaConnect VPN.
 _Avoid_: LXC administrator connection, arbitrary remote SSH backend
 
 **Host SSH key**:
-The single downloadable client credential for a host SSH exposure. Replacing or
-removing access revokes the previous credential.
+The sole active client credential for a host SSH exposure. A prepared replacement
+remains inactive until activation; replacing or removing access revokes the
+previous credential.
 _Avoid_: server identity key, LXC administrator key, per-device identity
 
 **Shared exposure hostname**:

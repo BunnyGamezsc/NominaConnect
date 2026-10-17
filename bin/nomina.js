@@ -8,6 +8,8 @@ import { createClackPrompts } from "../src/prompts.js";
 import { runInteractiveApp } from "../src/tui.js";
 import { createProductionAdapters } from "../src/adapter-runtime.js";
 import { acquireProjectLock } from "../src/project-lock.js";
+import { createCommandRunner } from "../src/adapter-runtime.js";
+import { createSshOperationController, runSshOperationWorker } from "../src/ssh-operation.js";
 
 const filesystem = {
   acquireProjectLock,
@@ -30,7 +32,8 @@ const adapters = {
     isProxmoxHost: () => fs.existsSync("/usr/sbin/pct") || fs.existsSync("/usr/bin/pct")
   },
   ...productionAdapters,
-  prompts: createClackPrompts(clack),
+  sshOperations: createSshOperationController({ commandRunner: createCommandRunner() }),
+  prompts: process.env.NOMINA_SSH_OPERATION_WORKER === "1" ? undefined : createClackPrompts(clack),
   interactive: {
     run: (context) => runInteractiveApp({
       ...context,
@@ -42,7 +45,8 @@ const adapters = {
 const fromInteractiveMenu = process.argv.length <= 2;
 
 try {
-  const result = await runCli(process.argv.slice(2), adapters);
+  const run = () => runCli(process.argv.slice(2), adapters);
+  const result = await (process.env.NOMINA_SSH_OPERATION_WORKER === "1" ? runSshOperationWorker(run) : run());
   if (result.stdout) {
     if (fromInteractiveMenu) {
       clack.log.success(result.stdout.trim());

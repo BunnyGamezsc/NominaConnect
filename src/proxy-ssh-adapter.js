@@ -64,6 +64,17 @@ printf '%s\n' "$listeners" | grep 'users:' >/dev/null
 if [ -f /etc/default/ssh ]; then
   test -z "$(sed -n 's/^[[:space:]]*SSHD_OPTS=//p' /etc/default/ssh | tr -d '\"\\047[:space:]')" || { echo 'Custom SSHD_OPTS must be preserved; proxy SSH cannot be relocated automatically' >&2; exit 1; }
 fi
+check_config() {
+  awk -v main=/etc/ssh/sshd_config '
+    { sub(/#.*/, ""); directive=tolower($1) }
+    directive == "match" { exit 1 }
+    directive == "include" && (FILENAME != main || NF != 2 || $2 != "/etc/ssh/sshd_config.d/*.conf") { exit 1 }
+  ' "$1" || { echo 'Custom SSH Match or Include rules cannot be safely relocated automatically' >&2; exit 1; }
+}
+check_config /etc/ssh/sshd_config
+for config in /etc/ssh/sshd_config.d/*.conf; do
+  [ ! -f "$config" ] || check_config "$config"
+done
 test -z "$(ss -H -ltn 'sport = :${PROXY_SSH_ADMIN_PORT}')" || { echo 'Proxy SSH administration port ${PROXY_SSH_ADMIN_PORT} is occupied' >&2; exit 1; }
 /usr/sbin/sshd -t -p ${PROXY_SSH_ADMIN_PORT} -o ListenAddress=${request.ip}
 test "$(/usr/sbin/sshd -T -p ${PROXY_SSH_ADMIN_PORT} -o ListenAddress=${request.ip} | sed -n 's/^listenaddress //p')" = ${quote(`${request.ip}:${PROXY_SSH_ADMIN_PORT}`)}

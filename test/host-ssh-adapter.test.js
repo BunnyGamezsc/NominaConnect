@@ -40,7 +40,8 @@ function lab(t) {
   const unitDirectory = path.join(root, "units");
   fs.mkdirSync(unitDirectory);
   const calls = [];
-  const state = { active: false, failStart: false, failStop: false, conflict: false, failLogin: false, failSessionTermination: false };
+  const state = { active: false, failStart: false, failStop: false, conflict: false, failLogin: false, failSessionTermination: false,
+    addresses: [request.ip], dropins: "", fragment: "" };
   const filesystem = { ...fs, lstatSync(target) {
     const stat = fs.lstatSync(target);
     return { ...stat, uid: 0, isDirectory: () => stat.isDirectory(), isFile: () => stat.isFile(), isSymbolicLink: () => stat.isSymbolicLink() };
@@ -50,11 +51,13 @@ function lab(t) {
     const { binary, args } = command;
     if (binary === "ssh-keygen") return execute(binary, args);
     if (binary === "getent") return { stdout: `${args[1]}:x:0:0::/root:/bin/bash\n` };
-    if (binary === "ip") return { stdout: JSON.stringify(args.includes("route") ? [{ prefsrc: request.ip }] : [{ addr_info: [{ local: request.ip }] }]) };
+    if (binary === "ip") return { stdout: JSON.stringify(args.includes("route") ? [{ prefsrc: request.ip }] : [{ addr_info: state.addresses.map((local) => ({ local })) }]) };
     if (binary === "ss") return { stdout: state.conflict ? "LISTEN occupied" : "" };
     if (binary === "ssh" && state.failLogin) throw new Error("Key authentication failed");
     if (binary === "/usr/bin/python3" && state.failSessionTermination) throw new Error("session cleanup failed");
     if (binary === "systemctl") {
+      if (args.includes("--property=DropInPaths")) return { stdout: state.dropins };
+      if (args.includes("--property=FragmentPath")) return { stdout: state.fragment };
       if (args[0] === "enable") { if (state.failStart) throw new Error("start failed"); state.active = true; }
       if (args[0] === "disable") { if (state.failStop) throw new Error("stop failed"); state.active = false; }
       if (args[0] === "is-active" && !state.active) throw new Error("inactive");
@@ -152,6 +155,56 @@ test("native config edits are preserved but cannot prevent revoking the managed 
   assert.equal(fs.readFileSync(path.join(directory, "authorized_keys"), "utf8"), "");
 });
 
+test("first enable preserves preexisting systemd fragments and unloaded drop-ins", async (t) => {
+  for (const conflict of ["dropins", "fragment", "unloaded-dropin"]) {
+    const { adapter, directory, unitDirectory, state, calls } = lab(t);
+    let dropin;
+    if (conflict === "dropins") state.dropins = "/run/systemd/system/nomina-host-ssh.service.d/operator.conf";
+    if (conflict === "fragment") state.fragment = "/usr/lib/systemd/system/nomina-host-ssh.service";
+    if (conflict === "unloaded-dropin") {
+      const parent = path.join(unitDirectory, "nomina-host-ssh.service.d");
+      fs.mkdirSync(parent);
+      dropin = path.join(parent, "operator.conf");
+      fs.writeFileSync(dropin, "[Service]\nEnvironment=OPERATOR=1\n");
+    }
+    await assert.rejects(adapter.publish(request), /overrides|already exists outside Nomina/);
+    assert.equal(fs.existsSync(directory), false, "no keys or recovery files are created");
+    assert.equal(fs.existsSync(path.join(unitDirectory, "nomina-host-ssh.service")), false);
+    assert.ok(!calls.some((command) => command.binary === "systemctl" && ["enable", "disable", "daemon-reload"].includes(command.args[0])));
+    if (dropin) assert.equal(fs.readFileSync(dropin, "utf8"), "[Service]\nEnvironment=OPERATOR=1\n");
+  }
+});
+
+test("disabled host SSH accepts a new account and local address while retaining server identity", async (t) => {
+  const { adapter, directory, unitDirectory, state } = lab(t);
+  await adapter.publish(request);
+  const previousKey = fs.readFileSync(path.join(directory, "client_ed25519"), "utf8");
+  const identity = fs.readFileSync(path.join(directory, "host_ed25519"), "utf8");
+  const updated = { ip: "192.168.1.11", user: "operator" };
+  state.addresses.push(updated.ip);
+  await assert.rejects(adapter.publish(updated), /Remove host SSH/);
+  assert.equal(fs.readFileSync(path.join(directory, "client_ed25519"), "utf8"), previousKey);
+  await adapter.revoke();
+  state.fragment = path.join(unitDirectory, "nomina-host-ssh.service");
+  assert.equal((await adapter.publish(updated)).status, "healthy");
+  assert.equal(fs.readFileSync(path.join(directory, "sshd_config"), "utf8"), hostSshConfig(updated, directory));
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(directory, "record.json"), "utf8")), { ...updated, disabled: false });
+  assert.equal(fs.readFileSync(path.join(directory, "host_ed25519"), "utf8"), identity);
+  assert.notEqual(fs.readFileSync(path.join(directory, "client_ed25519"), "utf8"), previousKey);
+  assert.ok(fs.readFileSync(path.join(directory, "known_hosts"), "utf8").startsWith(`[${updated.ip}]:22222 `));
+});
+
+test("disabled reconfiguration preserves operator changes to managed configuration", async (t) => {
+  const { adapter, directory } = lab(t);
+  await adapter.publish(request);
+  await adapter.revoke();
+  const config = `${fs.readFileSync(path.join(directory, "sshd_config"), "utf8")}Banner /etc/issue\n`;
+  fs.writeFileSync(path.join(directory, "sshd_config"), config);
+  await assert.rejects(adapter.publish({ ...request, user: "operator" }), /changed outside/);
+  assert.equal(fs.readFileSync(path.join(directory, "sshd_config"), "utf8"), config);
+  assert.equal(fs.existsSync(path.join(directory, "client_ed25519")), false);
+});
+
 test("SSH policy has a single key source, key-only root access and session termination", () => {
   const config = hostSshConfig(request);
   for (const line of ["AuthenticationMethods publickey", "PasswordAuthentication no", "KbdInteractiveAuthentication no", "PermitRootLogin prohibit-password", "AuthorizedKeysFile none", "AuthorizedKeysCommandUser root", "TrustedUserCAKeys none", "AllowUsers root", "DisableForwarding yes", "UsePAM yes"]) assert.ok(config.includes(`${line}\n`));
@@ -171,6 +224,133 @@ test("replacement refuses an occupied download path before revoking the working 
   assert.equal(fs.readFileSync(path.join(directory, "client_ed25519"), "utf8"), previous);
   assert.equal(fs.readFileSync(output, "utf8"), "do not replace");
   assert.equal((await adapter.healthCheckExposure(request)).status, "healthy");
+});
+
+test("two-phase rotation leaves the old key usable for download and activates the exact downloaded replacement", async (t) => {
+  const { adapter, directory, root, calls, state } = lab(t);
+  await adapter.publish(request);
+  const oldPrivate = fs.readFileSync(path.join(directory, "client_ed25519"), "utf8");
+  const oldAuthorization = fs.readFileSync(path.join(directory, "authorized_keys"), "utf8");
+  const hostIdentity = fs.readFileSync(path.join(directory, "host_ed25519"), "utf8");
+  const revocations = () => calls.filter((command) => command.binary === "/usr/bin/python3").length;
+  const before = revocations();
+  const output = path.join(root, "prepared-download");
+  assert.deepEqual(await adapter.prepareKey({ output }), { output });
+  const pending = fs.readFileSync(output, "utf8");
+  assert.notEqual(pending, oldPrivate);
+  assert.equal(fs.statSync(output).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.join(directory, "pending_ed25519")).mode & 0o777, 0o600);
+  assert.equal(fs.readFileSync(path.join(directory, "client_ed25519"), "utf8"), oldPrivate);
+  assert.equal(fs.readFileSync(path.join(directory, "authorized_keys"), "utf8"), oldAuthorization);
+  assert.equal(revocations(), before, "preparation does not disconnect the session used to download");
+  assert.equal(state.active, true);
+  assert.equal((await adapter.healthCheckExposure(request)).status, "healthy");
+  // The downloaded copy, not a newly generated key, must authorize reconnection.
+  const clientCopy = path.join(root, "client-downloaded-key");
+  fs.copyFileSync(output, clientCopy);
+  fs.chmodSync(clientCopy, 0o600);
+  const downloadedPublic = (await execute("ssh-keygen", ["-y", "-f", clientCopy])).stdout.trim();
+  const generated = calls.filter((command) => command.binary === "ssh-keygen" && command.args.includes("-t")).length;
+  assert.equal((await adapter.activateKey(request)).status, "healthy");
+  assert.equal(fs.readFileSync(path.join(directory, "client_ed25519"), "utf8"), pending);
+  assert.equal(fs.readFileSync(path.join(directory, "authorized_keys"), "utf8").trim(), downloadedPublic);
+  assert.notEqual(fs.readFileSync(path.join(directory, "authorized_keys"), "utf8"), oldAuthorization);
+  assert.equal(fs.readFileSync(path.join(directory, "host_ed25519"), "utf8"), hostIdentity);
+  assert.ok(revocations() > before, "activation terminates old sessions");
+  assert.equal(calls.filter((command) => command.binary === "ssh-keygen" && command.args.includes("-t")).length, generated);
+  assert.equal(fs.existsSync(path.join(directory, "pending_ed25519")), false);
+  assert.equal(fs.existsSync(path.join(directory, "pending_ed25519.pub")), false);
+  assert.equal(state.active, true);
+});
+
+test("prepared SSH keys cannot overwrite downloads or another pending key, and invalid activation preserves access", async (t) => {
+  const { adapter, directory, root } = lab(t);
+  await adapter.publish(request);
+  const active = fs.readFileSync(path.join(directory, "client_ed25519"), "utf8");
+  await assert.rejects(adapter.activateKey(request), /No complete SSH replacement key/);
+  const occupied = path.join(root, "occupied-download");
+  fs.writeFileSync(occupied, "preserve this file");
+  await assert.rejects(adapter.prepareKey({ output: occupied }), /EEXIST/);
+  assert.equal(fs.readFileSync(occupied, "utf8"), "preserve this file");
+  assert.equal(fs.existsSync(path.join(directory, "pending_ed25519")), false);
+  await adapter.prepareKey({ output: path.join(root, "prepared-download") });
+  const pending = fs.readFileSync(path.join(directory, "pending_ed25519"), "utf8");
+  const anotherOutput = path.join(root, "second-download");
+  await assert.rejects(adapter.prepareKey({ output: anotherOutput }), /already prepared/);
+  assert.equal(fs.existsSync(anotherOutput), false);
+  assert.equal(fs.readFileSync(path.join(directory, "pending_ed25519"), "utf8"), pending);
+  fs.appendFileSync(path.join(directory, "pending_ed25519.pub"), fs.readFileSync(path.join(directory, "client_ed25519.pub")));
+  await assert.rejects(adapter.activateKey(request), /does not match/);
+  assert.equal(fs.readFileSync(path.join(directory, "client_ed25519"), "utf8"), active);
+  assert.equal((await adapter.healthCheckExposure(request)).status, "healthy");
+});
+
+test("pending SSH key permissions, ownership and symlinks are checked before rotation", async (t) => {
+  for (const unsafe of ["permissions", "owner", "symlink"]) {
+    const { adapter, directory, root, filesystem } = lab(t);
+    await adapter.publish(request);
+    await adapter.prepareKey({ output: path.join(root, "prepared-download") });
+    const active = fs.readFileSync(path.join(directory, "client_ed25519"), "utf8");
+    const pendingPath = path.join(directory, "pending_ed25519");
+    if (unsafe === "permissions") fs.chmodSync(pendingPath, 0o644);
+    if (unsafe === "symlink") {
+      fs.rmSync(pendingPath);
+      fs.symlinkSync(path.join(root, "missing-key"), pendingPath);
+    }
+    if (unsafe === "owner") {
+      const stat = filesystem.lstatSync;
+      filesystem.lstatSync = (target) => ({ ...stat(target), ...(target === pendingPath ? { uid: 1000 } : {}) });
+    }
+    await assert.rejects(adapter.activateKey(request), /Unsafe host SSH file|private keys must have mode/);
+    assert.equal(fs.readFileSync(path.join(directory, "client_ed25519"), "utf8"), active);
+  }
+});
+
+test("failed preparation cleans only pending material and its new export, preserving the working key", async (t) => {
+  for (const failure of ["generation", "export"]) {
+    const { adapter, directory, root, commandRunner, filesystem, state } = lab(t);
+    await adapter.publish(request);
+    const active = fs.readFileSync(path.join(directory, "client_ed25519"), "utf8");
+    const output = path.join(root, "failed-download");
+    if (failure === "generation") {
+      const run = commandRunner.run;
+      commandRunner.run = async (command) => {
+        if (command.binary === "ssh-keygen" && command.args.includes(path.join(directory, "pending_ed25519"))) throw new Error("generation interrupted");
+        return run(command);
+      };
+    } else {
+      const write = filesystem.writeFileSync;
+      filesystem.writeFileSync = (target, content) => {
+        if (typeof target === "number") throw new Error("export interrupted");
+        return write(target, content);
+      };
+    }
+    await assert.rejects(adapter.prepareKey({ output }), /interrupted/);
+    assert.equal(fs.existsSync(output), false);
+    assert.equal(fs.existsSync(path.join(directory, "pending_ed25519")), false);
+    assert.equal(fs.existsSync(path.join(directory, "pending_ed25519.pub")), false);
+    assert.equal(fs.readFileSync(path.join(directory, "client_ed25519"), "utf8"), active);
+    assert.equal(state.active, true);
+  }
+});
+
+test("disable and uninstall discard prepared keys; failed activation leaves no usable authorization", async (t) => {
+  for (const action of ["disable", "uninstall", "failed-activation"]) {
+    const { adapter, directory, root, state } = lab(t);
+    await adapter.publish(request);
+    await adapter.prepareKey({ output: path.join(root, "prepared-download") });
+    if (action === "disable") await adapter.revoke();
+    else if (action === "uninstall") await adapter.uninstall();
+    else {
+      state.failStart = true;
+      await assert.rejects(adapter.activateKey(request), /start failed/);
+    }
+    assert.equal(fs.existsSync(path.join(directory, "pending_ed25519")), false);
+    assert.equal(fs.existsSync(path.join(directory, "pending_ed25519.pub")), false);
+    assert.equal(fs.existsSync(path.join(directory, "client_ed25519")), false);
+    assert.equal(state.active, false);
+    if (action !== "uninstall") assert.equal(fs.readFileSync(path.join(directory, "authorized_keys"), "utf8"), "");
+  }
 });
 
 test("uninstall removes only the managed unit and keys after revocation", async (t) => {
