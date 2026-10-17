@@ -28,10 +28,12 @@ function elevatedSession({ managed = true, unreadable = false, cycle = false, mi
   };
   const filesystem = /** @type {typeof fs} */ (/** @type {unknown} */ ({
     ...fs,
+    /** Supply owned PID-file metadata or simulate its absence before ancestry inspection. */
     lstatSync() {
       if (missing) throw Object.assign(new Error("No managed daemon"), { code: "ENOENT" });
       return { isSymbolicLink: () => false, isFile: () => true, uid: 0, mode: unsafe ? 0o666 : 0o644 };
     },
+    /** Return deterministic daemon/parent records without consulting the host's processes. */
     readFileSync(file) {
       if (unreadable || files[file] === undefined) throw Object.assign(new Error("Process information unavailable"), { code: "EACCES" });
       return files[file];

@@ -861,12 +861,19 @@ function hostSshFixture(options = {}) {
   const fixture = tcpFixture(options);
   const host = { enabled: false, generation: 0, calls: [] };
   fixture.adapters.providerAdapters.hostSsh = {
+    /** Supply a local host address without probing the machine running this test. */
     async suggestAddress() { return "192.168.1.10"; },
+    /** Simulate idempotent enablement and capture which host endpoint the CLI selected. */
     async publish(request) { host.calls.push(["publish", request]); if (!host.enabled) host.generation += 1; host.enabled = true; return { status: "healthy" }; },
+    /** Record revocation so shared-exposure tests can assert lifecycle ordering. */
     async revoke() { host.calls.push(["revoke"]); host.enabled = false; },
+    /** Simulate immediate rotation and export the replacement into the in-memory filesystem. */
     async replaceKey(request) { host.calls.push(["replace", request]); host.generation += 1; fixture.filesystem.writeFile(request.output, `key-${host.generation}`); },
+    /** Capture prepared-key activation without requiring a host daemon. */
     async activateKey(request) { host.calls.push(["activate", request]); host.generation += 1; },
+    /** Export the simulated active credential while rejecting disabled access. */
     async exportKey({ output }) { if (!host.enabled) throw new Error("disabled"); fixture.filesystem.writeFile(output, `key-${host.generation}`); },
+    /** Reflect simulated authorization state in the publication health result. */
     async healthCheckExposure() { return { status: host.enabled ? "healthy" : "unhealthy", ssh: "key-login-verified" }; }
   };
   /** Enable the fixture's host SSH exposure through the real CLI dispatch path. */
