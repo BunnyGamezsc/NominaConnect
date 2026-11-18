@@ -31,19 +31,24 @@ internet. [Lab network details](tools/lab/README.md).
 
 ## Install
 
-The [native installer](https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install-native.sh)
-downloads a compiled release without requiring Node.js. Download and inspect
-the script, copy it to your Proxmox node, then run it there:
+Run the native installer as root on your Proxmox host. It downloads the latest
+compiled release.
 
 ```sh
-bash install-native.sh
-nomina --version
+curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install-native.sh | bash
 ```
+
+For a Node.js installation, use this installer instead.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install.sh | bash
+```
+
+Check the installed version with `nomina --version`.
 
 Running the installer again updates the binary and keeps the previous binary
 as `/opt/nominaconnect/nomina.bak` by default. Updating Nomina does not upgrade
-provisioned services. The [Node.js installer](https://raw.githubusercontent.com/BunnyGamezsc/NominaConnect/main/install.sh)
-is an alternative. For unreleased PR code, build the checkout using the
+provisioned services. For unreleased PR code, build the checkout using the
 [developer instructions](#develop-and-test).
 
 ## Set up the platform
