@@ -152,6 +152,10 @@ explicit option. The setup guide covers upgrades, Apple profiles, Windows
 installers, resolver review and removal.
 [Household device setup](docs/device-setup.md)
 
+With managed step-ca and Technitium, choose **Provision or replace DNS-over-TLS
+certificate** to issue a certificate whenever you need one. Review enabling
+encrypted DNS separately in device setup.
+
 From the project on Proxmox:
 
 ```sh
@@ -276,6 +280,29 @@ expiry, gateway device-key expiry, and old test-device registrations as well.
 Use `nomina service upgrade <name>` for explicit upgrades. A pre-upgrade
 snapshot is optional when the storage supports it. Removal and destruction
 are separate workflows; read the prompt to decide whether to retain an LXC.
+
+### Upgrade Technitium
+
+From the Nomina project directory on your Proxmox host, run as root.
+
+```sh
+nomina service upgrade technitium --snapshot
+```
+
+The snapshot provides a rollback point on supported storage. DNS may pause
+briefly while Technitium restarts. To keep the upgrade running after signing
+out of SSH, start it as a background systemd job from the same directory.
+
+```sh
+job="nomina-technitium-upgrade-$(date -u +%Y%m%d-%H%M%S)"
+systemd-run --unit="$job" --working-directory="$PWD" --property=Type=exec \
+  --property=RemainAfterExit=yes "$(command -v nomina)" service upgrade technitium --snapshot
+journalctl -u "$job.service" -f
+```
+
+Look for `Health: healthy` in the job log. After reconnecting, find the unit
+with `systemctl list-units 'nomina-technitium-upgrade-*.service'`, then inspect
+its log with `journalctl -u UNIT`.
 
 Tailscale removal restores saved DNS before destroying its gateway. If another
 operator changed DNS settings, resolve the conflict first. `nomina uninstall`

@@ -98,6 +98,20 @@ export async function profileCommand(args, adapters, upgradeTechnitium) {
     const targets = v.target ?? pkg?.targets;
     if (v["apple-dns"] && !targets?.includes("apple"))
       throw new Error("--apple-dns requires --target apple.");
+    const homeCheckOption = v["home-check"];
+    const clearHomeCheck = typeof homeCheckOption === "string";
+    if (clearHomeCheck) {
+      const check = JSON.parse(homeCheckOption);
+      if (
+        !check ||
+        typeof check !== "object" ||
+        Array.isArray(check) ||
+        Object.keys(check).length
+      )
+        throw new Error(
+          "New packages match by Wi-Fi name. Pass --home-check '{}' to remove an existing extra check.",
+        );
+    }
     const technitiumIp = managedTechnitiumIp(project);
     const next = validateDefinition({
       name,
@@ -106,10 +120,7 @@ export async function profileCommand(args, adapters, upgradeTechnitium) {
       targets,
       appleDns: v["apple-dns"] ?? pkg?.appleDns,
       ssids: v.ssid ?? pkg?.ssids,
-      homeCheck:
-        typeof v["home-check"] === "string"
-          ? JSON.parse(v["home-check"])
-          : pkg?.homeCheck,
+      homeCheck: clearHomeCheck ? undefined : pkg?.homeCheck,
       mode: v.mode ?? pkg?.mode,
       suffix: v.suffix ?? pkg?.suffix,
       resolver: v.resolver ?? pkg?.resolver,

@@ -5,7 +5,7 @@ import path from "node:path";
 import os from "node:os";
 import tls from "node:tls";
 import { execFileSync, spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomUUID, X509Certificate } from "node:crypto";
 import packet from "dns-packet";
 import { PNG } from "pngjs";
 import { runCli } from "../src/cli.js";
@@ -20,6 +20,7 @@ import { queryTls, listenerPlan } from "../src/device-resolver.js";
 import {
   serializeProjectConfiguration,
   parseProjectConfiguration,
+  writeDevicePackageSelections,
 } from "../src/config.js";
 import { exportBundle } from "../src/device-export.js";
 
@@ -380,15 +381,29 @@ test("managed Technitium is the default device resolver in the wizard and CLI", 
   assert.deepEqual((await inspect("from-cli")).addresses, ["192.168.1.99"]);
 });
 
-test("Apple DNS rules can require more than a matching Wi-Fi name", async () => {
-  const { cmd, configure, projectDirectory } = mockProject();
-  await configure(
-    "--home-check",
-    JSON.stringify({
-      dnsServers: ["192.168.1.1", "fd00:0::1"],
-      probeUrl: "https://192.168.4.90/health",
-    }),
+function seedLegacyHomeCheck(projectDirectory, homeCheck) {
+  const file = path.join(projectDirectory, "nomina.yaml");
+  const document = fs.readFileSync(file, "utf8");
+  const config = parseProjectConfiguration(document);
+  config.devicePackages[0].homeCheck = homeCheck;
+  fs.writeFileSync(
+    file,
+    writeDevicePackageSelections(document, config.devicePackages),
   );
+}
+
+test("extra Wi-Fi checks are disabled for new settings and preserved in old exports", async () => {
+  const { cmd, configure, projectDirectory } = mockProject();
+  const homeCheck = {
+    dnsServers: ["192.168.1.1", "fd00:0::1"],
+    probeUrl: "https://192.168.4.90/health",
+  };
+  await assert.rejects(
+    configure("--home-check", JSON.stringify(homeCheck)),
+    /New packages match by Wi-Fi name/,
+  );
+  await configure();
+  seedLegacyHomeCheck(projectDirectory, homeCheck);
   const output = path.join(projectDirectory, "distinct-wifi");
   await cmd("export", "--name", "family", "--output", output);
   const apple = parsePlist(path.join(output, "mac.mobileconfig"));
@@ -402,16 +417,6 @@ test("Apple DNS rules can require more than a matching Wi-Fi name", async () => 
     },
     { Action: "Disconnect" },
   ]);
-  await assert.rejects(
-    cmd(
-      "configure",
-      "--name",
-      "family",
-      "--home-check",
-      '{"probeUrl":"http://192.168.4.90/health"}',
-    ),
-    /HTTPS check URL/,
-  );
   await cmd("configure", "--name", "family", "--home-check", "{}");
   const saved = JSON.parse((await cmd("inspect", "--name", "family")).stdout);
   assert.equal(saved.homeCheck, undefined);
@@ -540,9 +545,11 @@ test("DoT fixture requires authenticated TLS, matching question and a usable DNS
   try {
     const address = server.address();
     if (typeof address === "string") throw new Error("No fixture port.");
-    const query = (name, root) =>
-      queryTls("127.0.0.1", name, "home.test", root, address.port);
+    const query = (name, root, fingerprint = undefined) =>
+      queryTls("127.0.0.1", name, "home.test", root, address.port, fingerprint);
     assert.equal(await query("dns.home.test", pem), true);
+    assert.equal(await query("dns.home.test", pem, new X509Certificate(leaf).fingerprint256), true);
+    await assert.rejects(query("dns.home.test", pem, cert.fingerprint256), /did not present the new TLS certificate/);
     await assert.rejects(query("wrong.home.test", pem));
     await assert.rejects(query("dns.home.test", ""));
     bad = true;
@@ -550,6 +557,102 @@ test("DoT fixture requires authenticated TLS, matching question and a usable DNS
   } finally {
     await new Promise((r) => server.close(r));
   }
+});
+test("DoT issuance reviews first and rotates only the managed certificate with rollback on failure", async () => {
+  const { adapters, projectDirectory } = mockProject();
+  const settings = { version: "15.6.2", clusterInitialized: false, dnsTlsCertificatePath: "", enableDnsOverTls: false, dnsOverTlsPort: 853 };
+  const csr = fs.readFileSync(path.join(dir, "leaf.req"), "utf8");
+  const operations = [];
+  let chain = leaf.toString();
+  let verifies = true;
+  const toolsDir = fs.mkdtempSync(path.join(dir, "dns-tools-"));
+  fs.writeFileSync(path.join(toolsDir, "systemctl"), '#!/bin/sh\ncase "$1" in show) echo dns-server;; is-active) exit 0;; *) exit 1;; esac\n', { mode: 0o700 });
+  fs.writeFileSync(path.join(toolsDir, "chown"), '#!/bin/sh\n[ "$1 $2 $3" = "-- dns-server resolver.pfx" ]\n', { mode: 0o700 });
+  const fixture = {
+    ...adapters,
+    runtime: { isRoot: () => true, isProxmoxHost: () => true },
+    proxmox: {
+      pctExec: async (vmid, { binary, args, stdin }) => {
+        if (binary === "/bin/cat") return { stdout: pem };
+        const script = args[2];
+        if (script.startsWith("cat --")) return { stdout: leaf.toString() + pem };
+        operations.push(vmid === "201" ? "sign" : script.includes("openssl req") ? "csr" : script.includes("openssl verify") ? "stage" : "discard");
+        if (script.includes("openssl req")) return { stdout: csr };
+        if (vmid === "201") {
+          assert.equal(stdin, csr);
+          assert.match(script, /--san "\$2" --cnf-file/);
+          assert.deepEqual(args.slice(-2), [base.resolver, base.resolver]);
+          return { stdout: chain };
+        }
+        if (script.includes("openssl verify")) {
+          assert.equal(stdin, pem.trimEnd() + "\n" + leaf.toString().trimEnd() + "\n");
+          const stage = fs.mkdtempSync(path.join(dir, "dns-stage-"));
+          fs.writeFileSync(path.join(stage, "key.pem"), key, { mode: 0o600 });
+          execFileSync(binary, [...args.slice(0, -2), stage, args.at(-1)], {
+            input: stdin, env: { ...process.env, PATH: toolsDir + path.delimiter + process.env.PATH }, stdio: "pipe",
+          });
+          const pfx = path.join(stage, "resolver.pfx");
+          execFileSync("openssl", ["pkcs12", "-in", pfx, "-passin", "pass:", "-noout"], { stdio: "pipe" });
+          assert.equal(fs.statSync(pfx).mode & 0o777, 0o600);
+          assert.equal(fs.existsSync(path.join(stage, "key.pem")), false);
+        }
+        return { stdout: "" };
+      },
+    },
+    providerAdapters: {
+      technitium: {
+        inspectTlsListener: async () => ({ ...settings }),
+        setTlsCertificate: async (_, file) => {
+          operations.push(file);
+          settings.dnsTlsCertificatePath = file;
+        },
+      },
+    },
+    deviceTlsQuery: async (ip, host, zone, root, port, fingerprint) => {
+      assert.deepEqual([ip, host, zone, root, port, fingerprint], [base.addresses[0], base.resolver, "home.test", cert.toString(), 853, new X509Certificate(leaf).fingerprint256]);
+      if (!verifies) throw new Error("Fixture verification failed");
+      return true;
+    },
+  };
+  const command = (...args) => runCli(["ca", "dns-certificate", "--project-dir", projectDirectory, ...args], fixture);
+  const token = async () => (await command()).stdout.trimEnd().split(" ").at(-1);
+  const preview = await token();
+  assert.deepEqual(operations, []);
+  const cancelled = await runInteractiveApp({
+    ...fixture,
+    runCommand: runCli,
+    interactive: { chooseAction: async ({ options }) => {
+      assert.ok(options.some(option => option.value === "dns-certificate"));
+      return "dns-certificate";
+    } },
+    prompts: { ask: async (_, initial) => initial, info: () => {}, confirm: async () => false },
+  });
+  assert.equal(cancelled.cancelled, true);
+  assert.deepEqual(operations, []);
+  await assert.rejects(command("--hostname", "different.home.test", "--approve", preview), /review has changed/);
+  chain = pem;
+  await assert.rejects(command("--approve", preview), /did not issue a leaf/);
+  assert.deepEqual(operations.splice(0), ["csr", "sign", "discard"]);
+  chain = leaf.toString();
+  assert.match((await command("--approve", preview)).stdout, /DNS-over-TLS remains off/);
+  const initial = settings.dnsTlsCertificatePath;
+  assert.match(initial, /^\/var\/lib\/nomina-dns-tls\/.+\/resolver\.pfx$/);
+  assert.deepEqual(operations.splice(0), ["csr", "sign", "stage", initial]);
+
+  settings.enableDnsOverTls = true;
+  await assert.rejects(command("--hostname", "different.home.test"), /Existing profiles depend on it/);
+  verifies = false;
+  await assert.rejects(command("--approve", await token()), /Fixture verification failed/);
+  assert.equal(settings.dnsTlsCertificatePath, initial);
+  assert.deepEqual(operations.splice(0).slice(-2), [initial, "discard"]);
+  verifies = true;
+  assert.match((await command("--approve", await token())).stdout, /Verified the new certificate/);
+  assert.notEqual(settings.dnsTlsCertificatePath, initial);
+  assert.equal(settings.enableDnsOverTls, true);
+  assert.equal(operations.at(-1), "discard");
+
+  settings.dnsTlsCertificatePath = "/etc/dns/manual.pfx";
+  await assert.rejects(command(), /managed outside Nomina/);
 });
 test("Technitium change requires a fresh review, reuses compatible listener and rolls back only its toggle", async () => {
   const { cmd, configure, adapters } = mockProject();
@@ -717,7 +820,8 @@ test("later menu edits a saved definition and exports through the shared command
     dnsServers: ["192.168.1.1"],
     probeUrl: "https://192.168.4.90/health",
   };
-  await configure("--home-check", JSON.stringify(homeCheck));
+  await configure();
+  seedLegacyHomeCheck(projectDirectory, homeCheck);
   const destination = path.join(projectDirectory, "from-menu");
   const prompts = {
     select: async ({ message, options, initialValue }) => {

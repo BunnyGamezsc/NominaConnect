@@ -5,7 +5,7 @@ import { randomInt } from "node:crypto";
 import packet from "dns-packet";
 
 // Bind transport to each reviewed IP, while authenticating the DNS hostname.
-export function queryTls(ip, hostname, zone, ca, port = 853) {
+export function queryTls(ip, hostname, zone, ca, port = 853, fingerprint = undefined) {
   const id = randomInt(65536);
   const wire = packet.streamEncode({
     type: "query",
@@ -31,7 +31,13 @@ export function queryTls(ip, hostname, zone, ca, port = 853) {
       reject(new Error("Incomplete DNS-over-TLS response"));
     });
     socket.once("error", reject);
-    socket.once("secureConnect", () => socket.write(wire));
+    socket.once("secureConnect", () => {
+      if (fingerprint && socket.getPeerCertificate().fingerprint256 !== fingerprint) {
+        socket.destroy(new Error("The resolver did not present the new TLS certificate."));
+        return;
+      }
+      socket.write(wire);
+    });
     let bytes = Buffer.alloc(0);
     socket.on("data", (part) => {
       bytes = Buffer.concat([bytes, Buffer.from(part)]);
@@ -106,7 +112,7 @@ export function listenerPlan(settings, addresses) {
     );
   if (!settings.dnsTlsCertificatePath)
     throw new Error(
-      "In Technitium Settings > Optional Protocols, configure a renewable PKCS#12 certificate matching the resolver hostname, then review again.",
+      "Use nomina ca dns-certificate with managed step-ca, or configure a PKCS#12 certificate in Technitium Settings > Optional Protocols, then review again.",
     );
   if (
     settings.dnsOverTlsPort !== 853 ||

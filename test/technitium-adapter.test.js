@@ -537,7 +537,7 @@ test("nomina service add technitium uses production adapters against Proxmox com
   assert.doesNotMatch(filesystem.read("/projects/bunnyhome/nomina.yaml"), /top-secret/);
 });
 
-test("encrypted listener inspection filters credentials and only writes the reviewed toggle", async () => {
+test("encrypted listener inspection filters credentials and writes only the selected setting", async () => {
   const calls = [];
   const adapter = createTechnitiumAdapter({
     secretResolver: { resolve: () => "fixture" },
@@ -557,7 +557,11 @@ test("encrypted listener inspection filters credentials and only writes the revi
   assert.doesNotMatch(JSON.stringify(settings),/redacted-fixture/);
   await adapter.setTlsEnabled(request,true);
   await adapter.setTlsEnabled(request,false);
+  await adapter.setTlsCertificate(request,"/var/lib/nomina-dns-tls/example/resolver.pfx");
+  await adapter.setTlsCertificate(request,"");
   assert.deepEqual(calls.filter(url=>url.pathname==="/api/settings/set").map(url=>[...url.searchParams]),[
-    [["enableDnsOverTls","true"]],[["enableDnsOverTls","false"]]
+    [["enableDnsOverTls","true"]],[["enableDnsOverTls","false"]],
+    [["dnsTlsCertificatePath","/var/lib/nomina-dns-tls/example/resolver.pfx"],["dnsTlsCertificatePassword",""]],
+    [["dnsTlsCertificatePath",""],["dnsTlsCertificatePassword",""]]
   ]);
 });

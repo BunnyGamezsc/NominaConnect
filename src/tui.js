@@ -1,4 +1,5 @@
 import { deviceMenu } from "./device-menu.js";
+import { canProvisionDnsCertificate, dnsCertificateMenu } from "./dns-certificate.js";
 import { findExposure, resolveExposure, isWebExposure } from "./exposure-identity.js";
 import * as clack from "@clack/prompts";
 import { INITIAL_PLATFORM_CATALOG } from "./catalog.js";
@@ -173,6 +174,7 @@ const MENU_ENTRIES = Object.freeze([
     return Boolean(ref?.vmid && !ref.provisioningPending);
   }},
   { value: "view-ca-guide", label: "View step-ca trust guide", hint: "install CA root on devices", when: canShowCaTrustGuide },
+  { value: "dns-certificate", label: "Provision or replace DNS-over-TLS certificate", when: canProvisionDnsCertificate },
   { value: "export-ca-cert", label: "Export step-ca root certificate", hint: "save cert + scp/install steps", when: canShowCaTrustGuide },
   { value: "upgrade-service", label: "Upgrade a managed service", hint: "explicit service upgrade with snapshot", when: hasProvisionedServices },
   { value: "remove-service", label: "Remove a managed service", hint: "disconnect integrations and retain data", when: hasProvisionedServices },
@@ -246,6 +248,7 @@ export async function runInteractiveApp(adapters) {
     return { stdout: "", cancelled: true };
   }
   if (action === "device-setup") return deviceMenu(adapters);
+  if (action === "dns-certificate") return dnsCertificateMenu(adapters, project);
   if (action === "docker-hosts") {
     const result = await adapters.runCommand(["docker"], adapters);
     clack.outro(result.cancelled ? "Docker operation cancelled." : "Docker operation complete.");

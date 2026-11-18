@@ -1,6 +1,7 @@
 import { validateDefinition } from "./device-definition.js";
 import { findProjectDirectory, loadProject } from "./config.js";
 import { managedTechnitiumIp } from "./provisioning.js";
+import { canProvisionDnsCertificate, dnsCertificateMenu } from "./dns-certificate.js";
 
 export async function deviceMenu(adapters, { afterProvision = false } = {}) {
   const p = adapters.prompts;
@@ -75,7 +76,7 @@ export async function deviceMenu(adapters, { afterProvision = false } = {}) {
       saved.description ?? "Home network device setup",
     );
     const ssids = [];
-    const homeCheck = {};
+    let homeCheck = saved.homeCheck;
     let mode, suffix, resolver;
     let addresses = [];
     if (appleDns === "encrypted" || targets.includes("windows")) {
@@ -117,41 +118,15 @@ export async function deviceMenu(adapters, { afterProvision = false } = {}) {
           : "";
         ssids.push(selectedSsid || (await p.ask("Exact home Wi-Fi name")));
       }
-      const savedCheck = saved.homeCheck ?? {};
-      const defaultCheck = savedCheck.dnsServers
-        ? savedCheck.probeUrl
-          ? "both"
-          : "dns"
-        : savedCheck.probeUrl
-          ? "https"
-          : "ssid";
-      const match = await choose(
-        "How should Nomina recognize home Wi-Fi?",
-        [
-          ["ssid", "Wi-Fi name only"],
-          ["dns", "Wi-Fi name and expected DNS server addresses"],
-          ["https", "Wi-Fi name and a home-only HTTPS check"],
-          ["both", "Wi-Fi name, DNS server addresses and HTTPS check"],
-        ],
-        defaultCheck,
-      );
-      if (match === "dns" || match === "both")
-        homeCheck.dnsServers = (
-          (await p.ask(
-            "DNS server IPs this Wi-Fi already uses (comma separated)",
-            savedCheck.dnsServers?.join(", "),
-            savedCheck.dnsServers?.join(", ") ?? "e.g. 192.168.1.1",
-          )) ?? ""
-        )
-          .split(",")
-          .map((ip) => ip.trim());
-      if (match === "https" || match === "both")
-        homeCheck.probeUrl =
-          (await p.ask(
-            "Home-only HTTPS URL that returns HTTP 200",
-            savedCheck.probeUrl,
-            savedCheck.probeUrl ?? "e.g. https://192.168.1.10/health",
-          )) ?? "";
+      if (
+        homeCheck &&
+        (await p.confirm({
+          message:
+            "Remove this package's extra network checks and use Wi-Fi names only?",
+          initialValue: false,
+        }))
+      )
+        homeCheck = undefined;
       mode = await choose(
         "DNS policy",
         [
@@ -194,10 +169,22 @@ export async function deviceMenu(adapters, { afterProvision = false } = {}) {
           )
             .split(",")
             .map((ip) => ip.trim());
+      if (
+        appleDns === "encrypted" && addresses.length === 1 && addresses[0] === technitiumIp &&
+        canProvisionDnsCertificate(project) && await p.confirm({
+          message: "Issue a new encrypted DNS certificate for Technitium now?",
+          initialValue: false,
+        })
+      ) {
+        const issued = await dnsCertificateMenu(adapters, project, saved.resolver);
+        if (issued.cancelled) return cancelled;
+        p.info(issued.stdout.trim());
+        resolver = issued.hostname;
+      }
     }
-    if (appleDns === "encrypted")
+    if (appleDns === "encrypted" && !resolver)
       resolver = await p.ask(
-        "DNS-over-TLS certificate hostname",
+        "DNS server name on its encrypted DNS certificate",
         saved.resolver,
         saved.resolver ?? "e.g. dns.home.example",
       );
@@ -286,7 +273,7 @@ export async function deviceMenu(adapters, { afterProvision = false } = {}) {
       ...(resolver ? ["--resolver", resolver] : []),
       ...targets.flatMap((t) => ["--target", t]),
       ...ssids.flatMap((s) => ["--ssid", s]),
-      ...(mode ? ["--home-check", JSON.stringify(homeCheck)] : []),
+      ...(saved.homeCheck && !homeCheck ? ["--home-check", "{}"] : []),
       ...addresses.flatMap((ip) => ["--address", ip]),
       ...(suffix ? ["--suffix", suffix] : []),
       ...(shortcuts.length

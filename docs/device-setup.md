@@ -51,21 +51,13 @@ nomina ca profile configure --name household \
   --shortcut '{"name":"Music","url":"https://music.home.example/","opening":"browser"}'
 ```
 
-## Distinguish Wi-Fi networks with the same name
+## Choose your home Wi-Fi
 
 If the Proxmox host is connected to Wi-Fi and has `iw` available, the setup menu offers its connected network names alongside manual entry. Selecting one copies its name into the package. A wired host uses the manual entry path. [Linux Wi-Fi link inspection](https://wireless.docs.kernel.org/en/latest/en/users/documentation/iw.html#getting-link-status)
 
-When Nomina will manage device DNS, choose how it recognizes home Wi-Fi. The default checks the Wi-Fi name. Add either or both checks when another network uses the same name.
+Nomina activates managed DNS when the device connects to one of the saved Wi-Fi names. Choose a name that identifies your home among the networks you join.
 
-- **Expected DNS servers** checks for at least one of the listed IP addresses among the DNS servers already assigned to that Wi-Fi connection. Use addresses that differ between the networks.
-- **Home-only HTTPS check** requires a trusted HTTPS endpoint to return HTTP 200 without redirection. Use an endpoint restricted to the home LAN that works before Nomina DNS activates. If a VPN can reach that endpoint while away, the check can succeed there too. Serve it with a valid certificate and `Cache-Control: no-store`. If the endpoint fails, the device treats the network as off-network. Keep this check independent of the resolver it gates.
-
-The device requires the Wi-Fi name and all selected checks. Nomina saves these checks in the package. Re-export and replace the device profile or installer after editing them. The CLI takes the same settings through `--home-check`. Pass `'{}'` to return to Wi-Fi-name-only matching. [Apple network-matching rules](https://github.com/apple/device-management/blob/release/mdm/profiles/com.apple.dnsSettings.managed.yaml) · [Windows interface DNS addresses](https://learn.microsoft.com/en-us/powershell/module/dnsclient/get-dnsclientserveraddress)
-
-```sh
-nomina ca profile configure --name household \
-  --home-check '{"dnsServers":["192.168.1.1"],"probeUrl":"https://192.168.4.90/health"}'
-```
+Packages already saved with extra DNS server or HTTPS checks keep those checks. To switch such a package to Wi-Fi name only, confirm removal when editing in the wizard, or run `nomina ca profile configure --name household --home-check '{}'`. Re-export and replace installed profiles or installers to apply the edit.
 
 ## Prepare the resolver
 
@@ -74,11 +66,26 @@ Windows uses ordinary system DNS over port 53. Apple packages use DNS over TLS o
 Reusing a working DoT endpoint avoids a configuration change or restart on your existing resolver. For the managed Technitium setup path:
 
 1. Inspect the standalone DNS server's **Settings**. Use Technitium 15.4.x or 15.6.x, private-network-only recursion, and explicit LAN listener addresses. Include any existing required private or loopback listeners. Nomina's setup review rejects wildcard binds. For a project that needs its existing binds left in place, use the Apple existing-DNS option or an independently configured DoT endpoint. Keep port 853 available on the endpoint.
-2. Supply a renewable server leaf certificate with the reviewed DNS name, its private key and chain in Technitium's PKCS#12 certificate setting on the DNS host. Protect the file and password there. The setup command reuses this certificate and the configured port. Arrange renewal and confirm that Technitium reloads the new leaf before expiration. Nomina does not generate a server key in the client bundle.
+2. Provision a certificate for the DNS server with Nomina as described below, or configure your own PKCS#12 certificate, private key and chain in Technitium's **Optional Protocols** settings. Use the name on the certificate when configuring the device package.
 3. Run `nomina ca profile resolver-setup --name household`. Review the identified LXC, existing certificate path, LAN binds, endpoint, port and CA fingerprint. The command prints a digest when a change is needed. Repeat it with `--approve DIGEST` from that review to enable DoT. A changed review requires fresh approval. The menu offers the same review. Technitium restarts its DNS listeners when it applies or reverts this toggle, so plan for a brief interruption if you enable it on a resolver already serving clients. On verification failure the command rechecks the settings before reverting its toggle. Run the review again following an interruption.
 4. Run `resolver-check` again after renewal or changes. Resolve any TLS-name, certificate-chain, port, recursion, or SOA failure before exporting. DoT authenticates the hostname over each bootstrap IP, using public built-in roots plus the retrieved household root. A new CA fingerprint requires explicit export approval via `--accept-root-change` and manual redistribution. A renewed leaf under the same root can use the existing package.
 
 The implementation reads the root through managed LXC host control. It accepts the configured step-ca root, or the standard Caddy system-service local root after the authority has initialized it. Custom Caddy storage requires independent integration. Native Technitium setup changes only its DoT enable flag. Client removal leaves that shared server listener available. [Technitium 15.4 API](https://github.com/TechnitiumSoftware/DnsServer/blob/v15.4.0/APIDOCS.md) · [Technitium 15.6.2 API](https://github.com/TechnitiumSoftware/DnsServer/blob/v15.6.2/APIDOCS.md) · [Listener restart implementation](https://github.com/TechnitiumSoftware/DnsServer/blob/v15.6.2/DnsServerCore/WebServiceSettingsApi.cs#L1133) · [Caddy service root](https://caddyserver.com/docs/running)
+
+### Provision or replace the Technitium certificate
+
+With managed step-ca and standalone Technitium, choose **Provision or replace DNS-over-TLS certificate** in the main menu any time. The Apple encrypted DNS wizard also offers this option when using the managed resolver. Nomina suggests `dns.<your local domain>` on first use and the current hostname on replacement. The hostname identifies the certificate. The device profile uses the configured LAN IP to reach the resolver.
+
+From the project on Proxmox, run the first command to review the hostname, CA fingerprint and resolver. Use the printed digest with the second command to apply.
+
+```sh
+nomina ca dns-certificate --hostname dns.home.test
+nomina ca dns-certificate --hostname dns.home.test --approve DIGEST
+```
+
+Nomina generates the private key inside the DNS LXC. Only the public signing request goes to step-ca. The DNS LXC checks the returned chain and hostname against the reviewed root, then stores the PKCS#12 with file permissions restricted to the Technitium service account and root. The command selects the certificate independently of listener setup. If DoT is active, Nomina verifies the newly served certificate and a DNS answer, and attempts to restore the previous certificate if verification fails.
+
+Issuance uses the CA provisioner's configured validity period. Check the expiration printed by Nomina and repeat the command before then. The default step-ca lifetime is 24 hours. Use the same hostname and CA root for replacements while DoT is active so installed profiles can continue using it. For externally managed certificates or active DNS-over-HTTPS or DNS-over-QUIC, continue managing the shared certificate in Technitium. [Smallstep issuance and renewal](https://smallstep.com/docs/step-ca/basic-certificate-authority-operations/) · [Technitium TLS certificate settings](https://github.com/TechnitiumSoftware/DnsServer/blob/v15.6.2/APIDOCS.md)
 
 ### Include a Technitium upgrade
 
