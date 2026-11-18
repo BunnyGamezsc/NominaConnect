@@ -536,3 +536,28 @@ test("nomina service add technitium uses production adapters against Proxmox com
   assert.equal(JSON.stringify(runner.commands).includes("top-secret"), false);
   assert.doesNotMatch(filesystem.read("/projects/bunnyhome/nomina.yaml"), /top-secret/);
 });
+
+test("encrypted listener inspection filters credentials and only writes the reviewed toggle", async () => {
+  const calls = [];
+  const adapter = createTechnitiumAdapter({
+    secretResolver: { resolve: () => "fixture" },
+    httpClient: { request: async request => {
+      const url = new URL(request.url);
+      calls.push(url);
+      const body = url.pathname === "/api/user/login" ? {status:"ok",token:"fixture-session"} : {status:"ok",response:{
+        enableDnsOverTls:false, version:"15.6.2", recursion:"AllowOnlyForPrivateNetworks", dnsTlsCertificatePath:"/dns.pfx",
+        dnsTlsCertificatePassword:"redacted-fixture", tsigKeys:["redacted-fixture"]
+      }};
+      return {status:200,body:JSON.stringify(body)};
+    }}
+  });
+  const request = {ip:"192.0.2.53",connectionSecretReference:"fixture"};
+  const settings = await adapter.inspectTlsListener(request);
+  assert.equal(settings.enableDnsOverTls,false);
+  assert.doesNotMatch(JSON.stringify(settings),/redacted-fixture/);
+  await adapter.setTlsEnabled(request,true);
+  await adapter.setTlsEnabled(request,false);
+  assert.deepEqual(calls.filter(url=>url.pathname==="/api/settings/set").map(url=>[...url.searchParams]),[
+    [["enableDnsOverTls","true"]],[["enableDnsOverTls","false"]]
+  ]);
+});

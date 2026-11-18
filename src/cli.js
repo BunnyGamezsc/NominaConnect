@@ -1,3 +1,4 @@
+import { profileCommand } from "./device-commands.js";
 import { HOST_SSH_PORT } from "./host-ssh-adapter.js";
 import { findExposure, resolveExposure, sameHostname, isWebExposure, isStreamExposure } from "./exposure-identity.js";
 import { tcpRequest, preflightTcpExposure } from "./tcp-exposure.js";
@@ -67,7 +68,7 @@ export async function runCli(argumentsList, adapters) {
   // lifecycle lock so a VMID is saved before installation begins.
   const explicitProjectIndex = rest.indexOf("--project-dir");
   const candidateDirectory = command === "docker" || !adapters.filesystem?.acquireProjectLock ? undefined
-    : explicitProjectIndex >= 0 ? rest[explicitProjectIndex + 1] : findProjectDirectory(adapters.filesystem, adapters.cwd ?? ".");
+    : explicitProjectIndex >= 0 ? rest[explicitProjectIndex + 1] : rest.find(arg => arg.startsWith("--project-dir="))?.slice("--project-dir=".length) ?? findProjectDirectory(adapters.filesystem, adapters.cwd ?? ".");
   const directory = candidateDirectory !== undefined && adapters.filesystem.exists(path.posix.join(candidateDirectory, ".nomina/state.json")) ? candidateDirectory : undefined;
   const releaseOperation = directory === undefined || command !== "uninstall" ? undefined : await adapters.filesystem.acquireProjectLock?.(directory, "docker-operation");
   let release;
@@ -78,6 +79,8 @@ export async function runCli(argumentsList, adapters) {
   } finally {
     try { release?.(); } finally { releaseOperation?.(); }
   }
+  // Device package commands run only the reviewed workflow, including read-only checks.
+  if (command === "ca" && rest[0] === "profile") return commandResult;
   if ("sshOperation" in commandResult) return adapters.sshOperations.launch(commandResult.sshOperation);
   if (!("cancelled" in commandResult && commandResult.cancelled) && !("reviewOnly" in commandResult && commandResult.reviewOnly)) startTrackingJobInBackground(adapters);
   return commandResult;
@@ -95,7 +98,7 @@ async function runCommand(command, rest, adapters) {
   if (command === "--version" || command === "-v" || command === "version") {
     return { stdout: `${VERSION}\n` };
   }
-  if (command === "--help" || command === "help" || command === "-h") return { stdout: "nomina ssh enable [--hostname HOST] [--ssh-user root] [--host-ip PRIVATE_IP]\nnomina ssh export --output /absolute/path/nomina_ssh\nnomina ssh prepare-key --output /absolute/path/new_nomina_ssh\nDownload the prepared key before activation.\nnomina ssh activate-key\nnomina ssh replace-key --output /absolute/path/new_nomina_ssh (immediate; independent administrator access required)\nnomina ssh disable\nHost SSH uses one generated key, LAN and optional Nomina VPN access; no router port forwarding.\nnomina exposure publish --name NAME --protocol https|tcp|smb|ssh --hostname HOST --backend-ip IP [--backend-port PORT] [--listener-port PORT] [--tailnet true|false]\nHTTPS is the default. HTTPS and generic TCP require a backend port. TCP listens on the backend port by default; Minecraft Java uses 25565. Raw TCP selects a backend by listener address and port.\nSMB uses client TCP 445, with backend port 445 by default, and supports existing Samba/NAS/VM servers. Windows: \\\\files.bunny.internal\\SHARE. macOS: smb://files.bunny.internal/SHARE. Shares, credentials and permissions stay on the server. Configure Samba hostname aliases; see docs/smb-live-verification.md.\nRemove with: nomina service remove NAME\n" + DOCKER_EXPOSURE_HELP };
+  if (command === "--help" || command === "help" || command === "-h") return { stdout: "nomina ssh enable [--hostname HOST] [--ssh-user root] [--host-ip PRIVATE_IP]\nnomina ssh export --output /absolute/path/nomina_ssh\nnomina ssh prepare-key --output /absolute/path/new_nomina_ssh\nDownload the prepared key before activation.\nnomina ssh activate-key\nnomina ssh replace-key --output /absolute/path/new_nomina_ssh (immediate; independent administrator access required)\nnomina ssh disable\nHost SSH uses one generated key, LAN and optional Nomina VPN access; no router port forwarding.\nnomina exposure publish --name NAME --protocol https|tcp|smb|ssh --hostname HOST --backend-ip IP [--backend-port PORT] [--listener-port PORT] [--tailnet true|false]\nHTTPS is the default. HTTPS and generic TCP require a backend port. TCP listens on the backend port by default; Minecraft Java uses 25565. Raw TCP selects a backend by listener address and port.\nSMB uses client TCP 445, with backend port 445 by default, and supports existing Samba/NAS/VM servers. Windows: \\\\files.bunny.internal\\SHARE. macOS: smb://files.bunny.internal/SHARE. Shares, credentials and permissions stay on the server. Configure Samba hostname aliases; see docs/smb-live-verification.md.\nRemove with: nomina service remove NAME\n" + DOCKER_EXPOSURE_HELP + "\nDevice setup: nomina ca profile configure|list|inspect|resolver-check|resolver-setup|export. See docs/device-setup.md.\n" };
   switch (command) {
     case "docker":
       return handleDockerCommand(rest, adapters);
@@ -244,6 +247,8 @@ async function handleSecretCommand(argumentsList, adapters) {
 
 async function handleCaCommand(argumentsList, adapters) {
   const [subcommand, ...rest] = argumentsList;
+  if (subcommand === "profile") return profileCommand(rest, adapters, projectDirectory =>
+    upgradeService("technitium", ["--project-dir", projectDirectory, "--snapshot"], adapters));
   if (subcommand !== "guide" && subcommand !== "trust" && subcommand !== "cert" && subcommand !== "export" && subcommand !== undefined) {
     throw new Error("Run nomina for the interactive menu, or use: nomina ca guide|cert|export");
   }
@@ -1105,13 +1110,12 @@ async function upgradeService(serviceName, rawOptions, adapters) {
     vmid,
     zone: project.config.baseLocalDomain
   };
-  const inspection = await plugin.inspect(adapter, managedItem, upgradeContext);
-  // An upgrade restarts the provider, so the probe lands squarely in its
-  // startup window; a single unretried check reports a false "unhealthy".
+  // Wait for the restarted provider before reading its managed inventory.
   const health = await withHealthyRetry(
     () => plugin.healthCheck(adapter, managedItem, upgradeContext),
     { maxAttempts: 7, baseDelayMs: 2000, backoffFactor: 1.5, ...(adapters.retryOptions ?? {}) }
   );
+  const inspection = await plugin.inspect(adapter, managedItem, upgradeContext);
 
   const snapshotText = snapshotResult ? `Snapshot ${snapshotResult.snapshotName ?? snapshotResult.name} created. ` : "";
   const healthLabel = health.status === "healthy" ? "healthy" : "unhealthy";

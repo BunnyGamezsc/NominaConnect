@@ -1,6 +1,6 @@
 {
   "name": "nominaconnect",
-  "version": "2.5.2",
+  "version": "2.6.0",
   "private": true,
   "type": "module",
   "bin": {
@@ -23,6 +23,8 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@clack/prompts": "^1.7.0"
+    "@clack/prompts": "^1.7.0",
+    "dns-packet": "^5.6.1",
+    "pngjs": "^7.0.0"
   }
 }

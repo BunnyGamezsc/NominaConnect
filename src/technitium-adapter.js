@@ -29,6 +29,16 @@ export function createTechnitiumAdapter({ httpClient, secretResolver, enableNest
     async upgrade(plan) {
       return { ...plan, lxcCommands: TECHNITIUM_INSTALL };
     },
+    async inspectTlsListener(request) {
+      const session = await authenticate(httpClient, secretResolver, request);
+      const {response} = await apiGet(httpClient, session, "/api/settings/get");
+      const {version, clusterInitialized, dnsServerLocalEndPoints, dnsTlsCertificatePath, dnsOverTlsPort, enableDnsOverTls, recursion} = response;
+      return {version, clusterInitialized, dnsServerLocalEndPoints, dnsTlsCertificatePath, dnsOverTlsPort, enableDnsOverTls, recursion};
+    },
+    async setTlsEnabled(request, enabled) {
+      const session = await authenticate(httpClient, secretResolver, request);
+      await apiGet(httpClient, session, "/api/settings/set", {enableDnsOverTls: enabled});
+    },
     async configure(request) {
       const session = await authenticate(httpClient, secretResolver, request);
       await createAuthoritativeZone(httpClient, session, request.zone);

@@ -1,4 +1,5 @@
 import path from "node:path";
+import { validateDefinition } from "./device-definition.js";
 
 function readNestedBlock(lines, startIndex, parentIndent = -1) {
   const value = {};
@@ -69,12 +70,25 @@ export function parseProjectConfiguration(content) {
   const config = {
     proxmox: {},
     managedInventory: { platform: {}, services: [] },
-    connectionSecretReferences: {}
+    connectionSecretReferences: {},
+    devicePackages: []
   };
 
   let index = 0;
   while (index < lines.length) {
     const line = lines[index].trim();
+    if (lines[index].startsWith("devicePackages:")) {
+      const packages = JSON.parse(line.slice("devicePackages:".length).trim());
+      if (!Array.isArray(packages)) throw new Error("Expected a device package array.");
+      config.devicePackages = packages.map(pkg => validateDefinition({
+        ...pkg,
+        // Apple packages saved by the device-setup preview included DoT.
+        appleDns: pkg.appleDns ?? (pkg.targets?.includes("apple") ? "encrypted" : undefined)
+      }));
+      if (new Set(config.devicePackages.map(p => p.name)).size !== packages.length) throw new Error("Duplicate device package name.");
+      index++;
+      continue;
+    }
     if (line === "proxmox:") {
       const headerIndent = lines[index].match(/^(\s*)/)?.[1].length ?? 0;
       const block = readNestedBlock(lines, index + 1, headerIndent);
@@ -117,6 +131,7 @@ export function parseProjectConfiguration(content) {
     if (line === "connectionSecretReferences:") {
       index += 1;
       while (index < lines.length) {
+        if (/^\S/.test(lines[index])) break;
         const refLine = lines[index]?.trim();
         if (refLine === "") {
           index += 1;
@@ -280,6 +295,21 @@ export function updatePlatformDeployment(config, platformKey, deployment) {
   };
 }
 
+function devicePackagesLine(packages) {
+  return "devicePackages: " + JSON.stringify(packages.map(validateDefinition));
+}
+
+/** Edit only the top-level package selection in an existing project document. */
+export function writeDevicePackageSelections(document, packages) {
+  const line = devicePackagesLine(packages);
+  const existing = /^devicePackages:[^\r\n]*/gm;
+  const fields = [...document.matchAll(existing)];
+  if (fields.length > 1) throw new Error("Duplicate devicePackages fields in nomina.yaml.");
+  if (fields.length === 1) return document.replace(existing, () => line);
+  const newline = document.includes("\r\n") ? "\r\n" : "\n";
+  return document + (document.endsWith("\n") ? "" : newline) + line + newline;
+}
+
 /** Serialize managed inventory and Docker deployment intent without including runtime provider references. */
 export function serializeProjectConfiguration(config) {
   const lines = [
@@ -290,6 +320,7 @@ export function serializeProjectConfiguration(config) {
     `  defaultBridge: ${yamlScalar(config.proxmox.defaultBridge)}`,
     `  defaultStorage: ${yamlScalar(config.proxmox.defaultStorage)}`,
     `baseLocalDomain: ${yamlScalar(config.baseLocalDomain)}`,
+    ...(config.devicePackages?.length ? [devicePackagesLine(config.devicePackages)] : []),
     "managedInventory:",
     "  platform:"
   ];

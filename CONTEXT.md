@@ -312,3 +312,24 @@ _Avoid_: server identity key, LXC administrator key, per-device identity
 A DNS name used by multiple independently managed, compatible exposures.
 Removing one exposure preserves the name while another exposure still needs it.
 _Avoid_: exposure identity, hostname-based TCP routing
+
+**Device setup package**:
+An optional, explicitly generated bundle of client trust and network settings
+that helps a household device access managed exposures. Its contents and
+distribution are selected by the operator.
+_Avoid_: super certificate, mandatory enrollment, managed device
+
+**Home network rule**:
+The operator-selected condition identifying when a device should use its
+device setup package's DNS policy. Outside that network, the policy is inactive.
+_Avoid_: always-on DNS, network-wide configuration
+
+**Whole-system DNS policy**:
+A device setup choice that sends ordinary system DNS queries to the selected
+resolver while the home network rule matches.
+_Avoid_: universal DNS interception, enforced DNS
+
+**Private-domain DNS policy**:
+A device setup choice that sends only the selected private domain's DNS queries
+to the selected resolver while the home network rule matches.
+_Avoid_: all-DNS override, global DNS replacement

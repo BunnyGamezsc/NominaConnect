@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.6.0] - 2026-11-18
+
+### Added
+- Optional household device setup with Apple profiles and Windows installers
+  for CA trust, home Wi-Fi DNS policies, and custom shortcuts.
+- Apple profiles default to the device's existing DNS. An encrypted DNS
+  profile can be enabled separately for the same package.
+- Existing projects can opt in through the same device setup menu as new
+  projects. The workflow reuses the managed CA and saves package settings
+  alongside the existing project configuration.
+- The encrypted DNS review can include an in-place Technitium upgrade,
+  a Proxmox snapshot where supported, and DNS verification before export.
+
 ## [2.5.2] - 2026-10-17
 
 ### Added

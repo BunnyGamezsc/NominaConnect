@@ -1,3 +1,4 @@
+import { deviceMenu } from "./device-menu.js";
 import { findExposure, resolveExposure, isWebExposure } from "./exposure-identity.js";
 import * as clack from "@clack/prompts";
 import { INITIAL_PLATFORM_CATALOG } from "./catalog.js";
@@ -174,6 +175,11 @@ const MENU_ENTRIES = Object.freeze([
     when: canToggleHttpRedirect
   },
   { value: "enable-host-ssh", label: "Enable host SSH", hint: "key-only access over LAN and Nomina VPN", when: (project) => canPublishStreamExposure(project) && !(project.config.managedInventory.services ?? []).some((service) => service.exposure?.protocol === "ssh") },
+  { value: "device-setup", label: "Set up household devices", hint: "configure and export Apple or Windows packages", when: project => {
+    const ca = project?.config?.managedInventory?.platform?.certificateAuthority;
+    const ref = project?.state?.providerReferences?.[ca?.id];
+    return Boolean(ref?.vmid && !ref.provisioningPending);
+  }},
   { value: "view-ca-guide", label: "View step-ca trust guide", hint: "install CA root on devices", when: canShowCaTrustGuide },
   { value: "export-ca-cert", label: "Export step-ca root certificate", hint: "save cert + scp/install steps", when: canShowCaTrustGuide },
   { value: "upgrade-service", label: "Upgrade a managed service", hint: "explicit service upgrade with snapshot", when: hasProvisionedServices },
@@ -247,6 +253,7 @@ export async function runInteractiveApp(adapters) {
     clack.outro("Goodbye.");
     return { stdout: "", cancelled: true };
   }
+  if (action === "device-setup") return deviceMenu(adapters);
   if (action === "docker-hosts") {
     const result = await adapters.runCommand(["docker"], adapters);
     clack.outro(result.cancelled ? "Docker operation cancelled." : "Docker operation complete.");
@@ -305,6 +312,10 @@ export async function runInteractiveApp(adapters) {
   }
   if (action === "provision-step-ca") {
     const result = await adapters.runCommand(["service", "add", "step-ca"], adapters);
+    if (result.providerReference && !result.providerReference.provisioningPending && result.health?.status !== "unhealthy") {
+      const setup = await deviceMenu(adapters,{afterProvision:true});
+      if (setup.stdout) clack.log.info(setup.stdout);
+    }
     clack.outro("step-ca provisioning complete.");
     if (adapters.tracking) {
       adapters.tracking.run(adapters);
@@ -313,6 +324,10 @@ export async function runInteractiveApp(adapters) {
   }
   if (action === "provision-caddy-internal-ca") {
     const result = await adapters.runCommand(["service", "add", "caddy-internal-ca"], adapters);
+    if (result.providerReference && !result.providerReference.provisioningPending && result.health?.status !== "unhealthy") {
+      const setup = await deviceMenu(adapters,{afterProvision:true});
+      if (setup.stdout) clack.log.info(setup.stdout);
+    }
     clack.outro("Caddy Internal CA configuration complete.");
     if (adapters.tracking) {
       adapters.tracking.run(adapters);

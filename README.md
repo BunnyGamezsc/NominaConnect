@@ -140,6 +140,13 @@ GET/HEAD responses may use 301/302.
 
 ## Trust the CA on clients
 
+For optional home Wi-Fi DNS, trust and shortcuts, choose **Set up household
+devices** in the main menu of a new or upgraded project. Apple packages use
+the device's existing DNS by default, with encrypted DNS available as an
+explicit option. The setup guide covers upgrades, Apple profiles, Windows
+installers, resolver review and removal.
+[Household device setup](docs/device-setup.md)
+
 From the project on Proxmox:
 
 ```sh
