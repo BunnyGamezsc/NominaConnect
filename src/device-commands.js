@@ -6,6 +6,7 @@ import {
   findProjectDirectory,
 } from "./config.js";
 import { atomicWrite } from "./project-write.js";
+import { managedTechnitiumIp } from "./provisioning.js";
 import {
   validateDefinition,
   fetchProfileRoot,
@@ -30,6 +31,7 @@ const configure = {
   target: repeat,
   "apple-dns": single,
   ssid: repeat,
+  "home-check": single,
   mode: single,
   suffix: single,
   resolver: single,
@@ -96,6 +98,7 @@ export async function profileCommand(args, adapters, upgradeTechnitium) {
     const targets = v.target ?? pkg?.targets;
     if (v["apple-dns"] && !targets?.includes("apple"))
       throw new Error("--apple-dns requires --target apple.");
+    const technitiumIp = managedTechnitiumIp(project);
     const next = validateDefinition({
       name,
       displayName: v["display-name"] ?? pkg?.displayName,
@@ -103,10 +106,17 @@ export async function profileCommand(args, adapters, upgradeTechnitium) {
       targets,
       appleDns: v["apple-dns"] ?? pkg?.appleDns,
       ssids: v.ssid ?? pkg?.ssids,
+      homeCheck:
+        typeof v["home-check"] === "string"
+          ? JSON.parse(v["home-check"])
+          : pkg?.homeCheck,
       mode: v.mode ?? pkg?.mode,
       suffix: v.suffix ?? pkg?.suffix,
       resolver: v.resolver ?? pkg?.resolver,
-      addresses: v.address ?? pkg?.addresses,
+      addresses:
+        v.address ??
+        pkg?.addresses ??
+        (technitiumIp ? [technitiumIp] : undefined),
       shortcuts: v["clear-shortcuts"]
         ? []
         : (v.shortcut?.map((s) => JSON.parse(s)) ?? pkg?.shortcuts ?? []),

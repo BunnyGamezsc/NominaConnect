@@ -8,6 +8,32 @@ import {
   createProductionAdapters
 } from "../src/adapter-runtime.js";
 
+test("Proxmox Wi-Fi discovery returns associated station SSIDs with iw escapes decoded", async () => {
+  const calls = [];
+  const { proxmox } = createProductionAdapters({
+    commandRunner: {
+      async run({ binary, args }) {
+        assert.equal(binary, "/usr/sbin/iw");
+        calls.push(args);
+        if (args.length === 1) return {
+          stdout: "phy#0\n\tInterface ap0\n\t\ttype AP\n\tInterface wlan0\n\t\ttype managed\n\tInterface wlan1\n\t\ttype managed\n",
+        };
+        return {
+          stdout: args[1] === "wlan0"
+            ? "Connected to 00:11:22:33:44:55 (on wlan0)\n\tSSID: Caf\\xc3\\xa9 Wi-Fi\\x20\n"
+            : "Not connected.\n",
+        };
+      },
+    },
+  });
+  assert.deepEqual(await proxmox.connectedWifiSsids(), ["Café Wi-Fi "]);
+  assert.deepEqual(calls, [["dev"], ["dev", "wlan0", "link"], ["dev", "wlan1", "link"]]);
+  const unavailable = createProductionAdapters({
+    commandRunner: { async run() { throw new Error("iw unavailable"); } },
+  });
+  assert.deepEqual(await unavailable.proxmox.connectedWifiSsids(), []);
+});
+
 test("command runner uses argument arrays and redacts secret-derived diagnostics", async () => {
   const runner = createCommandRunner({
     execute: async (command) => ({

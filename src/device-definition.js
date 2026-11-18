@@ -35,6 +35,55 @@ function list(items, label, validate) {
   return [...new Set(items.map(validate))];
 }
 
+function validateHomeCheck(check) {
+  if (check === undefined) return {};
+  if (
+    check === null ||
+    typeof check !== "object" ||
+    Array.isArray(check) ||
+    Object.keys(check).some((key) => !["dnsServers", "probeUrl"].includes(key))
+  )
+    throw new Error("Home Wi-Fi checks accept dnsServers and probeUrl.");
+
+  const homeCheck = {};
+  if (check.dnsServers !== undefined) {
+    homeCheck.dnsServers = list(
+      check.dnsServers,
+      "expected DNS server",
+      (ip) => {
+        if (!isIP(ip) || ip.includes("%"))
+          throw new Error(
+            "Use an exact IPv4 or IPv6 address for each expected DNS server.",
+          );
+        return isIP(ip) === 6
+          ? new URL("http://[" + ip + "]").hostname.slice(1, -1)
+          : ip;
+      },
+    );
+  }
+  if (check.probeUrl !== undefined) {
+    const value = string(check.probeUrl, "home HTTPS check URL", 2048);
+    const url = new URL(value);
+    if (
+      !/^https:\/\//i.test(value) ||
+      value.includes("\\") ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash
+    )
+      throw new Error(
+        "Use an HTTPS check URL without credentials, query parameters, or a fragment.",
+      );
+    homeCheck.probeUrl = url.href;
+  }
+  return Object.keys(homeCheck).length ? { homeCheck } : {};
+}
+
+export function validateHomeSsid(value) {
+  return string(value, "SSID", 32);
+}
+
 function validateDnsPolicy(input) {
   const mode = input.mode;
   if (!["private-domain", "whole-system"].includes(mode))
@@ -54,10 +103,11 @@ function validateDnsPolicy(input) {
     return ip;
   });
   return {
-    ssids: list(input.ssids, "home SSID", (x) => string(x, "SSID", 32)),
+    ssids: list(input.ssids, "home SSID", validateHomeSsid),
     mode,
     ...(mode === "private-domain" ? { suffix: domain(input.suffix) } : {}),
     addresses,
+    ...validateHomeCheck(input.homeCheck),
   };
 }
 

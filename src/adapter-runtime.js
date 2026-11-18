@@ -14,6 +14,7 @@ import { createTailnetController } from "./tailscale-tailnet.js";
 import { createTechnitiumAdapter } from "./technitium-adapter.js";
 import { createTraefikAdapter } from "./traefik-adapter.js";
 import { createDockerAdapter } from "./docker-adapter.js";
+import { validateHomeSsid } from "./device-definition.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -286,6 +287,42 @@ export function createProductionAdapters(options = {}) {
 /** Build local Proxmox lifecycle and inspection operations around the command runner. */
 function createProxmoxAdapter(commandRunner) {
   return Object.freeze({
+    async connectedWifiSsids() {
+      const iw = args => commandRunner.run({
+        binary: "/usr/sbin/iw",
+        args,
+        timeoutMs: 2000,
+        maxOutputBytes: 64 * 1024
+      });
+      let listing;
+      try {
+        listing = (await iw(["dev"])).stdout;
+      } catch {
+        return [];
+      }
+      const stations = listing.split(/^[ \t]*Interface[ \t]+/m).slice(1)
+        .filter(block => /^[ \t]+type managed[ \t]*$/m.test(block))
+        .map(block => block.match(/^\S+/)?.[0])
+        .filter(Boolean);
+      const links = await Promise.allSettled(stations.map(iface => iw(["dev", iface, "link"])));
+      const ssids = new Set();
+      for (const link of links) {
+        if (link.status !== "fulfilled" || !/^Connected to /m.test(link.value.stdout)) continue;
+        const escaped = link.value.stdout.match(/^[ \t]*SSID: (.+)$/m)?.[1];
+        if (!escaped) continue;
+        // iw escapes individual bytes, so reconstruct UTF-8 before validating.
+        const parts = escaped.split(/(\\x[\da-f]{2})/i);
+        const bytes = Buffer.concat(parts.map((part, i) =>
+          i % 2 ? Buffer.of(Number.parseInt(part.slice(2), 16)) : Buffer.from(part)));
+        try {
+          const ssid = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+          ssids.add(validateHomeSsid(ssid));
+        } catch {
+          // Hidden or unrepresentable names are left to manual entry.
+        }
+      }
+      return [...ssids];
+    },
     async checkIpAvailability(ip) {
       const result = await commandRunner.run({ binary: "/usr/sbin/pct", args: ["list"] });
       const matchingLine = result.stdout.split("\n").find((line) => line.includes(ip));

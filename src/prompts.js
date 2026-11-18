@@ -1,11 +1,11 @@
 /** Adapt Clack prompts with string text defaults, preserved explicit answers and cancellation errors. */
 export function createClackPrompts(clack) {
   return {
-    ask: async (question, fallback) => {
+    ask: async (question, fallback, placeholder = fallback) => {
       const value = await clack.text({
         message: question,
         defaultValue: fallback === undefined ? undefined : String(fallback),
-        placeholder: fallback === undefined ? undefined : String(fallback)
+        placeholder: placeholder === undefined ? undefined : String(placeholder)
       });
       if (clack.isCancel(value)) {
         throw new Error("Setup cancelled.");

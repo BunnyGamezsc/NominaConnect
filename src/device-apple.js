@@ -65,6 +65,12 @@ export function appleProfiles(pkg, identity, cert, icons) {
                 Action: "Connect",
                 InterfaceTypeMatch: "WiFi",
                 SSIDMatch: pkg.ssids,
+                ...(pkg.homeCheck?.dnsServers
+                  ? { DNSServerAddressMatch: pkg.homeCheck.dnsServers }
+                  : {}),
+                ...(pkg.homeCheck?.probeUrl
+                  ? { URLStringProbe: pkg.homeCheck.probeUrl }
+                  : {}),
               },
               { Action: "Disconnect" },
             ],

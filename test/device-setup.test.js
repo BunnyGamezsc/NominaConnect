@@ -338,6 +338,85 @@ test("CLI exports both Apple policies, same identity, validated payloads and sep
   assert.ok(!fs.existsSync(two + "-failed"));
 });
 
+test("managed Technitium is the default device resolver in the wizard and CLI", async () => {
+  const { cmd, adapters } = mockProject();
+  const prompts = {
+    select: async ({ message, options, initialValue }) => {
+      if (message === "Devices") return "windows";
+      if (message === "DNS server for household devices")
+        assert.equal(
+          options[0].label,
+          "Use managed Technitium (" + base.addresses[0] + ")",
+        );
+      return initialValue;
+    },
+    ask: async (message, fallback) => {
+      if (message.startsWith("Package ID")) return "from-menu";
+      if (message === "Exact home Wi-Fi name") return base.ssids[0];
+      if (message === "Private DNS suffix") return base.suffix;
+      assert.ok(fallback, message);
+      return fallback;
+    },
+    confirm: async ({ message }) => message === "Save these selections?",
+    info: () => {},
+  };
+  await deviceMenu({ ...adapters, prompts, runCommand: runCli });
+  const inspect = async (name) =>
+    JSON.parse((await cmd("inspect", "--name", name)).stdout);
+  assert.deepEqual((await inspect("from-menu")).addresses, [base.addresses[0]]);
+
+  const save = (...args) => cmd("configure", "--name", "from-cli", ...args);
+  await save(
+    "--target",
+    "windows",
+    "--mode",
+    "whole-system",
+    "--ssid",
+    base.ssids[0],
+  );
+  assert.deepEqual((await inspect("from-cli")).addresses, [base.addresses[0]]);
+  await save("--address", "192.168.1.99");
+  await save("--display-name", "Custom resolver");
+  assert.deepEqual((await inspect("from-cli")).addresses, ["192.168.1.99"]);
+});
+
+test("Apple DNS rules can require more than a matching Wi-Fi name", async () => {
+  const { cmd, configure, projectDirectory } = mockProject();
+  await configure(
+    "--home-check",
+    JSON.stringify({
+      dnsServers: ["192.168.1.1", "fd00:0::1"],
+      probeUrl: "https://192.168.4.90/health",
+    }),
+  );
+  const output = path.join(projectDirectory, "distinct-wifi");
+  await cmd("export", "--name", "family", "--output", output);
+  const apple = parsePlist(path.join(output, "mac.mobileconfig"));
+  assert.deepEqual(apple.PayloadContent[1].OnDemandRules, [
+    {
+      Action: "Connect",
+      InterfaceTypeMatch: "WiFi",
+      SSIDMatch: base.ssids,
+      DNSServerAddressMatch: ["192.168.1.1", "fd00::1"],
+      URLStringProbe: "https://192.168.4.90/health",
+    },
+    { Action: "Disconnect" },
+  ]);
+  await assert.rejects(
+    cmd(
+      "configure",
+      "--name",
+      "family",
+      "--home-check",
+      '{"probeUrl":"http://192.168.4.90/health"}',
+    ),
+    /HTTPS check URL/,
+  );
+  await cmd("configure", "--name", "family", "--home-check", "{}");
+  const saved = JSON.parse((await cmd("inspect", "--name", "family")).stdout);
+  assert.equal(saved.homeCheck, undefined);
+});
+
 test("an existing project can opt into Apple trust first and add or remove DoT under the same package identity", async () => {
   const { cmd, adapters, projectDirectory } = mockProject();
   const configFile = path.join(projectDirectory, "nomina.yaml");
@@ -634,21 +713,38 @@ test(
 
 test("later menu edits a saved definition and exports through the shared command", async () => {
   const { adapters, configure, projectDirectory } = mockProject();
-  await configure();
+  const homeCheck = {
+    dnsServers: ["192.168.1.1"],
+    probeUrl: "https://192.168.4.90/health",
+  };
+  await configure("--home-check", JSON.stringify(homeCheck));
   const destination = path.join(projectDirectory, "from-menu");
   const prompts = {
-    select: async ({ initialValue }) => initialValue,
-    ask: async (message, previous) =>
-      message.startsWith("Fresh export") ? destination : previous,
+    select: async ({ message, options, initialValue }) => {
+      if (message === "Home Wi-Fi network")
+        assert.ok(
+          options.some(
+            (option) => option.label === "Use Proxmox host Wi-Fi: Server Wi-Fi",
+          ),
+        );
+      return initialValue;
+    },
+    ask: async (message, previous) => {
+      assert.notEqual(message, "Exact home Wi-Fi name");
+      return message.startsWith("Fresh export") ? destination : previous;
+    },
     confirm: async ({ message }) =>
-      ["Keep home Wi-Fi", "Save these", "Verify resolver"].some((s) =>
-        message.startsWith(s),
-      ),
+      ["Save these", "Verify resolver"].some((s) => message.startsWith(s)),
     info: () => {},
     warn: () => {},
   };
   await runInteractiveApp({
     ...adapters,
+    runtime: { isProxmoxHost: () => true },
+    proxmox: {
+      ...adapters.proxmox,
+      connectedWifiSsids: async () => ["Server Wi-Fi"],
+    },
     prompts,
     interactive: {
       chooseAction: ({ options }) => {
@@ -658,7 +754,11 @@ test("later menu edits a saved definition and exports through the shared command
     },
     runCommand: runCli,
   });
-  assert.ok(fs.existsSync(path.join(destination, "mac.mobileconfig")));
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(destination, "manifest.json"), "utf8"),
+  );
+  assert.deepEqual(manifest.homeCheck, homeCheck);
+  assert.deepEqual(manifest.ssids, ["Server Wi-Fi"]);
 });
 
 test("explicit resolver migration reviews first, upgrades in place, and verifies DNS before completing", async () => {
@@ -769,8 +869,12 @@ test("fresh CA follow-up and existing project menu use the same Apple default", 
         assert.equal(initialValue, "existing");
         return initialValue;
       },
-      ask: async (message, previous) => {
-        if (message.startsWith("Logical package name")) return "family";
+      ask: async (message, previous, placeholder) => {
+        if (message.startsWith("Package ID")) {
+          assert.equal(previous, undefined);
+          assert.equal(placeholder, "e.g. home-devices");
+          return "family";
+        }
         if (message === "Fresh export directory") return destination;
         assert.ok(["Display name", "Description"].includes(message), message);
         return previous;

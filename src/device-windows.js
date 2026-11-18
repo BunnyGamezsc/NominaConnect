@@ -67,6 +67,15 @@ export async function buildWindows(pkg, id, cert, icons, destination) {
           "CA SHA-256: " + cert.fingerprint256,
           "Trust permits this CA to authenticate any HTTPS site.",
           "Home Wi-Fi: " + pkg.ssids.join(", "),
+          ...(pkg.homeCheck?.dnsServers
+            ? [
+                "Expected Wi-Fi DNS servers: " +
+                  pkg.homeCheck.dnsServers.join(", "),
+              ]
+            : []),
+          ...(pkg.homeCheck?.probeUrl
+            ? ["Home-only HTTPS check: " + pkg.homeCheck.probeUrl]
+            : []),
           "DNS: " + pkg.mode + " " + (pkg.suffix ?? ""),
           "Resolver IPs: " + pkg.addresses.join(", "),
           "Windows uses port 53 DNS. Existing local name fallback and VPN policies still apply.",
@@ -94,7 +103,11 @@ export async function buildWindows(pkg, id, cert, icons, destination) {
           timeout: 120000,
           // NSIS initializes its Unicode shell constants through the host locale.
           // Its macOS build aborts in the POSIX C locale.
-          env: { ...process.env, LC_ALL: process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8", SOURCE_DATE_EPOCH: "946684800" },
+          env: {
+            ...process.env,
+            LC_ALL: process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8",
+            SOURCE_DATE_EPOCH: "946684800",
+          },
         },
       );
     } catch (e) {

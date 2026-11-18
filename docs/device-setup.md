@@ -43,10 +43,28 @@ Use `--apple-dns existing` and export a replacement profile to switch an Apple d
 
 Configure edits the named definition. Omitted flags retain saved fields. Repeat `--target`, `--ssid`, `--address` or `--shortcut` to replace that list. New packages start with zero shortcuts. Each shortcut accepts a complete HTTP(S) URL, an optional local PNG up to 256 × 256 and an opening behavior. Use public-facing URLs free of tokens or passwords. Icons resolve relative to the project. Use `--clear-shortcuts` to remove all selections.
 
+New packages that manage DNS default to the provisioned Technitium IP. These are the addresses household devices will query. Choose different IPs in the menu or provide `--address` for another resolver. For Apple encrypted DNS, also enter the hostname on the resolver's TLS certificate.
+
 ```sh
 nomina ca profile configure --name household \
   --shortcut '{"name":"Photos","url":"https://photos.home.example/albums","icon":"photos.png","opening":"ios-fullscreen"}' \
   --shortcut '{"name":"Music","url":"https://music.home.example/","opening":"browser"}'
+```
+
+## Distinguish Wi-Fi networks with the same name
+
+If the Proxmox host is connected to Wi-Fi and has `iw` available, the setup menu offers its connected network names alongside manual entry. Selecting one copies its name into the package. A wired host uses the manual entry path. [Linux Wi-Fi link inspection](https://wireless.docs.kernel.org/en/latest/en/users/documentation/iw.html#getting-link-status)
+
+When Nomina will manage device DNS, choose how it recognizes home Wi-Fi. The default checks the Wi-Fi name. Add either or both checks when another network uses the same name.
+
+- **Expected DNS servers** checks for at least one of the listed IP addresses among the DNS servers already assigned to that Wi-Fi connection. Use addresses that differ between the networks.
+- **Home-only HTTPS check** requires a trusted HTTPS endpoint to return HTTP 200 without redirection. Use an endpoint restricted to the home LAN that works before Nomina DNS activates. If a VPN can reach that endpoint while away, the check can succeed there too. Serve it with a valid certificate and `Cache-Control: no-store`. If the endpoint fails, the device treats the network as off-network. Keep this check independent of the resolver it gates.
+
+The device requires the Wi-Fi name and all selected checks. Nomina saves these checks in the package. Re-export and replace the device profile or installer after editing them. The CLI takes the same settings through `--home-check`. Pass `'{}'` to return to Wi-Fi-name-only matching. [Apple network-matching rules](https://github.com/apple/device-management/blob/release/mdm/profiles/com.apple.dnsSettings.managed.yaml) · [Windows interface DNS addresses](https://learn.microsoft.com/en-us/powershell/module/dnsclient/get-dnsclientserveraddress)
+
+```sh
+nomina ca profile configure --name household \
+  --home-check '{"dnsServers":["192.168.1.1"],"probeUrl":"https://192.168.4.90/health"}'
 ```
 
 ## Prepare the resolver

@@ -70,6 +70,11 @@ export function defaultGatewayFor(ip) {
   return octets.join(".");
 }
 
+/** Return the managed DNS service's recorded LAN IP once it is provisioned. */
+export function managedTechnitiumIp(project) {
+  return project?.state?.providerReferences?.[project?.config?.managedInventory?.platform?.dns?.id]?.ip;
+}
+
 export function resolveServiceDeployment(project, serviceName, options) {
   const deploymentDefaults = PLATFORM_DEPLOYMENTS[serviceName];
   if (deploymentDefaults === undefined) {
@@ -85,7 +90,7 @@ export function resolveServiceDeployment(project, serviceName, options) {
   // Prefer the managed Technitium resolver over the gateway: router resolvers
   // frequently answer with junk (bogus AAAA, rebind blocks) for local zones,
   // which silently breaks ACME challenge validation inside service LXCs.
-  const dnsIp = project?.state?.providerReferences?.[project?.config?.managedInventory?.platform?.dns?.id]?.ip;
+  const dnsIp = managedTechnitiumIp(project);
   const nameserver = options.nameserver
     ?? (serviceName !== "technitium" && dnsIp !== undefined ? dnsIp : undefined)
     ?? gateway;

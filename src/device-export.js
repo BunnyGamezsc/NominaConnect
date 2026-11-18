@@ -84,6 +84,10 @@ export async function exportBundle({
         ". SSIDs identify a network but do not authenticate it.",
       "At home a resolver outage can interrupt browsing. VPNs, browser secure DNS, multicast names and applications using their own resolvers may behave differently.",
     );
+    if (pkg.homeCheck)
+      instructions.push(
+        "Home Wi-Fi must also pass each configured network check. If the HTTPS check is unavailable, the device will treat Wi-Fi as off-network.",
+      );
   }
   try {
     const write = (name, content) =>
@@ -131,6 +135,7 @@ export async function exportBundle({
       suffix: pkg.suffix,
       platforms,
       ssids: pkg.ssids,
+      homeCheck: pkg.homeCheck,
       resolver: pkg.resolver,
       addresses: pkg.addresses,
       rootSHA256: cert.fingerprint256,

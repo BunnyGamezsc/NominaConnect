@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.6.1] - 2026-11-18
+
+### Added
+- Optional DNS server address and home-only HTTPS checks to distinguish
+  networks that share a Wi-Fi name.
+- An option to select the Proxmox host's connected Wi-Fi when `iw` is available.
+
+### Changed
+- Explain the package ID and show an example in the setup prompt.
+- Default household DNS to the provisioned Technitium address while preserving
+  saved addresses and custom resolver choices.
+
 ## [2.6.0] - 2026-11-18
 
 ### Added

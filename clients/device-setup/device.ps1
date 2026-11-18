@@ -32,18 +32,48 @@ function Overlaps($a,$b) {
     $x = $a.Trim('.'); $y = $b.Trim('.')
     return (!$x -or !$y -or $x -ieq $y -or $x.EndsWith(".$y",[StringComparison]::OrdinalIgnoreCase) -or $y.EndsWith(".$x",[StringComparison]::OrdinalIgnoreCase))
 }
-function Get-WifiNames {
+function Get-WifiConnections {
     $profiles = [Windows.Networking.Connectivity.NetworkInformation,Windows.Networking.Connectivity,ContentType=WindowsRuntime]::GetConnectionProfiles()
     foreach ($profile in $profiles) {
         if ($profile.IsWlanConnectionProfile -and $profile.GetNetworkConnectivityLevel() -ne 'None') {
             $ssid = $profile.WlanConnectionProfileDetails.GetConnectedSsid()
             if (!$ssid) { throw 'SSID unavailable.' }
-            $ssid
+            [pscustomobject]@{ Ssid = $ssid; AdapterId = $profile.NetworkAdapter.NetworkAdapterId }
         }
     }
 }
+function Get-WifiDnsServers($adapterId) {
+    $adapter = Get-NetAdapter -IncludeHidden | Where-Object { $_.InterfaceGuid -and ([Guid]$_.InterfaceGuid) -eq $adapterId }
+    if (!$adapter) { throw 'Wi-Fi adapter unavailable.' }
+    (Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex).ServerAddresses
+}
+function Test-HomeProbe($url) {
+    $request = [Net.WebRequest]::CreateHttp([Uri]$url)
+    $request.AllowAutoRedirect = $false
+    $request.UseDefaultCredentials = $false
+    $request.Proxy = $null
+    $request.Timeout = 3000
+    $request.CachePolicy = [Net.Cache.HttpRequestCachePolicy]::new([Net.Cache.HttpRequestCacheLevel]::NoCacheNoStore)
+    try {
+        $response = $request.GetResponse()
+        try { return [int]$response.StatusCode -eq 200 }
+        finally { $response.Dispose() }
+    } catch [Net.WebException] {
+        if ($_.Exception.Response) { $_.Exception.Response.Dispose() }
+        return $false
+    }
+}
 function Get-HomeMatch {
-    foreach ($ssid in @(Get-WifiNames)) { if ($cfg.ssids -ccontains $ssid) { return $true } }
+    foreach ($wifi in @(Get-WifiConnections)) {
+        if ($cfg.ssids -cnotcontains $wifi.Ssid) { continue }
+        if ($cfg.homeCheck.dnsServers) {
+            $addresses = @(Get-WifiDnsServers $wifi.AdapterId | ForEach-Object { [Net.IPAddress]::Parse(($_ -split '%', 2)[0]) })
+            $matching = $cfg.homeCheck.dnsServers | Where-Object { [Net.IPAddress]::Parse($_) -in $addresses }
+            if (!$matching) { continue }
+        }
+        if ($cfg.homeCheck.probeUrl) { return (Test-HomeProbe $cfg.homeCheck.probeUrl) }
+        return $true
+    }
     return $false
 }
 function Confirm-Effective {
@@ -61,8 +91,8 @@ function Confirm-Effective {
     }
 }
 function Update-Dns {
-    try { $matchesHome = Get-HomeMatch } catch { Clear-Rule; throw 'SSID unavailable. Check Wi-Fi and location permissions.' }
-    if (!$matchesHome) { Clear-Rule; Set-Status 'Off home Wi-Fi. DNS inactive.'; return }
+    try { $matchesHome = Get-HomeMatch } catch { Clear-Rule; throw 'Home Wi-Fi check failed. Check Wi-Fi, location permissions, and any configured network checks.' }
+    if (!$matchesHome) { Clear-Rule; Set-Status 'Home Wi-Fi criteria did not match. DNS inactive.'; return }
     $names = if ($cfg.mode -eq 'whole-system') { @('.') } else { @($cfg.suffix, ".$($cfg.suffix)") }
     if ($state.tag) {
         $existing = @(Get-DnsClientNrptRule | Where-Object { $_.Comment -ceq $state.tag -or $_.Name -eq $state.rule })

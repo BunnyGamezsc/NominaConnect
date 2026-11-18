@@ -5,7 +5,18 @@ $script:rules = @()
 $script:ssidList = @('other')
 $script:deny = $false
 $script:rootInstalled = $false
-function Get-WifiNames { $script:ssidList }
+$script:dnsByAdapter = @{}
+$script:probeOk = $false
+function Get-WifiConnections {
+    for ($i = 0; $i -lt $script:ssidList.Count; $i++) {
+        [pscustomobject]@{ Ssid = $script:ssidList[$i]; AdapterId = $i }
+    }
+}
+function Get-WifiDnsServers($adapterId) { $script:dnsByAdapter[$adapterId] }
+function Test-HomeProbe($url) {
+    Check ($url -eq 'https://192.168.4.90/health') 'Expected configured HTTPS URL'
+    return $script:probeOk
+}
 function Get-DnsClientNrptRule { $script:rules }
 function Get-DnsClientNrptPolicy { param([switch]$Effective) $script:rules }
 function Add-DnsClientNrptRule {
@@ -55,6 +66,23 @@ Check ($script:rules.Count -eq 1) 'External changes preserved'
 $script:rules[0].NameServers = $cfg.addresses
 Update-Dns
 Check ($script:rules.Count -eq 0) 'Restore on leave'
+$cfg.homeCheck = @{dnsServers=@('fd00::53');probeUrl='https://192.168.4.90/health'}
+$script:ssidList = @('Home','other')
+$script:dnsByAdapter = @{0=@('10.0.0.7');1=@('fd00::53')}
+$script:probeOk = $true
+Update-Dns
+Check ($script:rules.Count -eq 0) 'Wrong DNS on matching SSID with expected DNS on a different interface'
+$script:dnsByAdapter[0] = @('fd00:0::53')
+$script:probeOk = $false
+Update-Dns
+Check ($script:rules.Count -eq 0) 'Home DNS requires a working HTTPS check'
+$script:probeOk = $true
+Update-Dns
+Check ($script:rules.Count -eq 1) 'Match the Wi-Fi name, DNS address, and HTTPS endpoint'
+$script:dnsByAdapter[0] = @('10.0.0.7')
+Update-Dns
+Check ($script:rules.Count -eq 0) 'Same Wi-Fi name with different DNS removes the owned rule'
+$cfg.Remove('homeCheck')
 Check (Overlaps 'home.test' 'A.B.HOME.TEST.') 'Boundary mixed case'
 Check (!(Overlaps 'home.test' 'evilhome.test')) 'Suffix boundary'
 $key = Claim-Root

@@ -4,16 +4,8 @@ import * as clack from "@clack/prompts";
 import { INITIAL_PLATFORM_CATALOG } from "./catalog.js";
 import { canShowCaTrustGuide } from "./ca-guide.js";
 import { findProjectDirectory, loadProject } from "./config.js";
-import { TECHNITIUM_DEPLOYMENT, CADDY_DEPLOYMENT, TRAEFIK_DEPLOYMENT, STEP_CA_DEPLOYMENT, TAILSCALE_DEPLOYMENT, NETBIRD_DEPLOYMENT, defaultGatewayFor } from "./provisioning.js";
+import { TECHNITIUM_DEPLOYMENT, CADDY_DEPLOYMENT, TRAEFIK_DEPLOYMENT, STEP_CA_DEPLOYMENT, TAILSCALE_DEPLOYMENT, NETBIRD_DEPLOYMENT, defaultGatewayFor, managedTechnitiumIp } from "./provisioning.js";
 import { formatPendingNotices } from "./tracking.js";
-
-// The managed Technitium resolver a service LXC will default its nameserver
-// to once DNS is provisioned (mirrors resolveServiceDeployment). Shown in
-// setup summaries so the operator sees the effective default, not the
-// gateway fallback.
-function managedTechnitiumIp(project) {
-  return project?.state?.providerReferences?.[project?.config?.managedInventory?.platform?.dns?.id]?.ip;
-}
 
 export function getProjectContext(filesystem, cwd = ".") {
   const projectDirectory = findProjectDirectory(filesystem, cwd);
