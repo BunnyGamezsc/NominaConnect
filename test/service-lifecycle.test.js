@@ -277,6 +277,25 @@ test("nomina service remove retains stopped LXC data and disconnects integration
   assert.equal(state.retainedServices.nc_proxy_test.vmid, 121);
 });
 
+test("platform removal and destruction keep the LXC running while a managed exposure depends on it", async () => {
+  const filesystem = new FakeFilesystem();
+  const dir = "/projects/bunnyhome";
+  seedProvisionedProject(filesystem);
+  filesystem.writeFile(`${dir}/nomina.yaml`, PROVISIONED_PROJECT.replace("services: []", `services:
+    - id: nc_photos
+      name: photos
+      exposure:
+        hostname: photos.bunnyhome.test
+        protocol: https`));
+  const proxmox = createProxmoxAdapter();
+  for (const args of [["remove", "technitium"], ["destroy", "caddy", "--yes"]]) {
+    await assert.rejects(runCli(["service", ...args, "--project-dir", dir],
+      { filesystem, runtime: proxmoxRootRuntime(), proxmox }), /dependent exposures.*photos/);
+  }
+  assert.equal(proxmox.stopCalls.length, 0);
+  assert.equal(proxmox.destroyCalls.length, 0);
+});
+
 test("nomina service destroy requires confirmation and permanently deletes LXC data", async () => {
   const filesystem = new FakeFilesystem();
   seedProvisionedProject(filesystem);

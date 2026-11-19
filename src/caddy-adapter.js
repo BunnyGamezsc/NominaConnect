@@ -90,7 +90,7 @@ export function createCaddyAdapter({ httpClient, secretResolver }) {
         throw error;
       }
       const resources = routes.filter((route) => !isImplementationRoute(route)).map((route) =>
-        toManagedResource(route, policies, request.tailnetGatewayIp));
+        ({ ...toManagedResource(route, policies, request.tailnetGatewayIp), matchesManagedRoute: Boolean(route["@id"]) }));
       return { resources };
     },
     async adopt(request) {

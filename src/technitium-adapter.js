@@ -99,7 +99,11 @@ export function createTechnitiumAdapter({ httpClient, secretResolver, enableNest
       const zone = zoneForHostname(request.hostname, request.zone);
       await createAuthoritativeZone(httpClient, session, zone);
       const records = await listRecords(httpClient, session, zone);
-      const existing = records.find((record) => record.name === request.hostname && record.type === "A");
+      const hostname = normalizeName(request.hostname).toLowerCase();
+      const existing = records.find((record) => record.type === "A" && normalizeName(record.name).toLowerCase() === hostname);
+      if (request.createOnly && existing !== undefined) {
+        throw new Error(`DNS hostname ${request.hostname} already has an unmanaged A record; it was preserved.`);
+      }
       if (existing === undefined) {
         await apiGet(httpClient, session, "/api/zones/records/add", {
           domain: request.hostname,
@@ -129,7 +133,8 @@ export function createTechnitiumAdapter({ httpClient, secretResolver, enableNest
       const session = await authenticate(httpClient, secretResolver, request);
       const zone = zoneForHostname(request.hostname, request.zone);
       const records = await listRecords(httpClient, session, zone);
-      const existing = records.find((record) => record.name === request.hostname && record.type === "A");
+      const hostname = normalizeName(request.hostname).toLowerCase();
+      const existing = records.find((record) => record.type === "A" && normalizeName(record.name).toLowerCase() === hostname);
       if (existing === undefined) {
         return { id: request.hostname };
       }

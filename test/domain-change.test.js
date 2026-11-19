@@ -215,7 +215,7 @@ test("nomina domain change migrates exposures, DNS records, routes, and step-ca 
     "the Caddy LXC hosts pin must use the new CA name"
   );
   assert.ok(
-    scripts.some((script) => script.includes("curl -sf http://127.0.0.1:2019/config/ > /etc/caddy/caddy.json")),
+    scripts.some((script) => script.includes('http://127.0.0.1:2019/config/ -o "$tmp"') && script.includes('mv -f "$tmp" "$target"')),
     "live Caddy config must be persisted after the migration"
   );
 

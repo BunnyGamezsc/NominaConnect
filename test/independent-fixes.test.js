@@ -474,8 +474,8 @@ test("domain change preserves backend TLS and the internal-CA trust mode", async
   assert.deepEqual(route.handle[0].transport, { protocol: "http", tls: { insecure_skip_verify: true } });
 });
 
-// (e) nuclear uninstall removes exactly the config, state dir, and secret store.
-test("nuclear uninstall destroys managed LXCs and removes exactly config, state, and secret store", async () => {
+// (e) nuclear uninstall removes the project configuration and its referenced credentials.
+test("nuclear uninstall destroys managed LXCs and removes only the selected project's files", async () => {
   const filesystem = new FakeFilesystem();
   filesystem.mkdir("/projects/bunnyhome");
   filesystem.mkdir("/projects/bunnyhome/.nomina");
@@ -515,7 +515,8 @@ connectionSecretReferences:
     },
     tracking: { notices: [] }
   }));
-  filesystem.writeFile("/var/lib/nominaconnect/secrets/nc_dns_test", "secret");
+  const secretPath = "/var/lib/nominaconnect/secrets/nominaconnect/provider/nc_dns_test";
+  filesystem.writeFile(secretPath, "secret");
 
   const calls = [];
   const proxmox = {
@@ -525,20 +526,22 @@ connectionSecretReferences:
 
   const result = await runCli(
     ["uninstall", "--yes", "--project-dir", "/projects/bunnyhome"],
-    { filesystem, runtime: proxmoxRootRuntime(), proxmox }
+    { filesystem, runtime: proxmoxRootRuntime(), proxmox, secretStore: {
+      remove: (reference) => filesystem.deletePath(`/var/lib/nominaconnect/secrets/${reference}`)
+    } }
   );
 
   assert.deepEqual(calls.filter(([k]) => k === "destroy").map(([, v]) => v).sort((a, b) => a - b), [100, 101]);
   assert.deepEqual(
     [...filesystem.deleted].sort(),
-    ["/projects/bunnyhome/.nomina", "/projects/bunnyhome/nomina.yaml", "/var/lib/nominaconnect"].sort(),
-    "only the config file, state dir, and secret store may be deleted"
+    ["/projects/bunnyhome/.nomina", "/projects/bunnyhome/nomina.yaml", secretPath].sort(),
+    "only the config file, state dir, and referenced credentials may be deleted"
   );
   assert.deepEqual(
     result.removedPaths,
-    ["/projects/bunnyhome/nomina.yaml", "/projects/bunnyhome/.nomina/state.json", "/var/lib/nominaconnect"]
+    ["/projects/bunnyhome/nomina.yaml", "/projects/bunnyhome/.nomina/state.json"]
   );
   assert.equal(filesystem.exists("/projects/bunnyhome/nomina.yaml"), false);
   assert.equal(filesystem.exists("/projects/bunnyhome/.nomina/state.json"), false);
-  assert.equal(filesystem.exists("/var/lib/nominaconnect/secrets/nc_dns_test"), false);
+  assert.equal(filesystem.exists(secretPath), false);
 });

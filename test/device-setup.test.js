@@ -707,6 +707,7 @@ test("the DNS renewal timer is root-owned, idempotent and recoverable after an i
       existsSync: file => files.has(file),
       readFileSync: file => files.get(file),
       writeFileSync: (file, value) => { assert.equal(files.has(file), false); files.set(file, value); },
+      renameSync: (from, to) => { files.set(to, files.get(from)); files.delete(from); },
       unlinkSync: file => files.delete(file),
     }),
     commandRunner: { run: async ({ args }) => {
@@ -728,10 +729,16 @@ test("the DNS renewal timer is root-owned, idempotent and recoverable after an i
   assert.equal(scheduler.isRegistered(project), false);
   assert.equal(await scheduler.register(project), unit);
   assert.equal(scheduler.isRegistered(project), true);
-  await scheduler.remove(project);
-  assert.deepEqual(calls, ["enable", "enable", "disable", "daemon-reload"]);
+  invocation.splice(0, 1, "/usr/bin/node", "/opt/nomina/bin/nomina.js");
+  for (const file of invocation) files.set(file, "");
   assert.equal(scheduler.isRegistered(project), false);
-  assert.equal(files.size, 3);
+  await scheduler.register(project);
+  assert.match(files.get(`${unitsDirectory}/${unit}.service`), /ExecStart=:"\/usr\/bin\/node" "\/opt\/nomina\/bin\/nomina.js"/);
+  assert.equal(scheduler.isRegistered(project), true);
+  await scheduler.remove(project);
+  assert.deepEqual(calls, ["enable", "enable", "daemon-reload", "disable", "daemon-reload"]);
+  assert.equal(scheduler.isRegistered(project), false);
+  assert.equal(files.size, 5);
 });
 test("Technitium change requires a fresh review, reuses compatible listener and rolls back only its toggle", async () => {
   const { cmd, configure, adapters } = mockProject();

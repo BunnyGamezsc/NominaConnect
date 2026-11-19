@@ -50,6 +50,13 @@ function createProviderPlugin({ name, operations, upgradeOperations = [`upgrade-
       };
     },
     async adopt(adapter, managedItem, observedConfiguration, context = {}) {
+      const foreignRoute = observedConfiguration.managed?.find(resource => resource.matchesManagedRoute === false);
+      if (foreignRoute) {
+        const ambiguous = observedConfiguration.managed.some(resource => resource !== foreignRoute && resource.id === foreignRoute.id);
+        return { managedInventoryUpdate: [], warnings: [ambiguous
+          ? `Ambiguous route for ${foreignRoute.id}; the hostname is shared with an unmanaged route.`
+          : `An unmanaged route serves ${foreignRoute.id}; its configuration was preserved.`] };
+      }
       return await adapter.adopt(providerRequest(name, managedItem, context, {
         managed: observedConfiguration.managed
       }));

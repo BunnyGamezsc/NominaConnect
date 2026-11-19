@@ -1,10 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { createLocalSecretStore } from "../src/adapter-runtime.js";
 import { runCli } from "../src/cli.js";
 import { buildMenuOptions } from "../src/tui.js";
 
 const proxmoxRootRuntime = () => ({ isRoot: () => true, isProxmoxHost: () => true });
+const secretDirectory = "/var/lib/nominaconnect/secrets";
+const projectSecret = "nominaconnect/provider/nc_dns_test";
+
+function createSecretStore(filesystem, secretsDirectory = secretDirectory) {
+  return createLocalSecretStore({
+    filesystem: { rmSync: (target) => filesystem.deletePath(target) },
+    secretsDirectory,
+    isRoot: () => true
+  });
+}
 
 class FakeFilesystem {
   files = new Map();
@@ -95,7 +106,7 @@ function seed(filesystem) {
     tracking: { notices: [] }
   }, null, 2)}
 `);
-  filesystem.writeFile("/var/lib/nominaconnect/secrets/nc_dns_test", "secret");
+  filesystem.writeFile(`${secretDirectory}/${projectSecret}`, "secret");
 }
 
 const TAILNET_YAML = PROJECT_YAML.replace("    vpn: null\n", `    vpn:
@@ -151,7 +162,7 @@ test("nuclear uninstall destroys every provisioned and retained LXC once and rem
 
   const result = await runCli(
     ["uninstall", "--yes", "--project-dir", "/projects/bunnyhome"],
-    { filesystem, runtime: proxmoxRootRuntime(), proxmox }
+    { filesystem, runtime: proxmoxRootRuntime(), proxmox, secretStore: createSecretStore(filesystem) }
   );
 
   assert.match(result.stdout, /100/);
@@ -168,8 +179,8 @@ test("nuclear uninstall destroys every provisioned and retained LXC once and rem
 
   assert.equal(filesystem.exists("/projects/bunnyhome/nomina.yaml"), false, "nomina.yaml must be deleted");
   assert.equal(filesystem.exists("/projects/bunnyhome/.nomina/state.json"), false, "state.json must be deleted");
-  assert.equal(filesystem.exists("/var/lib/nominaconnect/secrets/nc_dns_test"), false, "secrets must be deleted");
-  assert.ok(filesystem.deleted.includes("/var/lib/nominaconnect"));
+  assert.equal(filesystem.exists(`${secretDirectory}/${projectSecret}`), false, "referenced secret must be deleted");
+  assert.equal(filesystem.exists(secretDirectory), true);
 });
 
 test("nuclear uninstall refuses to proceed without confirmation and destroys nothing", async () => {
@@ -192,17 +203,22 @@ test("nuclear uninstall refuses to proceed without confirmation and destroys not
   assert.equal(filesystem.exists("/projects/bunnyhome/nomina.yaml"), true);
 });
 
-test("uninstall removes the configured credential store and preserves a different installation", async () => {
+test("uninstall uses the configured credential store and preserves unreferenced secrets", async () => {
   const filesystem = new FakeFilesystem();
   seed(filesystem);
-  filesystem.mkdir("/isolated/credentials/secrets");
-  filesystem.writeFile("/isolated/credentials/secrets/test", "isolated-secret");
+  const isolated = "/isolated/credentials/secrets";
+  const isolatedSecret = `${isolated}/${projectSecret}`;
+  const unreferencedSecret = `${isolated}/other`;
+  filesystem.mkdir(isolated);
+  filesystem.writeFile(isolatedSecret, "isolated-secret");
+  filesystem.writeFile(unreferencedSecret, "another-project-secret");
   await runCli(["uninstall", "--yes", "--project-dir", "/projects/bunnyhome"], {
     filesystem, runtime: proxmoxRootRuntime(), proxmox: createProxmoxAdapter(),
-    secretStore: { rootDirectory: "/isolated/credentials" }
+    secretStore: createSecretStore(filesystem, isolated)
   });
-  assert.equal(filesystem.exists("/isolated/credentials/secrets/test"), false);
-  assert.equal(filesystem.exists("/var/lib/nominaconnect/secrets/nc_dns_test"), true);
+  assert.equal(filesystem.exists(isolatedSecret), false);
+  assert.equal(filesystem.exists(unreferencedSecret), true);
+  assert.equal(filesystem.exists(`${secretDirectory}/${projectSecret}`), true);
 });
 
 test("incomplete destruction preserves configuration and credentials for recovery", async () => {
@@ -215,7 +231,7 @@ test("incomplete destruction preserves configuration and credentials for recover
   }), /Uninstall was incomplete/);
   assert.deepEqual(filesystem.deleted, []);
   assert.equal(filesystem.exists("/projects/bunnyhome/.nomina/state.json"), true);
-  assert.equal(filesystem.exists("/var/lib/nominaconnect/secrets/nc_dns_test"), true);
+  assert.equal(filesystem.exists(`${secretDirectory}/${projectSecret}`), true);
 });
 
 test("uninstall completes when an already stopped LXC is successfully destroyed", async () => {
@@ -251,7 +267,7 @@ test("partial uninstall retries only survivors after the gateway and DNS snapsho
     providerAdapters: { tailscale: tailnet.tailscale } };
   await assert.rejects(runCli(["uninstall", "--yes", "--project-dir", "/projects/bunnyhome"], adapters), /Uninstall was incomplete/);
   assert.deepEqual([...live], [101]);
-  assert.equal(filesystem.exists("/var/lib/nominaconnect/secrets/nc_dns_test"), true);
+  assert.equal(filesystem.exists(`${secretDirectory}/${projectSecret}`), true);
   // Reuse a previously destroyed ID for an unrelated container. No second
   // uninstall operation may touch it, or require the deleted gateway.
   live.add(100);
@@ -263,20 +279,54 @@ test("partial uninstall retries only survivors after the gateway and DNS snapsho
   assert.equal(filesystem.exists("/projects/bunnyhome/nomina.yaml"), false);
 });
 
-test("nuclear uninstall without a project still clears the global secret store", async () => {
+test("uninstall without a project refuses to touch credentials or SSH", async () => {
   const filesystem = new FakeFilesystem();
   filesystem.mkdir("/somewhere-else");
-  filesystem.mkdir("/var/lib/nominaconnect/secrets");
-  filesystem.writeFile("/var/lib/nominaconnect/secrets/leftover", "secret");
+  filesystem.mkdir(secretDirectory);
+  filesystem.writeFile(`${secretDirectory}/leftover`, "secret");
   const proxmox = createProxmoxAdapter();
+  const hostSsh = { async uninstall() { assert.fail("unrelated SSH must be preserved"); } };
 
-  const result = await runCli(
+  await assert.rejects(runCli(
     ["uninstall", "--yes", "--project-dir", "/somewhere-else"],
-    { filesystem, runtime: proxmoxRootRuntime(), proxmox }
-  );
+    { filesystem, runtime: proxmoxRootRuntime(), proxmox, secretStore: createSecretStore(filesystem), providerAdapters: { hostSsh } }
+  ), /No NominaConnect project found/);
 
   assert.equal(proxmox.calls.length, 0, "no LXC references means nothing to destroy");
-  assert.equal(filesystem.exists("/var/lib/nominaconnect/secrets/leftover"), false);
+  assert.equal(filesystem.exists(`${secretDirectory}/leftover`), true);
+  assert.deepEqual(filesystem.deleted, []);
+});
+
+test("uninstall preserves the other project's credentials and SSH on a shared host", async () => {
+  const filesystem = new FakeFilesystem();
+  seed(filesystem);
+  const otherProject = "/projects/other";
+  const otherSecret = `${secretDirectory}/nominaconnect/provider/nc_dns_other`;
+  filesystem.mkdir(`${otherProject}/.nomina`);
+  filesystem.writeFile(`${otherProject}/nomina.yaml`, PROJECT_YAML.replaceAll("nc_dns_test", "nc_dns_other").replace("  services: []", `  services:
+    - id: nc_ssh_other
+      name: ssh
+      exposure:
+        hostname: ssh.other.internal
+        protocol: ssh`));
+  filesystem.writeFile(`${otherProject}/.nomina/state.json`, JSON.stringify({ version: 1, providerReferences: {}, tracking: { notices: [] } }));
+  filesystem.writeFile(otherSecret, "another-project-secret");
+
+  let uninstallCount = 0;
+  const adapters = {
+    filesystem, cwd: otherProject, runtime: proxmoxRootRuntime(), proxmox: createProxmoxAdapter(),
+    secretStore: createSecretStore(filesystem),
+    providerAdapters: { hostSsh: { async uninstall() { uninstallCount += 1; } } }
+  };
+  await runCli(["uninstall", "--yes", "--project-dir", "/projects/bunnyhome"], adapters);
+  assert.equal(filesystem.exists(`${secretDirectory}/${projectSecret}`), false);
+  assert.equal(filesystem.exists(otherSecret), true);
+  assert.equal(filesystem.exists(`${otherProject}/nomina.yaml`), true);
+  assert.equal(uninstallCount, 0);
+
+  await runCli(["uninstall", "--yes"], adapters);
+  assert.equal(filesystem.exists(otherSecret), false);
+  assert.equal(uninstallCount, 1);
 });
 
 test("nuclear uninstall restores tailnet DNS before it destroys the gateway or the snapshot", async () => {
@@ -322,7 +372,7 @@ test("nuclear uninstall retains every resource and recovery file when tailnet DN
   assert.deepEqual(filesystem.deleted, []);
   assert.equal(filesystem.read("/projects/bunnyhome/.nomina/state.json"), before);
   assert.equal(filesystem.exists("/projects/bunnyhome/nomina.yaml"), true);
-  assert.equal(filesystem.exists("/var/lib/nominaconnect/secrets/nc_dns_test"), true);
+  assert.equal(filesystem.exists(`${secretDirectory}/${projectSecret}`), true);
 });
 
 test("nuclear uninstall checks live tailnet DNS even when its recovery snapshot is missing", async () => {

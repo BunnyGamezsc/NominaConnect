@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseProjectConfiguration, loadProject } from "../src/config.js";
+import { runCli } from "../src/cli.js";
 import { runAdoptionPass } from "../src/adoption.js";
+import { createProductionAdapters } from "../src/adapter-runtime.js";
 import { runTrackingJob, formatPendingNotices } from "../src/tracking.js";
 import { createStepCaAdapter } from "../src/step-ca-adapter.js";
 
@@ -63,6 +65,72 @@ function adapters(records = [dnsResource("A")]) {
   };
 }
 
+test("tracking adopts live Proxmox deployment changes and checks the provider at its observed address", async () => {
+  const filesystem = new Filesystem();
+  const configPath = `${directory}/nomina.yaml`;
+  const statePath = `${directory}/.nomina/state.json`;
+  filesystem.writeFile(configPath, yaml.replace("service: technitium\n", `service: technitium
+      deployment:
+        ip: 192.168.4.90
+        hostname: technitium
+        bridge: vmbr0
+        storage: local-lvm
+        template: local:vztmpl/debian.tar.zst
+        gateway: 192.168.4.1
+        nameserver: 1.1.1.1
+        resources:
+          cpus: 2
+          memoryMb: 1024
+          diskGb: 8
+`));
+  const state = JSON.parse(filesystem.read(statePath));
+  state.providerReferences.nc_dns.vmid = 150;
+  filesystem.writeFile(statePath, JSON.stringify(state));
+
+  const { proxmox } = createProductionAdapters({ commandRunner: {
+    async run({ binary, args }) {
+      assert.equal(binary, "/usr/sbin/pct");
+      assert.deepEqual(args, ["config", "150"]);
+      return { stdout: [
+        "hostname: dns-renamed", "unprivileged: 1", "cores: 4", "memory: 2048",
+        "net0: name=eth0,bridge=vmbr1,ip=192.168.5.90/24,gw=192.168.5.1",
+        "rootfs: zfs:vm-150-disk-0,size=12288M"
+      ].join("\n") };
+    }
+  } });
+  const providerAdapters = adapters();
+  const inspectedIps = [];
+  providerAdapters.technitium.healthCheck = ({ ip }) => {
+    inspectedIps.push(ip);
+    return { process: "running", endpoint: "reachable" };
+  };
+
+  const input = { filesystem, projectDir: directory, providerAdapters, proxmox };
+  const result = await runTrackingJob(input);
+  assert.equal(result.changes.find(({ kind }) => kind === "platform-changed")?.verified, true);
+  assert.deepEqual(inspectedIps, ["192.168.5.90"]);
+  const { config, state: updatedState } = loadProject(filesystem, directory);
+  assert.deepEqual(config.managedInventory.platform.dns.deployment, {
+    ip: "192.168.5.90", hostname: "dns-renamed", bridge: "vmbr1", storage: "zfs",
+    template: "local:vztmpl/debian.tar.zst", gateway: "192.168.5.1",
+    resources: { cpus: "4", memoryMb: "2048", diskGb: "12" }
+  });
+  assert.deepEqual(updatedState.providerReferences.nc_dns, { vmid: 150, ip: "192.168.5.90" });
+  assert.equal((await runTrackingJob(input)).changes.some(({ kind }) => kind === "platform-changed"), false);
+});
+
+test("failed Proxmox inspection leaves the deployment intact and reports a verification warning", async () => {
+  const project = { config: parseProjectConfiguration(yaml), state: {
+    providerReferences: { nc_dns: { vmid: 150, ip: "192.168.4.90" } }
+  } };
+  let attempts = 0;
+  const proxmox = { inspectLxc() { attempts += 1; throw new Error("configuration unavailable"); } };
+  const result = await runAdoptionPass({ project, providerAdapters: adapters(), proxmox, retryOptions: { maxRetries: 1, baseDelayMs: 0 } });
+  assert.equal(attempts, 2);
+  assert.equal(result.changes.some(({ kind }) => kind === "platform-changed"), false);
+  assert.match(result.warnings[0].message, /failed to inspect LXC 150.+configuration unavailable/i);
+});
+
 test("production apex DNS adopts only its A record among SOA and NS records", async () => {
   const filesystem = new Filesystem();
   const records = [dnsResource("SOA"), dnsResource("NS"), dnsResource("A")];
@@ -73,6 +141,35 @@ test("production apex DNS adopts only its A record among SOA and NS records", as
   const next = await runTrackingJob({ filesystem, projectDir: directory, providerAdapters: adapters(records) });
   assert.deepEqual(next.changes, []);
   assert.deepEqual(next.warnings, []);
+});
+
+test("a command with --project-dir starts provider inspection for the selected project", async () => {
+  const filesystem = new Filesystem();
+  const inspected = [];
+  const providerAdapters = adapters();
+  providerAdapters.technitium.inspect = (request) => {
+    inspected.push(request.ip);
+    return { resources: [] };
+  };
+  await runCli(["changes", "--project-dir", directory], { filesystem, providerAdapters });
+  assert.deepEqual(inspected, ["192.168.4.90"]);
+});
+
+test("DNS reference adoption checks the record against the managed proxy before reporting verification", async () => {
+  const providerAdapters = adapters();
+  const requests = [];
+  providerAdapters.technitium.healthCheckExposure = (options) => {
+    requests.push(options);
+    return { status: "unhealthy" };
+  };
+  const result = await runTrackingJob({ filesystem: new Filesystem(), projectDir: directory, providerAdapters });
+  assert.equal(requests.length, 1);
+  const [request] = requests;
+  assert.equal(request.hostname, "bunny.internal");
+  assert.equal(request.expectedIp, "192.168.4.86");
+  assert.equal(request.ip, "192.168.4.90");
+  assert.equal(result.changes.find((change) => change.integration === "dns").verified, false);
+  assert.ok(result.warnings.some((warning) => warning.platformKey === "dns" && warning.serviceId === "nc_glance"));
 });
 
 test("production redirect loaded from YAML does not report a change on every pass", async () => {

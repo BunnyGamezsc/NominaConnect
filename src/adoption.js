@@ -1,3 +1,4 @@
+import { isIPv4 } from "node:net";
 import { isWebExposure, isStreamExposure } from "./exposure-identity.js";
 import { tcpRequest } from "./tcp-exposure.js";
 import { getPlatformProvider } from "./providers.js";
@@ -48,7 +49,7 @@ export function detectPlatformChanges(observed, currentDeployment) {
       const resourceChanges = {};
       let hasResourceChange = false;
       for (const rKey of Object.keys(observed.deployment.resources)) {
-        if (observed.deployment.resources[rKey] !== currentDeployment.resources?.[rKey]) {
+        if (String(observed.deployment.resources[rKey]) !== String(currentDeployment.resources?.[rKey])) {
           resourceChanges[rKey] = observed.deployment.resources[rKey];
           hasResourceChange = true;
         }
@@ -64,6 +65,21 @@ export function detectPlatformChanges(observed, currentDeployment) {
     return undefined;
   }
   return { kind: "platform-changed", changes, observed: observed.deployment };
+}
+
+function observedLxcDeployment(lxc, current, ip) {
+  const deployment = { ...current, ip, hostname: lxc.hostname ?? current?.hostname };
+  for (const field of ["bridge", "storage"]) {
+    if (lxc[field] !== undefined) deployment[field] = lxc[field];
+  }
+  for (const field of ["gateway", "nameserver"]) {
+    if (Object.hasOwn(lxc, field)) deployment[field] = lxc[field];
+  }
+  const resources = { ...current?.resources, ...lxc.resources };
+  if (["cpus", "memoryMb", "diskGb"].every((field) => resources[field] !== undefined)) {
+    deployment.resources = resources;
+  }
+  return deployment.ip !== undefined && deployment.hostname !== undefined ? deployment : undefined;
 }
 
 export function detectExposureChanges(observedResources, managedHostname, existingExposure) {
@@ -249,6 +265,7 @@ function sortedEntries(value) {
     .map((key) => [key, value[key]]);
 }
 
+/** Replace the exposure with the complete observed snapshot, including field removals. */
 export function adoptServiceExposure(config, serviceId, observedExposure) {
   return {
     ...config,
@@ -258,10 +275,7 @@ export function adoptServiceExposure(config, serviceId, observedExposure) {
         if (service.id === serviceId) {
           return {
             ...service,
-            exposure: {
-              ...service.exposure,
-              ...observedExposure
-            }
+            exposure: observedExposure
           };
         }
         return service;
@@ -384,10 +398,11 @@ function warningTarget({ serviceName, platformKey, serviceId }) {
 }
 
 /** Inspect managed integrations and report adoptable changes with verified service health. */
-export async function runAdoptionPass({ project, providerAdapters = {}, retryOptions = {} }) {
+export async function runAdoptionPass({ project, providerAdapters = {}, proxmox = undefined, retryOptions = {} }) {
   const changes = [];
   const warnings = [];
   const platformServices = collectPlatformServices(project.config.managedInventory);
+  const observedIps = new Map();
   // The DNS pass already reads every managed record, so exposure adoption
   // reuses that observation instead of asking Technitium once per exposure.
   let dnsObservation;
@@ -421,16 +436,36 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
       ? [providerRef.locator.id]
       : [];
 
+    let lxcDeployment;
+    if (proxmox?.inspectLxc && providerRef.vmid !== undefined && managedItem.service !== "caddy-internal-ca") {
+      try {
+        const lxc = await withBoundedRetry(() => proxmox.inspectLxc(providerRef.vmid), retryOptions);
+        const hasStaticIp = isIPv4(lxc.ip);
+        if (hasStaticIp) {
+          observedIps.set(managedItem.id, lxc.ip);
+        } else {
+          warnings.push({ serviceName: managedItem.service, platformKey, message: `LXC ${providerRef.vmid} has no configured static IPv4 address on net0; its provider address was preserved.` });
+        }
+        lxcDeployment = observedLxcDeployment(lxc, managedItem.deployment, hasStaticIp ? lxc.ip : providerRef.ip ?? managedItem.deployment?.ip);
+      } catch (error) {
+        warnings.push({ serviceName: managedItem.service, platformKey, message: `Failed to inspect LXC ${providerRef.vmid} for ${managedItem.service}: ${error.message}.` });
+      }
+    }
+
     const inspectionContext = {
       providerReferences,
       connectionSecretReference: project.config.connectionSecretReferences?.[managedItem.id],
       // Adapters that inspect a provider through its own LXC (Tailscale's CLI)
       // need the LXC id in tracking, not only in foreground commands.
       vmid: providerRef.vmid,
-      ip: providerRef.ip ?? (managedItem.service === "caddy-internal-ca" ? project.state.providerReferences?.[project.config.managedInventory.platform.reverseProxy?.id]?.ip : undefined),
+      ip: observedIps.get(managedItem.id) ?? providerRef.ip ?? (managedItem.service === "caddy-internal-ca"
+        ? observedIps.get(project.config.managedInventory.platform.reverseProxy?.id) ?? project.state.providerReferences?.[project.config.managedInventory.platform.reverseProxy?.id]?.ip
+        : undefined),
       zone: project.config.baseLocalDomain
     };
 
+    let providerDeployment;
+    let health;
     try {
       const inspection = await withBoundedRetry(
         () => {
@@ -443,19 +478,8 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
         continue;
       }
 
-      const observedDeployment = inspection.deployment ?? (managedItem.deployment ? {
-        ip: providerRef.ip ?? managedItem.deployment?.ip,
-        hostname: managedItem.deployment?.hostname,
-        bridge: managedItem.deployment?.bridge,
-        storage: managedItem.deployment?.storage,
-        resources: managedItem.deployment?.resources
-      } : undefined);
-
-      const observed = {
-        deployment: observedDeployment
-      };
-
-      const health = await withBoundedRetry(
+      providerDeployment = inspection.deployment;
+      health = await withBoundedRetry(
         () => {
           const plugin = getPlatformProvider(managedItem.service);
           return plugin.healthCheck(adapter, managedItem, inspectionContext);
@@ -493,22 +517,6 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
       changes.push(...identityAdoption.changes);
       warnings.push(...identityAdoption.warnings);
 
-      const change = detectPlatformChanges(observed, managedItem.deployment);
-      if (change !== undefined) {
-        const before = managedItem.deployment
-          ? { ...managedItem.deployment }
-          : undefined;
-        const adoptedChange = createAdoptedChange(
-          managedItem.service, platformKey, before, change.observed, change.kind
-        );
-
-        if (health.status === "healthy") {
-          adoptedChange.verified = true;
-        }
-
-        changes.push(adoptedChange);
-      }
-
       if (inspection.availableUpgrade !== undefined) {
         changes.push({
           serviceName: managedItem.service,
@@ -527,11 +535,33 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
         message: `Failed to inspect ${managedItem.service}: ${error.message}.`
       });
     }
+
+    const deployment = lxcDeployment ?? providerDeployment;
+    const change = detectPlatformChanges({ deployment }, managedItem.deployment);
+    const observedIp = observedIps.get(managedItem.id);
+    const providerIpChanged = observedIp !== undefined && observedIp !== providerRef.ip;
+    if (change !== undefined || (lxcDeployment !== undefined && providerIpChanged)) {
+      const adoptedChange = createAdoptedChange(
+        managedItem.service, platformKey, managedItem.deployment, deployment, change?.kind ?? "platform-changed"
+      );
+      if (adoptedChange.kind === "platform-changed") adoptedChange.changes = change?.changes ?? { ip: observedIp };
+      if (lxcDeployment !== undefined) {
+        adoptedChange.managedItemId = managedItem.id;
+        adoptedChange.providerIpBefore = providerRef.ip;
+      }
+      adoptedChange.verified = health?.status === "healthy";
+      changes.push(adoptedChange);
+    }
   }
 
   // Inspect exposed services across reverse proxy (Caddy / Traefik)
   const proxyService = project.config.managedInventory.platform.reverseProxy;
   const proxyRef = proxyService ? project.state.providerReferences[proxyService.id] : undefined;
+  const proxyIp = observedIps.get(proxyService?.id) ?? proxyRef?.ip;
+  const vpn = project.config.managedInventory.platform.vpn;
+  const tailnetGatewayIp = vpn?.service === "tailscale"
+    ? observedIps.get(vpn.id) ?? project.state.providerReferences?.[vpn.id]?.ip
+    : undefined;
   const proxyAdapter = proxyService ? providerAdapters[proxyService.service] : undefined;
   const proxyLabel = proxyService?.service === "traefik" ? "Traefik" : "Caddy";
 
@@ -549,7 +579,7 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
         storedIdentity: exposureIdentity(project.state, service.id, "dns"),
         context: dnsObservation.context,
         retryOptions,
-        health: { status: "healthy" },
+        health: undefined,
         trackWithoutStoredIdentity: true,
         describe: {
           serviceName: service.name ?? hostname,
@@ -560,12 +590,26 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
           label: `The DNS record for ${hostname}`
         }
       });
+      if (dnsAdoption.changes.length && dnsObservation.adapter.healthCheckExposure) {
+        try {
+          const health = await withBoundedRetry(
+            () => dnsObservation.adapter.healthCheckExposure({
+              ...dnsObservation.context, hostname, expectedIp: proxyIp ?? service.exposure.backend?.ip
+            }), retryOptions
+          );
+          for (const change of dnsAdoption.changes) change.verified = health?.status === "healthy";
+          if (health?.status !== "healthy") throw new Error("record does not resolve to the expected address");
+        } catch (error) {
+          warnings.push({ serviceName: service.name ?? hostname, serviceId: service.id, platformKey: "dns",
+            message: `DNS health check failed for ${hostname}: ${error.message}.` });
+        }
+      }
       changes.push(...dnsAdoption.changes);
       warnings.push(...dnsAdoption.warnings);
     }
     if (isStreamExposure(service.exposure)) {
       try {
-        const request = tcpRequest(project, service.exposure);
+        const request = { ...tcpRequest(project, service.exposure), ip: proxyIp, gatewayLanIp: tailnetGatewayIp };
         const tcp = providerAdapters["tcp"];
         if (!tcp?.inspect) throw new Error("TCP forwarding adapter is unavailable");
         const inspection = await withBoundedRetry(() => tcp.inspect(request), retryOptions);
@@ -601,10 +645,8 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
         const proxyInspectionContext = {
           providerReferences: [hostname],
           connectionSecretReference: project.config.connectionSecretReferences?.[proxyService.id],
-          ip: proxyRef.ip,
-          tailnetGatewayIp: project.config.managedInventory.platform.vpn?.service === "tailscale"
-            ? project.state.providerReferences?.[project.config.managedInventory.platform.vpn.id]?.ip
-            : undefined,
+          ip: proxyIp,
+          tailnetGatewayIp,
           zone: project.config.baseLocalDomain
         };
         const proxyInspection = await withBoundedRetry(
@@ -621,6 +663,11 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
           continue;
         }
         const matchedRoute = matchedRoutes[0];
+        if (matchedRoute?.matchesManagedRoute === false) {
+          warnings.push({ serviceId: service.id, serviceName: service.name ?? hostname, platformKey: "reverseProxy",
+            message: `An unmanaged ${proxyLabel} route serves ${hostname}; its configuration was preserved.` });
+          continue;
+        }
         if (matchedRoute === undefined) {
           warnings.push({
             serviceId: service.id,
@@ -672,7 +719,7 @@ export async function runAdoptionPass({ project, providerAdapters = {}, retryOpt
             // vmid travels with the request so a proxy that verifies
             // certificates inside its LXC can still do so from tracking.
             health = await withBoundedRetry(
-              () => proxyAdapter.healthCheckExposure({ hostname, backendIp: newBackend.ip, backendPort: newBackend.port, redirectTo: newRedirect?.to, redirectCode: newRedirect?.code, caStrategy: service.exposure.certificateAuthority, tailnet: observedTailnet, tailnetGatewayIp: proxyInspectionContext.tailnetGatewayIp, httpRedirect: proxyService.httpRedirect === true, ip: proxyRef.ip, vmid: proxyRef.vmid }),
+              () => proxyAdapter.healthCheckExposure({ hostname, backendIp: newBackend.ip, backendPort: newBackend.port, redirectTo: newRedirect?.to, redirectCode: newRedirect?.code, caStrategy: service.exposure.certificateAuthority, tailnet: observedTailnet, tailnetGatewayIp: proxyInspectionContext.tailnetGatewayIp, httpRedirect: proxyService.httpRedirect === true, ip: proxyIp, vmid: proxyRef.vmid }),
               retryOptions
             );
             if (health.status === "unhealthy") {

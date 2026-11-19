@@ -453,6 +453,11 @@ test("Technitium adapter sets up a zone, inspects, adopts, health-checks, and pr
   };
 
   await adapter.configure({ ...context, managedItemId: "nc_dns_test" });
+  await assert.rejects(
+    adapter.publishRecord({ ...context, hostname: "LEGACY.bunnyhome.test", ip: "10.0.0.10", createOnly: true }),
+    /already has an unmanaged A record/
+  );
+  assert.equal(http.recordsByZone.get("bunnyhome.test").find((record) => record.name === "legacy.bunnyhome.test").rData.ipAddress, "10.0.0.9");
   const published = await adapter.publishRecord({
     ...context,
     hostname: "photos.bunnyhome.test",

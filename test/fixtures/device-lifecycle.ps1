@@ -119,4 +119,45 @@ Check (!(Test-Path (Join-Path (Get-ShortcutFolder) 'Two.url'))) 'Owned shortcut 
 $cfg.shortcuts = @()
 Install-Links
 Check ($state.links.Count -eq 0) 'Zero shortcuts after replacement'
+
+$previousRevision = [Guid]::NewGuid()
+$candidateRevision = [Guid]::NewGuid()
+$previousCfg = @{addresses=@('10.0.0.53');ssids=@('Home');suffix='home.test';mode='private-domain';sha256=$cfg.sha256;shortcuts=@(@{name='Previous';url='https://home.test'})}
+$candidateCfg = @{addresses=@('10.0.0.54');ssids=@('Home');suffix='candidate.test';mode='private-domain';sha256=$cfg.sha256;shortcuts=@(@{name='Candidate';url='https://candidate.test'})}
+function Write-FixtureRevision($revision,$configuration) {
+    $folder = Join-Path $Fixture $revision.ToString()
+    [IO.Directory]::CreateDirectory($folder) | Out-Null
+    Copy-Item -LiteralPath (Join-Path $Fixture 'root.cer') -Destination $folder
+    Write-Json (Join-Path $folder 'package.json') $configuration
+}
+Write-FixtureRevision $previousRevision $previousCfg
+Write-FixtureRevision $candidateRevision $candidateCfg
+$state = @{revision='';revisions=@();removing=$false;taskXml='';ruleSettings='';rule='';tag='';names=@();servers=@();roots=@();links=@()}
+$script:rules = @()
+$script:expectedActive = ''
+function Managed-Task { $null }
+function Register-Helper {
+    Check ((Read-Json $statePath).revision -eq $script:expectedActive) 'The previous revision stays active during replacement'
+}
+Install-Revision $previousRevision
+$script:expectedActive = $previousRevision.ToString()
+$previousShortcut = $state.links[0].path
+$previousBytes = [IO.File]::ReadAllBytes($previousShortcut)
+[IO.File]::WriteAllText($previousShortcut,'external edit')
+Throws { Install-Revision $candidateRevision } 'Preserved edited shortcut'
+Check ((Read-Json $statePath).revision -eq $previousRevision.ToString()) 'Edited shortcut prevented activation'
+Check ([IO.File]::ReadAllText($previousShortcut) -eq 'external edit') 'Replacement preserved external edit'
+Check ($script:rules[0].NameServers -eq '10.0.0.53') 'Previous DNS remains active after the failed replacement'
+[IO.File]::WriteAllBytes($previousShortcut,$previousBytes)
+
+$script:rules += [pscustomobject]@{Name='candidate-conflict';Namespace=@('candidate.test');NameServers=@('10.0.0.9')}
+Throws { Install-Revision $candidateRevision } 'Conflicting DNS namespace'
+Check ((Read-Json $statePath).revision -eq $previousRevision.ToString()) 'Failed DNS activation kept previous revision'
+Check (($script:rules | Where-Object { $_.Namespace -contains 'home.test' }).NameServers -eq '10.0.0.53') 'Rollback restored prior DNS'
+Check ((Get-ShortcutHash ([IO.File]::ReadAllBytes($previousShortcut))) -eq (Get-ShortcutHash $previousBytes)) 'Rollback restored prior shortcut'
+Check (!(Test-Path (Join-Path (Get-ShortcutFolder) 'Candidate.url'))) 'Rollback removed newly installed shortcut'
+$script:rules = @($script:rules | Where-Object Name -ne 'candidate-conflict')
+Install-Revision $candidateRevision
+Check ((Read-Json $statePath).revision -eq $candidateRevision.ToString()) 'Successful replacement activated candidate revision'
+Check ($script:rules[0].NameServers -eq '10.0.0.54') 'Successful replacement applied candidate DNS'
 Write-Output 'Fixture lifecycle passed'

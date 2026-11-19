@@ -128,16 +128,21 @@ export async function publishManagedExposure({
     connectionSecretReference: project.config.connectionSecretReferences[proxyService.id]
   };
 
-  if (project.config.managedInventory.services.some((service) => service.id !== existingService?.id && sameHostname(service.exposure?.hostname, hostname))) {
+  const sharedDns = project.config.managedInventory.services.some((service) => service.id !== existingService?.id && sameHostname(service.exposure?.hostname, hostname));
+  const newDns = existingService === undefined && !sharedDns;
+  if (newDns || sharedDns) {
     const beforeDns = await getPlatformProvider("technitium").inspect(technitiumAdapter, dnsService, {
       providerReferences: [hostname], zone: project.config.baseLocalDomain,
       ip: dnsRef?.ip, endpoint: publishRequest.endpoint,
       connectionSecretReference: publishRequest.connectionSecretReference
     });
-    if (conflictingDnsRecords(beforeDns.managed, publishRequest.ip).length) {
-      throw new Error(`DNS records for ${hostname} conflict with its shared listener address.`);
+    const hostnameRecords = [...beforeDns.managed, ...beforeDns.unmanaged].filter((record) => sameHostname(record.id, hostname));
+    if (conflictingDnsRecords(hostnameRecords, newDns ? undefined : publishRequest.ip).length) {
+      throw new Error(newDns
+        ? `DNS hostname ${hostname} already has unmanaged address records; they were preserved.`
+        : `DNS records for ${hostname} conflict with its shared listener address.`);
     }
-    if (!existingService) {
+    if (sharedDns && !existingService) {
       const beforeProxy = await getPlatformProvider(proxyService.service).inspect(proxyAdapter, proxyService, {
         providerReferences: [hostname], ip: proxyRef?.ip, vmid: proxyRef?.vmid,
         endpoint: routeRequest.endpoint,
@@ -147,8 +152,20 @@ export async function publishManagedExposure({
     }
   }
 
-  await technitiumAdapter.publishRecord(publishRequest);
-  const publishedRoute = await proxyAdapter.publishRoute(routeRequest);
+  const publishedRecord = await technitiumAdapter.publishRecord({ ...publishRequest, ...(newDns ? { createOnly: true } : {}) });
+  let publishedRoute;
+  try {
+    publishedRoute = await proxyAdapter.publishRoute(routeRequest);
+  } catch (error) {
+    if (newDns && publishedRecord?.fingerprint !== undefined && technitiumAdapter.deleteRecord !== undefined) {
+      try {
+        await technitiumAdapter.deleteRecord({ ...publishRequest, fingerprint: publishedRecord.fingerprint });
+      } catch (cleanup) {
+        throw new Error(`${error.message}. DNS rollback requires attention. ${cleanup.message}`, { cause: error });
+      }
+    }
+    throw error;
+  }
   // A proxy that could not complete the trusted-certificate wiring still
   // publishes the exposure over HTTPS; the reason it stayed untrusted is
   // reported rather than swallowed.
@@ -214,6 +231,7 @@ export async function publishManagedExposure({
   const dnsExposureHealth = await withHealthyRetry(
     () => technitiumAdapter.healthCheckExposure({
       hostname,
+      expectedIp: publishRequest.ip,
       backendIp,
       backendPort,
       tailnet,

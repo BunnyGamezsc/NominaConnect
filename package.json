@@ -12,7 +12,7 @@
     "build:native": "bun build --compile --target=bun-linux-x64-baseline --outfile dist/nomina-linux-x64 bin/nomina.js",
     "build:native:arm64": "bun build --compile --target=bun-linux-arm64 --outfile dist/nomina-linux-arm64 bin/nomina.js",
     "build:native:local": "bun build --compile --outfile dist/nomina bin/nomina.js",
-    "build:node": "cp bin/nomina.js dist/nomina.js && chmod +x dist/nomina.js",
+    "build:node": "bun build --target=node --define NOMINA_EMBED_DEVICE_SOURCES=true --outfile dist/nomina.js bin/nomina.js && chmod +x dist/nomina.js",
     "build:all": "bun run build:native && bun run build:native:arm64 && bun run build:node",
     "test:acceptance": "node --test acceptance/live-proxmox.acceptance.mjs",
     "test:docker-acceptance": "node --test acceptance/docker-lxc.acceptance.mjs",
