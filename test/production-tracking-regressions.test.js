@@ -155,6 +155,76 @@ test("a command with --project-dir starts provider inspection for the selected p
   assert.deepEqual(inspected, ["192.168.4.90"]);
 });
 
+test("repeated project flags are rejected before locking or inspecting a project", async () => {
+  const filesystem = Object.assign(new Filesystem(), {
+    acquireProjectLock() { throw new Error("Unexpected lock acquisition"); }
+  });
+  const providerAdapters = adapters();
+  providerAdapters.technitium.inspect = () => { throw new Error("Unexpected inspection"); };
+  for (const duplicate of [["--project-dir", "/projects/other"], ["--project-dir=/projects/other"]]) {
+    await assert.rejects(runCli(["changes", "--project-dir", directory, ...duplicate],
+      { filesystem, providerAdapters }), /Specify --project-dir only once/);
+  }
+});
+
+test("init in a nested directory skips the ancestor project lock and tracking", async () => {
+  const filesystem = Object.assign(new Filesystem(), {
+    acquireProjectLock() { throw new Error("Unexpected lock acquisition"); }
+  });
+  const providerAdapters = adapters();
+  Object.assign(providerAdapters.technitium, { setup: () => ({}) });
+  Object.assign(providerAdapters.caddy, { setup: () => ({}) });
+  const inspected = [];
+  providerAdapters.technitium.inspect = (request) => { inspected.push(request.ip); return { resources: [] }; };
+  const cwd = `${directory}/nested`;
+  const result = await runCli(["init", "--node", "pve", "--bridge", "vmbr0", "--storage", "local",
+    "--domain", "nested.internal", "--dns", "technitium", "--reverse-proxy", "caddy", "--ca", "none", "--vpn", "none"],
+    { filesystem, cwd, runtime: { isRoot: () => true, isProxmoxHost: () => true }, providerAdapters });
+  assert.equal(result.configPath, `${cwd}/nomina.yaml`);
+  assert.deepEqual(inspected, []);
+});
+
+test("tracking drops DNS verification when the reverse proxy changes during inspection", async () => {
+  const filesystem = new Filesystem();
+  const statePath = `${directory}/.nomina/state.json`;
+  const providerAdapters = adapters();
+  providerAdapters.technitium.healthCheckExposure = () => {
+    const state = JSON.parse(filesystem.read(statePath));
+    state.providerReferences.nc_proxy.ip = "192.168.4.89";
+    filesystem.writeFile(statePath, JSON.stringify(state));
+    return { status: "healthy" };
+  };
+  const result = await runTrackingJob({ filesystem, projectDir: directory, providerAdapters });
+  assert.equal(result.changes.some(change => change.integration === "dns"), false);
+  assert.equal(loadProject(filesystem, directory).state.providerReferences.nc_glance, undefined);
+});
+
+test("tracking drops proxy access changes observed against a previous VPN gateway", async () => {
+  const filesystem = new Filesystem();
+  const configPath = `${directory}/nomina.yaml`;
+  const statePath = `${directory}/.nomina/state.json`;
+  filesystem.writeFile(configPath, yaml.replace("vpn: null", "vpn:\n      id: nc_vpn\n      service: tailscale"));
+  const state = JSON.parse(filesystem.read(statePath));
+  state.providerReferences.nc_vpn = { ip: "192.168.4.88" };
+  filesystem.writeFile(statePath, JSON.stringify(state));
+  const providerAdapters = adapters();
+  const inspect = providerAdapters.caddy.inspect;
+  providerAdapters.caddy.inspect = () => ({
+    resources: inspect().resources.map(route => ({ ...route, tailnet: false }))
+  });
+  const checkedGateways = [];
+  Object.assign(providerAdapters.caddy, { healthCheckExposure: ({ tailnetGatewayIp }) => {
+    checkedGateways.push(tailnetGatewayIp);
+    state.providerReferences.nc_vpn.ip = "192.168.4.89";
+    filesystem.writeFile(statePath, JSON.stringify(state));
+    return { status: "healthy" };
+  } });
+  const result = await runTrackingJob({ filesystem, projectDir: directory, providerAdapters });
+  assert.deepEqual(checkedGateways, ["192.168.4.88"]);
+  assert.equal(result.changes.some(change => change.kind === "exposure-changed"), false);
+  assert.equal(loadProject(filesystem, directory).config.managedInventory.services[0].exposure.tailnet, undefined);
+});
+
 test("DNS reference adoption checks the record against the managed proxy before reporting verification", async () => {
   const providerAdapters = adapters();
   const requests = [];

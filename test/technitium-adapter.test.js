@@ -572,3 +572,56 @@ test("encrypted listener inspection filters credentials and writes only the sele
     [["dnsTlsCertificatePath",""],["dnsTlsCertificatePassword",""]]
   ]);
 });
+
+test("new HTTPS publication preserves a concurrent DNS address and never publishes its route", async () => {
+  const filesystem = new FakeFilesystem();
+  const projectDir = "/projects/bunnyhome";
+  seedProject(filesystem, projectDir);
+  filesystem.writeFile(`${projectDir}/.nomina/state.json`, JSON.stringify({
+    version: 1, tracking: { notices: [] }, providerReferences: {
+      nc_dns_test: { vmid: 120, ip: "10.0.0.53" },
+      nc_proxy_test: { vmid: 121, ip: "10.0.0.54" }
+    }
+  }));
+  const http = createTechnitiumHttpFixture();
+  const zone = "bunnyhome.test";
+  const hostname = `photos.${zone}`;
+  const concurrent = { name: hostname, type: "A", rData: { ipAddress: "10.0.0.99" } };
+  const { providerAdapters } = createProductionAdapters({
+    httpClient: { request: async (request) => {
+      const url = new URL(request.url);
+      if (url.pathname === "/api/zones/records/add") http.recordsByZone.get(zone).push(concurrent);
+      const response = await http.fetch(request.url, request);
+      return { status: response.status, body: await response.text() };
+    } },
+    secretResolver: { resolve: () => "top-secret" }
+  });
+
+  await assert.rejects(runCli([
+    "exposure", "publish", "--project-dir", projectDir, "--name", "photos", "--hostname", hostname,
+    "--backend-ip", "10.0.0.100", "--backend-port", "8080"
+  ], { filesystem, runtime: proxmoxRootRuntime(), providerAdapters: {
+    technitium: providerAdapters.technitium,
+    caddy: { publishRoute() { assert.fail("A DNS conflict must prevent proxy publication"); } }
+  } }), /changed during publication/);
+  assert.deepEqual(http.recordsByZone.get(zone).filter(record => record.name === hostname), [concurrent]);
+  const deletes = http.requests.filter(request => request.path === "/api/zones/records/delete");
+  assert.deepEqual(deletes.map(request => request.query.ipAddress), ["10.0.0.54"]);
+  assert.match(filesystem.read(`${projectDir}/nomina.yaml`), /services: \[\]/);
+});
+
+test("shared DNS publication reuses a matching A record and rejects a mismatching live address", async () => {
+  const http = createTechnitiumHttpFixture();
+  const { providerAdapters } = createProductionAdapters({
+    httpClient: { request: async (request) => {
+      const response = await http.fetch(request.url, request);
+      return { status: response.status, body: await response.text() };
+    } },
+    secretResolver: { resolve: () => "top-secret" }
+  });
+  const request = { endpoint: "http://10.0.0.53:5380", zone: "bunnyhome.test",
+    hostname: "legacy.bunnyhome.test", ip: "10.0.0.9", matchExisting: true };
+  await providerAdapters.technitium.publishRecord(request);
+  await assert.rejects(providerAdapters.technitium.publishRecord({ ...request, ip: "10.0.0.54" }), /shared listener/);
+  assert.equal(http.requests.some(({ path }) => path === "/api/zones/records/update" || path === "/api/zones/records/add"), false);
+});

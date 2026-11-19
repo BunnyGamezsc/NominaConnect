@@ -8,12 +8,16 @@ function observationContext(project, { platformKey, serviceId }) {
   const { managedInventory, connectionSecretReferences, baseLocalDomain } = project.config;
   const references = project.state.providerReferences ?? {};
   const providerKey = serviceId === undefined || platformKey === "dns" ? platformKey : "reverseProxy";
-  const platform = managedInventory.platform[providerKey];
-  const provider = [platform, references[platform?.id], connectionSecretReferences?.[platform?.id]];
+  const providerContext = (role) => {
+    const platform = managedInventory.platform[role];
+    return [platform, references[platform?.id], connectionSecretReferences?.[platform?.id]];
+  };
+  const provider = providerContext(providerKey);
   if (serviceId === undefined) return provider;
 
   const service = managedInventory.services?.find(({ id }) => id === serviceId);
-  return [service?.name, service?.exposure, references[serviceId], baseLocalDomain, ...provider];
+  const proxy = providerKey === "reverseProxy" ? provider : providerContext("reverseProxy");
+  return [service?.name, service?.exposure, references[serviceId], baseLocalDomain, provider, proxy, providerContext("vpn")];
 }
 
 /** Inspect providers without a write lock, then reload and apply observed changes under the shared project update lock. */

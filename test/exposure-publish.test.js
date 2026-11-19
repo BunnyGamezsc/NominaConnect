@@ -614,23 +614,44 @@ test("manual HTTPS publication preserves an unmanaged A record even if its addre
   }
 });
 
-test("manual HTTPS publication removes its newly created DNS record when the proxy fails so it can be retried", async () => {
-  const filesystem = new FakeFilesystem();
-  seedProvisionedProject(filesystem);
-  const technitium = createTechnitiumAdapter();
-  const caddy = createCaddyAdapter();
-  const publishRoute = caddy.publishRoute;
-  caddy.publishRoute = () => { throw new Error("Proxy unavailable"); };
-  const args = ["exposure", "publish", "--project-dir", "/projects/bunnyhome", "--name", "photos",
-    "--hostname", "photos.bunnyhome.test", "--backend-ip", "10.0.0.100", "--backend-port", "8080"];
-  const adapters = { filesystem, runtime: proxmoxRootRuntime(), providerAdapters: { technitium, caddy } };
+for (const stage of ["proxy write", "DNS inspection", "proxy inspection", "config save"]) {
+  test(`manual HTTPS publication can be retried after a failed ${stage}`, async () => {
+    const filesystem = new FakeFilesystem();
+    seedProvisionedProject(filesystem);
+    const configPath = "/projects/bunnyhome/nomina.yaml";
+    const before = filesystem.read(configPath);
+    const technitium = createTechnitiumAdapter();
+    const caddy = createCaddyAdapter();
+    const publishRoute = caddy.publishRoute;
+    const inspectDns = technitium.inspect;
+    const inspectProxy = caddy.inspect;
+    const rename = filesystem.rename.bind(filesystem);
+    let fail = true;
+    const check = (currentStage) => {
+      if (fail && stage === currentStage) throw new Error(`Failed ${stage}`);
+    };
+    caddy.publishRoute = (request) => { check("proxy write"); return publishRoute(request); };
+    caddy.inspect = () => { check("proxy inspection"); return inspectProxy(); };
+    technitium.inspect = () => {
+      if (caddy.publishCalls.length) check("DNS inspection");
+      return inspectDns();
+    };
+    filesystem.rename = (from, to) => {
+      if (to === configPath) check("config save");
+      rename(from, to);
+    };
 
-  await assert.rejects(runCli(args, adapters), /Proxy unavailable/);
-  assert.equal(technitium.inspect().resources.some(({ id }) => id === "photos.bunnyhome.test"), false);
-  assert.equal(technitium.inspect().resources.some(({ id }) => id === "legacy.bunnyhome.test"), true);
-  caddy.publishRoute = publishRoute;
-  assert.match((await runCli(args, adapters)).stdout, /published/i);
-});
+    const args = ["exposure", "publish", "--project-dir", "/projects/bunnyhome", "--name", "photos",
+      "--hostname", "photos.bunnyhome.test", "--backend-ip", "10.0.0.100", "--backend-port", "8080"];
+    const adapters = { filesystem, runtime: proxmoxRootRuntime(), providerAdapters: { technitium, caddy } };
+    await assert.rejects(runCli(args, adapters), new RegExp(`Failed ${stage}`));
+    assert.equal(filesystem.read(configPath), before);
+    assert.equal(inspectDns().resources.some(({ id }) => id === "photos.bunnyhome.test"), false);
+    assert.equal(inspectDns().resources.some(({ id }) => id === "legacy.bunnyhome.test"), true);
+    fail = false;
+    assert.match((await runCli(args, adapters)).stdout, /published/i);
+  });
+}
 
 test("an opted-out Tailscale exposure stays opted out on edit and can be enabled later", async () => {
   const filesystem = new FakeFilesystem();

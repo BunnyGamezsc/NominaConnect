@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { conflictingDnsRecords, sameHostname } from "./exposure-identity.js";
 
 const TECHNITIUM_PORT = 5380;
 const TECHNITIUM_USER = "admin";
@@ -100,17 +101,42 @@ export function createTechnitiumAdapter({ httpClient, secretResolver, enableNest
       await createAuthoritativeZone(httpClient, session, zone);
       const records = await listRecords(httpClient, session, zone);
       const hostname = normalizeName(request.hostname).toLowerCase();
-      const existing = records.find((record) => record.type === "A" && normalizeName(record.name).toLowerCase() === hostname);
-      if (request.createOnly && existing !== undefined) {
-        throw new Error(`DNS hostname ${request.hostname} already has an unmanaged A record; it was preserved.`);
+      const matchingRecords = records.filter((record) => sameHostname(normalizeName(record.name), hostname));
+      const existing = matchingRecords.find((record) => record.type === "A");
+      const guarded = request.createOnly || request.matchExisting;
+      if (guarded && conflictingDnsRecords(matchingRecords.map(record => toManagedResource(zone, record)),
+        request.createOnly ? undefined : request.ip).length) {
+        throw new Error(request.createOnly
+          ? `DNS hostname ${request.hostname} already has an unmanaged ${existing ? "A record" : "address record"}; it was preserved.`
+          : `DNS records for ${request.hostname} conflict with its shared listener address; they were preserved.`);
       }
       if (existing === undefined) {
         await apiGet(httpClient, session, "/api/zones/records/add", {
           domain: request.hostname,
           zone,
           type: "A",
-          ipAddress: request.ip
+          ipAddress: request.ip,
+          overwrite: false
         });
+        if (guarded) {
+          try {
+            const after = (await listRecords(httpClient, session, zone))
+              .filter(record => sameHostname(normalizeName(record.name), hostname));
+            const published = after.some(record => record.type === "A" && record.rData?.ipAddress === request.ip);
+            if (!published || conflictingDnsRecords(after.map(record => toManagedResource(zone, record)), request.ip).length) {
+              throw new Error(`DNS records for ${request.hostname} changed during publication.`);
+            }
+          } catch (error) {
+            try {
+              // Technitium appends records without overwrite. Delete only the
+              // exact address sent by this successful add.
+              await deleteAddress(httpClient, session, zone, request.hostname, request.ip);
+            } catch (cleanup) {
+              throw new Error(`${error.message} DNS rollback requires attention. ${cleanup.message}`, { cause: error });
+            }
+            throw error;
+          }
+        }
       } else if (existing.rData?.ipAddress !== request.ip) {
         await apiGet(httpClient, session, "/api/zones/records/update", {
           domain: request.hostname,
@@ -134,22 +160,17 @@ export function createTechnitiumAdapter({ httpClient, secretResolver, enableNest
       const zone = zoneForHostname(request.hostname, request.zone);
       const records = await listRecords(httpClient, session, zone);
       const hostname = normalizeName(request.hostname).toLowerCase();
-      const existing = records.find((record) => record.type === "A" && normalizeName(record.name).toLowerCase() === hostname);
-      if (existing === undefined) {
+      const matchingAddresses = records.filter((record) => record.type === "A" && normalizeName(record.name).toLowerCase() === hostname);
+      if (matchingAddresses.length === 0) {
         return { id: request.hostname };
       }
       const locator = { zone, name: request.hostname, type: "A" };
       const expectedFingerprint = request.fingerprint ?? fingerprintFor(locator, { ipAddress: request.ip });
-      const actualFingerprint = fingerprintFor(locator, existing.rData);
-      if (actualFingerprint !== expectedFingerprint) {
+      const existing = matchingAddresses.find(record => fingerprintFor(locator, record.rData) === expectedFingerprint);
+      if (existing === undefined) {
         throw new Error(`Record ${request.hostname} in zone ${zone} does not match managed fingerprint. Aborting deletion to preserve unrelated records.`);
       }
-      await apiGet(httpClient, session, "/api/zones/records/delete", {
-        domain: request.hostname,
-        zone,
-        type: "A",
-        ipAddress: existing.rData.ipAddress
-      });
+      await deleteAddress(httpClient, session, zone, request.hostname, existing.rData.ipAddress);
       return { id: request.hostname };
     },
     async healthCheckExposure(request) {
@@ -161,6 +182,10 @@ export function createTechnitiumAdapter({ httpClient, secretResolver, enableNest
       return { dns: "reachable", status: "healthy" };
     }
   });
+}
+
+function deleteAddress(httpClient, session, zone, hostname, ipAddress) {
+  return apiGet(httpClient, session, "/api/zones/records/delete", { domain: hostname, zone, type: "A", ipAddress });
 }
 
 async function authenticate(httpClient, secretResolver, request) {

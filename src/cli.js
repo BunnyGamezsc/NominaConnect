@@ -71,6 +71,8 @@ export async function runCli(argumentsList, adapters) {
   }
 
   const [command, ...rest] = argumentsList;
+  const projectFlags = rest.filter(arg => arg === "--project-dir" || arg.startsWith("--project-dir="));
+  if (projectFlags.length > 1) throw new Error("Specify --project-dir only once.");
   // Migration discovers and locks each project separately.
   if (command === "ca" && rest[0] === "dns-renewal" && rest[1] === "migrate")
     return runCommand(command, rest, adapters);
@@ -81,7 +83,10 @@ export async function runCli(argumentsList, adapters) {
   const explicitDirectory = explicitProjectIndex >= 0
     ? rest[explicitProjectIndex + 1]
     : rest.find(arg => arg.startsWith("--project-dir="))?.slice("--project-dir=".length);
-  const selectedDirectory = explicitDirectory ?? (adapters.filesystem && findProjectDirectory(adapters.filesystem, adapters.cwd ?? "."));
+  const cwd = adapters.cwd ?? ".";
+  const selectedDirectory = explicitDirectory ?? (command === "init"
+    ? cwd
+    : adapters.filesystem && findProjectDirectory(adapters.filesystem, cwd));
   const candidateDirectory = command === "docker" || !adapters.filesystem?.acquireProjectLock ? undefined : selectedDirectory;
   const directory = candidateDirectory !== undefined && adapters.filesystem.exists(path.posix.join(candidateDirectory, ".nomina/state.json")) ? candidateDirectory : undefined;
   const releaseOperation = directory === undefined || command !== "uninstall" ? undefined : await adapters.filesystem.acquireProjectLock?.(directory, "docker-operation");
@@ -1151,10 +1156,19 @@ async function upgradeService(serviceName, rawOptions, adapters) {
   };
 }
 
-function checkDependentExposures(project, platformKey, serviceName) {
+function checkDependentExposures(project, platformKey, serviceName, vmid) {
+  const { platform } = project.config.managedInventory;
+  const usesLxc = (role) => {
+    if (platformKey === role && project.state.providerReferences?.[platform[role]?.id]) return true;
+    const roleVmid = project.state.providerReferences?.[platform[role]?.id]?.vmid;
+    return vmid !== undefined && roleVmid !== undefined && String(roleVmid) === String(vmid);
+  };
+  const usesDns = usesLxc("dns");
+  const usesProxy = usesLxc("reverseProxy");
+  const usesCa = usesLxc("certificateAuthority");
   const dependents = project.config.managedInventory.services.filter(({ exposure }) => exposure && (
-    platformKey === "dns" || platformKey === "reverseProxy" ||
-    (platformKey === "certificateAuthority" && exposure.certificateAuthority === serviceName)
+    usesDns || usesProxy ||
+    (usesCa && exposure.certificateAuthority === platform.certificateAuthority?.service)
   ));
   if (dependents.length) {
     const names = dependents.map(service => service.name ?? service.id).join(", ");
@@ -1190,7 +1204,7 @@ async function removeService(serviceName, rawOptions, adapters) {
     const deferred = deferSshOperation(adapters, project.projectDirectory, ["service", "remove", resolvedServiceName]);
     if (deferred) return deferred;
 
-    checkDependentExposures(project, platformKey, managedItem.service);
+    checkDependentExposures(project, platformKey, managedItem.service, providerRef.vmid);
     if (managedItem.service === "tailscale") {
       await restoreTailnetDns(project, providerRef, adapters);
     }
@@ -1386,9 +1400,7 @@ async function destroyService(serviceName, rawOptions, adapters) {
     "--yes", "--expected-vmid", String(vmid), ...(options.force ? ["--force"] : [])]);
   if (deferred) return deferred;
 
-  if (project.state.providerReferences?.[managedItemId]) {
-    checkDependentExposures(project, platformKey, managedServiceType);
-  }
+  checkDependentExposures(project, platformKey, managedServiceType, vmid);
   let recoveryWarning = "";
   if (managedServiceType === "tailscale" && project.state.providerReferences?.[managedItemId] &&
       (project.state.providerReferences[managedItemId].provisioningPending !== true || project.state.tailnetDnsSnapshot !== undefined)) {
@@ -2260,7 +2272,12 @@ async function publishExposure(options, adapters) {
     }
   };
 
-  writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
+  try {
+    writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
+  } catch (error) {
+    if ("abortPublication" in result) await result.abortPublication(error);
+    throw error;
+  }
   writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
   filesystem.chmod(project.statePath, 0o600);
 
