@@ -277,6 +277,59 @@ test("nomina service remove retains stopped LXC data and disconnects integration
   assert.equal(state.retainedServices.nc_proxy_test.vmid, 121);
 });
 
+test("platform removal and destruction keep the LXC running while a managed exposure depends on it", async () => {
+  const filesystem = new FakeFilesystem();
+  const dir = "/projects/bunnyhome";
+  seedProvisionedProject(filesystem);
+  filesystem.writeFile(`${dir}/nomina.yaml`, PROVISIONED_PROJECT.replace("services: []", `services:
+    - id: nc_photos
+      name: photos
+      exposure:
+        hostname: photos.bunnyhome.test
+        protocol: https`));
+  const proxmox = createProxmoxAdapter();
+  for (const args of [["remove", "technitium"], ["destroy", "caddy", "--yes"]]) {
+    await assert.rejects(runCli(["service", ...args, "--project-dir", dir],
+      { filesystem, runtime: proxmoxRootRuntime(), proxmox }), /dependent exposures.*photos/);
+  }
+  assert.equal(proxmox.stopCalls.length, 0);
+  assert.equal(proxmox.destroyCalls.length, 0);
+});
+
+test("a shared Caddy Internal CA LXC is protected by both TCP and SSH dependencies", async () => {
+  const dir = "/projects/bunnyhome";
+  for (const protocol of ["tcp", "ssh"]) {
+    const filesystem = new FakeFilesystem();
+    seedProvisionedProject(filesystem);
+    const configPath = `${dir}/nomina.yaml`;
+    const statePath = `${dir}/.nomina/state.json`;
+    filesystem.writeFile(configPath, PROVISIONED_PROJECT.replace("certificateAuthority: null", `certificateAuthority:
+      id: nc_ca_test
+      service: caddy-internal-ca`).replace("services: []", `services:
+    - id: nc_stream
+      name: stream
+      exposure:
+        hostname: stream.bunnyhome.test
+        protocol: ${protocol}`));
+    const state = JSON.parse(filesystem.read(statePath));
+    state.providerReferences.nc_ca_test = { vmid: "121", ip: "10.0.0.54" };
+    filesystem.writeFile(statePath, JSON.stringify(state));
+    const proxmox = createProxmoxAdapter();
+    const adapters = { filesystem, runtime: proxmoxRootRuntime(), proxmox };
+    for (const args of [["remove", "caddy-internal-ca"], ["destroy", "caddy-internal-ca", "--yes"]]) {
+      await assert.rejects(runCli(["service", ...args, "--project-dir", dir], adapters), /dependent exposures.*stream/);
+    }
+    // A CA removed before this guard existed can still refer to the live proxy LXC.
+    state.retainedServices.nc_ca_test = { ...state.providerReferences.nc_ca_test, service: "caddy-internal-ca" };
+    delete state.providerReferences.nc_ca_test;
+    filesystem.writeFile(statePath, JSON.stringify(state));
+    await assert.rejects(runCli(["service", "destroy", "caddy-internal-ca", "--yes", "--project-dir", dir], adapters),
+      /dependent exposures.*stream/);
+    assert.deepEqual(proxmox.stopCalls, []);
+    assert.deepEqual(proxmox.destroyCalls, []);
+  }
+});
+
 test("nomina service destroy requires confirmation and permanently deletes LXC data", async () => {
   const filesystem = new FakeFilesystem();
   seedProvisionedProject(filesystem);

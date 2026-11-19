@@ -69,7 +69,10 @@ export function createTraefikAdapter({ httpClient, secretResolver, exec, sleep =
       ]);
       const resources = routers
         .filter((router) => !isRedirectRouter(router) && hostForRouter(router) !== undefined)
-        .map((router) => toManagedResource(router, services, middlewares, request.tailnetGatewayIp));
+        .map((router) => ({
+          ...toManagedResource(router, services, middlewares, request.tailnetGatewayIp),
+          matchesManagedRoute: bareName(router) === routerNameFor(hostForRouter(router))
+        }));
       return { resources };
     },
     async adopt(request) {

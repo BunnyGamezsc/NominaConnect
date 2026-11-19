@@ -128,16 +128,21 @@ export async function publishManagedExposure({
     connectionSecretReference: project.config.connectionSecretReferences[proxyService.id]
   };
 
-  if (project.config.managedInventory.services.some((service) => service.id !== existingService?.id && sameHostname(service.exposure?.hostname, hostname))) {
+  const sharedDns = project.config.managedInventory.services.some((service) => service.id !== existingService?.id && sameHostname(service.exposure?.hostname, hostname));
+  const newDns = existingService === undefined && !sharedDns;
+  if (newDns || sharedDns) {
     const beforeDns = await getPlatformProvider("technitium").inspect(technitiumAdapter, dnsService, {
       providerReferences: [hostname], zone: project.config.baseLocalDomain,
       ip: dnsRef?.ip, endpoint: publishRequest.endpoint,
       connectionSecretReference: publishRequest.connectionSecretReference
     });
-    if (conflictingDnsRecords(beforeDns.managed, publishRequest.ip).length) {
-      throw new Error(`DNS records for ${hostname} conflict with its shared listener address.`);
+    const hostnameRecords = [...beforeDns.managed, ...beforeDns.unmanaged].filter((record) => sameHostname(record.id, hostname));
+    if (conflictingDnsRecords(hostnameRecords, newDns ? undefined : publishRequest.ip).length) {
+      throw new Error(newDns
+        ? `DNS hostname ${hostname} already has unmanaged address records; they were preserved.`
+        : `DNS records for ${hostname} conflict with its shared listener address.`);
     }
-    if (!existingService) {
+    if (sharedDns && !existingService) {
       const beforeProxy = await getPlatformProvider(proxyService.service).inspect(proxyAdapter, proxyService, {
         providerReferences: [hostname], ip: proxyRef?.ip, vmid: proxyRef?.vmid,
         endpoint: routeRequest.endpoint,
@@ -147,167 +152,189 @@ export async function publishManagedExposure({
     }
   }
 
-  await technitiumAdapter.publishRecord(publishRequest);
-  const publishedRoute = await proxyAdapter.publishRoute(routeRequest);
-  // A proxy that could not complete the trusted-certificate wiring still
-  // publishes the exposure over HTTPS; the reason it stayed untrusted is
-  // reported rather than swallowed.
-  const warnings = [...(publishedRoute?.warnings ?? [])];
-
-  const dnsPlugin = getPlatformProvider("technitium");
-  const proxyPlugin = getPlatformProvider(proxyService.service);
-  const dnsInspection = await dnsPlugin.inspect(technitiumAdapter, dnsService, {
-    providerReferences: collectManagedDnsReferences(project, hostname),
-    zone: project.config.baseLocalDomain,
-    ip: dnsRef?.ip,
-    endpoint: dnsRef?.ip ? `http://${dnsRef.ip}:5380` : undefined,
-    connectionSecretReference: project.config.connectionSecretReferences[dnsService.id]
+  const publishedRecord = await technitiumAdapter.publishRecord({
+    ...publishRequest,
+    ...(newDns ? { createOnly: true } : {}),
+    ...(sharedDns ? { matchExisting: true } : {})
   });
-  const proxyInspection = await proxyPlugin.inspect(proxyAdapter, proxyService, {
-    providerReferences: collectManagedProxyReferences(project, hostname),
-    ip: proxyRef?.ip,
-    vmid: proxyRef?.vmid,
-    endpoint: proxyEndpointFor(proxyService.service, proxyRef?.ip),
-    connectionSecretReference: project.config.connectionSecretReferences[proxyService.id]
-  });
-
-  let caInspection;
-  let caExposureHealth;
-  if (caService !== null && caService !== undefined) {
-    const caAdapter = providerAdapters[caService.service] ?? providerAdapters[proxyService.service];
-    if (caAdapter !== undefined) {
-      const caPlugin = getPlatformProvider(caService.service);
-      const caRef = project.state.providerReferences[caService.id];
-      const caIp = caRef?.ip ?? proxyRef?.ip;
-      const caEndpoint = caIp
-        ? (caService.service === "step-ca" ? `https://${caIp}:9000` : proxyEndpointFor(caService.service, caIp))
-        : undefined;
-      caInspection = await caPlugin.inspect(caAdapter, caService, {
-        providerReferences: collectManagedCaReferences(project, hostname),
-        ip: caIp,
-        endpoint: caEndpoint,
-        connectionSecretReference: project.config.connectionSecretReferences[caService.id]
-      });
-      caExposureHealth = await caAdapter.healthCheckExposure?.({
-        hostname,
-        backendIp,
-        backendPort,
-        ip: caIp,
-        endpoint: caEndpoint
-      })
-        ?? { tls: "valid", issuer: caService.service, status: "healthy" };
-      if (caExposureHealth?.status !== "healthy") {
-        caExposureHealth = await withHealthyRetry(
-          () => caAdapter.healthCheckExposure({
-            hostname,
-            backendIp,
-            backendPort,
-            ip: caIp,
-            endpoint: caEndpoint
-          }),
-          healthRetryOptions
-        );
+  /** Keep DNS recovery available until the caller commits the managed exposure. @returns {Promise<never>} */
+  async function abortPublication(error) {
+    if (newDns && publishedRecord?.fingerprint !== undefined && technitiumAdapter.deleteRecord !== undefined) {
+      try {
+        await technitiumAdapter.deleteRecord({ ...publishRequest, fingerprint: publishedRecord.fingerprint });
+      } catch (cleanup) {
+        throw new Error(`${error.message}. DNS rollback requires attention. ${cleanup.message}`, { cause: error });
       }
     }
+    throw error;
   }
 
-  const dnsExposureHealth = await withHealthyRetry(
-    () => technitiumAdapter.healthCheckExposure({
-      hostname,
-      backendIp,
-      backendPort,
-      tailnet,
-      tailnetGatewayIp,
+  try {
+    const publishedRoute = await proxyAdapter.publishRoute(routeRequest);
+    // A proxy that could not complete the trusted-certificate wiring still
+    // publishes the exposure over HTTPS; the reason it stayed untrusted is
+    // reported rather than swallowed.
+    const warnings = [...(publishedRoute?.warnings ?? [])];
+
+    const dnsPlugin = getPlatformProvider("technitium");
+    const proxyPlugin = getPlatformProvider(proxyService.service);
+    const dnsInspection = await dnsPlugin.inspect(technitiumAdapter, dnsService, {
+      providerReferences: collectManagedDnsReferences(project, hostname),
       zone: project.config.baseLocalDomain,
       ip: dnsRef?.ip,
       endpoint: dnsRef?.ip ? `http://${dnsRef.ip}:5380` : undefined,
       connectionSecretReference: project.config.connectionSecretReferences[dnsService.id]
-    }),
-    healthRetryOptions
-  )
-    ?? { dns: "reachable", status: "healthy" };
-  const proxyExposureHealth = await withHealthyRetry(
-    () => proxyAdapter.healthCheckExposure({
-      hostname,
-      backendIp,
-      backendPort,
-      tailnet: routeRequest.tailnet,
-      tailnetGatewayIp,
-      httpRedirect: proxyService.httpRedirect === true,
-      redirectTo,
-      redirectCode,
-      caStrategy,
+    });
+    const proxyInspection = await proxyPlugin.inspect(proxyAdapter, proxyService, {
+      providerReferences: collectManagedProxyReferences(project, hostname),
       ip: proxyRef?.ip,
       vmid: proxyRef?.vmid,
-      endpoint: proxyEndpointFor(proxyService.service, proxyRef?.ip)
-    }),
-    healthRetryOptions
-  )
-    ?? { https: "reachable", status: "healthy" };
-  const healthy = dnsExposureHealth.status === "healthy"
-    && proxyExposureHealth.status === "healthy"
-    && (caExposureHealth === undefined || caExposureHealth.status === "healthy");
+      endpoint: proxyEndpointFor(proxyService.service, proxyRef?.ip),
+      connectionSecretReference: project.config.connectionSecretReferences[proxyService.id]
+    });
 
-  // A CA-backed project only records trusted TLS when the proxy actually
-  // presents a trusted certificate. Persisting the intent while the exposure
-  // is serving an untrusted one would claim a trust nothing verified.
-  const observedTls = proxyExposureHealth?.tls;
-  const trusted = tlsOptions.trusted
-    && observedTls !== "untrusted"
-    && observedTls !== "missing"
-    && observedTls !== "unknown";
-
-  const serviceId = existingService?.id ?? `nc_${randomUUID()}`;
-  const managedService = {
-    id: serviceId,
-    name,
-    exposure: {
-      hostname,
-      ...(isRedirect
-        ? { redirect: { to: redirectTo, code: redirectCode } }
-        : {
-          backend: {
-            ip: backendIp,
-            port: backendPort,
-            ...(options.backendTls === true ? { tls: true } : {})
-          }
-        }),
-      protocol: "https",
-      tailnet,
-      certificateAuthority: caStrategy,
-      tls: {
-        mode: tlsOptions.mode,
-        trusted
+    let caInspection;
+    let caExposureHealth;
+    if (caService !== null && caService !== undefined) {
+      const caAdapter = providerAdapters[caService.service] ?? providerAdapters[proxyService.service];
+      if (caAdapter !== undefined) {
+        const caPlugin = getPlatformProvider(caService.service);
+        const caRef = project.state.providerReferences[caService.id];
+        const caIp = caRef?.ip ?? proxyRef?.ip;
+        const caEndpoint = caIp
+          ? (caService.service === "step-ca" ? `https://${caIp}:9000` : proxyEndpointFor(caService.service, caIp))
+          : undefined;
+        caInspection = await caPlugin.inspect(caAdapter, caService, {
+          providerReferences: collectManagedCaReferences(project, hostname),
+          ip: caIp,
+          endpoint: caEndpoint,
+          connectionSecretReference: project.config.connectionSecretReferences[caService.id]
+        });
+        caExposureHealth = await caAdapter.healthCheckExposure?.({
+          hostname,
+          backendIp,
+          backendPort,
+          ip: caIp,
+          endpoint: caEndpoint
+        })
+          ?? { tls: "valid", issuer: caService.service, status: "healthy" };
+        if (caExposureHealth?.status !== "healthy") {
+          caExposureHealth = await withHealthyRetry(
+            () => caAdapter.healthCheckExposure({
+              hostname,
+              backendIp,
+              backendPort,
+              ip: caIp,
+              endpoint: caEndpoint
+            }),
+            healthRetryOptions
+          );
+        }
       }
     }
-  };
 
-  return {
-    managedService,
-    isUpdate: existingService !== undefined,
-    warnings,
-    dnsInspection,
-    proxyInspection,
-    ...(caInspection !== undefined ? { caInspection } : {}),
-    health: {
-      status: healthy ? "healthy" : "unhealthy",
-      dns: dnsExposureHealth,
-      reverseProxy: proxyExposureHealth,
-      ...(caExposureHealth !== undefined ? { certificateAuthority: caExposureHealth } : {})
-    },
-    integrationReferences: {
-      dns: hostname,
-      reverseProxy: hostname,
-      ...(caService ? { certificateAuthority: hostname } : {}),
-      // The provider-native locator and fingerprint observed right after
-      // publishing. Background tracking compares against these to notice a
-      // direct edit in Technitium or the proxy (ADR-0002).
-      integrations: {
-        ...integrationIdentity("dns", dnsInspection, hostname),
-        ...integrationIdentity("reverseProxy", proxyInspection, hostname)
+    const dnsExposureHealth = await withHealthyRetry(
+      () => technitiumAdapter.healthCheckExposure({
+        hostname,
+        expectedIp: publishRequest.ip,
+        backendIp,
+        backendPort,
+        tailnet,
+        tailnetGatewayIp,
+        zone: project.config.baseLocalDomain,
+        ip: dnsRef?.ip,
+        endpoint: dnsRef?.ip ? `http://${dnsRef.ip}:5380` : undefined,
+        connectionSecretReference: project.config.connectionSecretReferences[dnsService.id]
+      }),
+      healthRetryOptions
+    )
+      ?? { dns: "reachable", status: "healthy" };
+    const proxyExposureHealth = await withHealthyRetry(
+      () => proxyAdapter.healthCheckExposure({
+        hostname,
+        backendIp,
+        backendPort,
+        tailnet: routeRequest.tailnet,
+        tailnetGatewayIp,
+        httpRedirect: proxyService.httpRedirect === true,
+        redirectTo,
+        redirectCode,
+        caStrategy,
+        ip: proxyRef?.ip,
+        vmid: proxyRef?.vmid,
+        endpoint: proxyEndpointFor(proxyService.service, proxyRef?.ip)
+      }),
+      healthRetryOptions
+    )
+      ?? { https: "reachable", status: "healthy" };
+    const healthy = dnsExposureHealth.status === "healthy"
+      && proxyExposureHealth.status === "healthy"
+      && (caExposureHealth === undefined || caExposureHealth.status === "healthy");
+
+    // A CA-backed project only records trusted TLS when the proxy actually
+    // presents a trusted certificate. Persisting the intent while the exposure
+    // is serving an untrusted one would claim a trust nothing verified.
+    const observedTls = proxyExposureHealth?.tls;
+    const trusted = tlsOptions.trusted
+      && observedTls !== "untrusted"
+      && observedTls !== "missing"
+      && observedTls !== "unknown";
+
+    const serviceId = existingService?.id ?? `nc_${randomUUID()}`;
+    const managedService = {
+      id: serviceId,
+      name,
+      exposure: {
+        hostname,
+        ...(isRedirect
+          ? { redirect: { to: redirectTo, code: redirectCode } }
+          : {
+            backend: {
+              ip: backendIp,
+              port: backendPort,
+              ...(options.backendTls === true ? { tls: true } : {})
+            }
+          }),
+        protocol: "https",
+        tailnet,
+        certificateAuthority: caStrategy,
+        tls: {
+          mode: tlsOptions.mode,
+          trusted
+        }
       }
-    }
-  };
+    };
+
+    return {
+      managedService,
+      abortPublication,
+      isUpdate: existingService !== undefined,
+      warnings,
+      dnsInspection,
+      proxyInspection,
+      ...(caInspection !== undefined ? { caInspection } : {}),
+      health: {
+        status: healthy ? "healthy" : "unhealthy",
+        dns: dnsExposureHealth,
+        reverseProxy: proxyExposureHealth,
+        ...(caExposureHealth !== undefined ? { certificateAuthority: caExposureHealth } : {})
+      },
+      integrationReferences: {
+        dns: hostname,
+        reverseProxy: hostname,
+        ...(caService ? { certificateAuthority: hostname } : {}),
+        // The provider-native locator and fingerprint observed right after
+        // publishing. Background tracking compares against these to notice a
+        // direct edit in Technitium or the proxy (ADR-0002).
+        integrations: {
+          ...integrationIdentity("dns", dnsInspection, hostname),
+          ...integrationIdentity("reverseProxy", proxyInspection, hostname)
+        }
+      }
+    };
+  } catch (error) {
+    return abortPublication(error);
+  }
 }
 
 function integrationIdentity(integration, inspection, hostname) {

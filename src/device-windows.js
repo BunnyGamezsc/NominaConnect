@@ -5,16 +5,17 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
 async function installerSources() {
-  if (process.versions.bun) {
-    // @ts-ignore Bun embeds these files in standalone builds.
+  // @ts-ignore The Node bundle defines this constant at build time.
+  if (process.versions.bun || typeof NOMINA_EMBED_DEVICE_SOURCES !== "undefined") {
+    // @ts-ignore Bun embeds these sources in the compiled CLI.
     const helper = await import("../clients/device-setup/device.ps1", {
-      with: { type: "file" },
+      with: { type: "text" },
     });
-    // @ts-ignore Bun file asset import.
+    // @ts-ignore Bun text asset import.
     const script = await import("../clients/device-setup/setup.nsi", {
-      with: { type: "file" },
+      with: { type: "text" },
     });
-    return [helper, script].map((asset) => fs.readFileSync(asset.default));
+    return [helper, script].map((asset) => Buffer.from(asset.default));
   }
   return ["device.ps1", "setup.nsi"].map((name) =>
     fs.readFileSync(

@@ -71,6 +71,8 @@ export async function runCli(argumentsList, adapters) {
   }
 
   const [command, ...rest] = argumentsList;
+  const projectFlags = rest.filter(arg => arg === "--project-dir" || arg.startsWith("--project-dir="));
+  if (projectFlags.length > 1) throw new Error("Specify --project-dir only once.");
   // Migration discovers and locks each project separately.
   if (command === "ca" && rest[0] === "dns-renewal" && rest[1] === "migrate")
     return runCommand(command, rest, adapters);
@@ -78,8 +80,14 @@ export async function runCli(argumentsList, adapters) {
   // inspecting providers. Docker takes short write locks and a separate
   // lifecycle lock so a VMID is saved before installation begins.
   const explicitProjectIndex = rest.indexOf("--project-dir");
-  const candidateDirectory = command === "docker" || !adapters.filesystem?.acquireProjectLock ? undefined
-    : explicitProjectIndex >= 0 ? rest[explicitProjectIndex + 1] : rest.find(arg => arg.startsWith("--project-dir="))?.slice("--project-dir=".length) ?? findProjectDirectory(adapters.filesystem, adapters.cwd ?? ".");
+  const explicitDirectory = explicitProjectIndex >= 0
+    ? rest[explicitProjectIndex + 1]
+    : rest.find(arg => arg.startsWith("--project-dir="))?.slice("--project-dir=".length);
+  const cwd = adapters.cwd ?? ".";
+  const selectedDirectory = explicitDirectory ?? (command === "init"
+    ? cwd
+    : adapters.filesystem && findProjectDirectory(adapters.filesystem, cwd));
+  const candidateDirectory = command === "docker" || !adapters.filesystem?.acquireProjectLock ? undefined : selectedDirectory;
   const directory = candidateDirectory !== undefined && adapters.filesystem.exists(path.posix.join(candidateDirectory, ".nomina/state.json")) ? candidateDirectory : undefined;
   const releaseOperation = directory === undefined || command !== "uninstall" ? undefined : await adapters.filesystem.acquireProjectLock?.(directory, "docker-operation");
   let release;
@@ -93,7 +101,7 @@ export async function runCli(argumentsList, adapters) {
   // These CA commands run only their reviewed workflows, including read-only checks.
   if (command === "ca" && ["profile", "dns-certificate", "dns-renewal"].includes(rest[0])) return commandResult;
   if ("sshOperation" in commandResult) return adapters.sshOperations.launch(commandResult.sshOperation);
-  if (!("cancelled" in commandResult && commandResult.cancelled) && !("reviewOnly" in commandResult && commandResult.reviewOnly)) startTrackingJobInBackground(adapters);
+  if (!("cancelled" in commandResult && commandResult.cancelled) && !("reviewOnly" in commandResult && commandResult.reviewOnly)) startTrackingJobInBackground(adapters, selectedDirectory);
   return commandResult;
 }
 
@@ -445,17 +453,9 @@ async function showChanges(rawOptions, adapters) {
   return { stdout: detail };
 }
 
-function startTrackingJobInBackground(adapters) {
-  const { filesystem, providerAdapters = {} } = adapters;
-  let projectDir;
-  try {
-    const project = loadProject(filesystem);
-    projectDir = project.projectDirectory;
-  } catch {
-    return;
-  }
-
-  runTrackingJob({ filesystem, projectDir, providerAdapters }).catch(() => {
+function startTrackingJobInBackground(adapters, projectDir) {
+  const { filesystem, providerAdapters = {}, proxmox } = adapters;
+  runTrackingJob({ filesystem, projectDir, providerAdapters, proxmox }).catch(() => {
     adapters.prompts?.warn?.("Background tracking could not save its results. Run Nomina again after the current operation finishes.");
   });
 }
@@ -1156,6 +1156,26 @@ async function upgradeService(serviceName, rawOptions, adapters) {
   };
 }
 
+function checkDependentExposures(project, platformKey, serviceName, vmid) {
+  const { platform } = project.config.managedInventory;
+  const usesLxc = (role) => {
+    if (platformKey === role && project.state.providerReferences?.[platform[role]?.id]) return true;
+    const roleVmid = project.state.providerReferences?.[platform[role]?.id]?.vmid;
+    return vmid !== undefined && roleVmid !== undefined && String(roleVmid) === String(vmid);
+  };
+  const usesDns = usesLxc("dns");
+  const usesProxy = usesLxc("reverseProxy");
+  const usesCa = usesLxc("certificateAuthority");
+  const dependents = project.config.managedInventory.services.filter(({ exposure }) => exposure && (
+    usesDns || usesProxy ||
+    (usesCa && exposure.certificateAuthority === platform.certificateAuthority?.service)
+  ));
+  if (dependents.length) {
+    const names = dependents.map(service => service.name ?? service.id).join(", ");
+    throw new Error(`Remove the dependent exposures before removing ${serviceName}: ${names}.`);
+  }
+}
+
 /** Remove a selected managed integration while retaining shared DNS and unrelated access. */
 async function removeService(serviceName, rawOptions, adapters) {
   const { filesystem, runtime, proxmox, providerAdapters = {}, prompts } = adapters;
@@ -1184,6 +1204,7 @@ async function removeService(serviceName, rawOptions, adapters) {
     const deferred = deferSshOperation(adapters, project.projectDirectory, ["service", "remove", resolvedServiceName]);
     if (deferred) return deferred;
 
+    checkDependentExposures(project, platformKey, managedItem.service, providerRef.vmid);
     if (managedItem.service === "tailscale") {
       await restoreTailnetDns(project, providerRef, adapters);
     }
@@ -1273,7 +1294,7 @@ async function removeService(serviceName, rawOptions, adapters) {
         });
       }
       if (isWebExposure(matchedService.exposure) && proxyService?.service === "caddy") {
-        persistCaddyLiveConfig(proxmox, project.state.providerReferences[proxyService.id]?.vmid);
+        await persistCaddyLiveConfig(proxmox, project.state.providerReferences[proxyService.id]?.vmid);
       }
     }
 
@@ -1379,6 +1400,7 @@ async function destroyService(serviceName, rawOptions, adapters) {
     "--yes", "--expected-vmid", String(vmid), ...(options.force ? ["--force"] : [])]);
   if (deferred) return deferred;
 
+  checkDependentExposures(project, platformKey, managedServiceType, vmid);
   let recoveryWarning = "";
   if (managedServiceType === "tailscale" && project.state.providerReferences?.[managedItemId] &&
       (project.state.providerReferences[managedItemId].provisioningPending !== true || project.state.tailnetDnsSnapshot !== undefined)) {
@@ -1643,7 +1665,19 @@ function persistCaddyLiveConfig(proxmox, vmid) {
   }
   return proxmox.pctExec(vmid, {
     binary: "/bin/bash",
-    args: ["-c", "curl -sf http://127.0.0.1:2019/config/ > /etc/caddy/caddy.json"]
+    args: ["-ec", `target=/etc/caddy/caddy.json
+tmp=$(mktemp /etc/caddy/.caddy.json.XXXXXX)
+trap 'rm -f "$tmp"' EXIT
+curl -fsS http://127.0.0.1:2019/config/ -o "$tmp"
+test -s "$tmp"
+if test -e "$target"; then
+  chown --reference="$target" "$tmp"
+  chmod --reference="$target" "$tmp"
+else
+  chown root:caddy "$tmp"
+  chmod 640 "$tmp"
+fi
+mv -f "$tmp" "$target"`]
   });
 }
 
@@ -1846,7 +1880,7 @@ async function changeBaseDomain(options, adapters) {
   Object.assign(state.providerReferences, republishedReferences);
 
   if (proxyService.service === "caddy") {
-    persistCaddyLiveConfig(proxmox, proxyRef?.vmid);
+    await persistCaddyLiveConfig(proxmox, proxyRef?.vmid);
   }
 
   const vpnService = project.config.managedInventory.platform.vpn;
@@ -1924,22 +1958,12 @@ async function handleCaddyCommand(argumentsList, adapters) {
   );
   await republishExposures(workingProject, exposures, providerAdapters);
 
-  persistCaddyLiveConfig(proxmox, project.state.providerReferences[proxyService.id]?.vmid);
+  await persistCaddyLiveConfig(proxmox, project.state.providerReferences[proxyService.id]?.vmid);
 
   return {
     stdout: `HTTP→HTTPS auto-redirect ${enabled ? "enabled" : "disabled"} for ${exposures.length} exposure(s) on Caddy.\n`,
     httpRedirect: enabled
   };
-}
-
-function resolveDeletionTarget(target, { secretStorePath, statePath, projectDir }) {
-  if (target.startsWith(secretStorePath)) {
-    return secretStorePath;
-  }
-  if (target === statePath) {
-    return path.posix.join(projectDir, ".nomina");
-  }
-  return target;
 }
 
 /** Parse uninstall confirmation and the expected target snapshot used by detached workers. */
@@ -1963,37 +1987,36 @@ async function uninstallEverything(options, adapters) {
   const { filesystem, proxmox, prompts } = adapters;
   assertProxmoxShell(adapters.runtime);
 
-  const projectDir = options.projectDir ?? adapters.cwd ?? ".";
-  const configPath = path.posix.join(projectDir, "nomina.yaml");
-  const statePath = path.posix.join(projectDir, ".nomina", "state.json");
-  const secretStorePath = adapters.secretStore?.rootDirectory ?? "/var/lib/nominaconnect";
+  const cwd = adapters.cwd ?? ".";
+  const project = loadProject(filesystem, options.projectDir ?? findProjectDirectory(filesystem, cwd) ?? cwd);
+  const projectDir = project.projectDirectory;
+  const inventory = project.config.managedInventory;
+  const connectionSecrets = project.config.connectionSecretReferences;
+  const vpn = inventory.platform.vpn;
+  const ownsHostSsh = inventory.services.some((service) => service.exposure?.protocol === "ssh");
 
   // Only LXC vmids recorded in NominaConnect's own state are ever touched:
   // provider references (active) and retained services (previously removed).
   const targets = new Map();
   const dockerVmids = new Set();
-  let project = null;
-  if (filesystem.exists(configPath)) {
-    project = loadProject(filesystem, options.projectDir);
-    // A config/state write interrupted between replacements can leave an
-    // orphaned Docker reference. Its socket still identifies an inspection
-    // binding; it must not become a native service destruction target.
-    for (const reference of Object.values(project.state.providerReferences ?? {})) {
-      if (reference?.vmid !== undefined && typeof reference.socketPath === "string") dockerVmids.add(Number(reference.vmid));
+  // A config/state write interrupted between replacements can leave an
+  // orphaned Docker reference. Its socket still identifies an inspection
+  // binding; it must not become a native service destruction target.
+  for (const reference of Object.values(project.state.providerReferences ?? {})) {
+    if (reference?.vmid !== undefined && typeof reference.socketPath === "string") dockerVmids.add(Number(reference.vmid));
+  }
+  for (const binding of inventory.dockerHosts ?? []) {
+    const vmid = project.state.providerReferences?.[binding.id]?.vmid;
+    if (vmid !== undefined) dockerVmids.add(Number(vmid));
+  }
+  for (const [id, reference] of Object.entries(project.state.providerReferences ?? {})) {
+    if (reference?.vmid !== undefined && !dockerVmids.has(Number(reference.vmid)) && !targets.has(reference.vmid)) {
+      targets.set(reference.vmid, id);
     }
-    for (const binding of project.config.managedInventory.dockerHosts ?? []) {
-      const vmid = project.state.providerReferences?.[binding.id]?.vmid;
-      if (vmid !== undefined) dockerVmids.add(Number(vmid));
-    }
-    for (const [id, reference] of Object.entries(project.state.providerReferences ?? {})) {
-      if (reference?.vmid !== undefined && !dockerVmids.has(Number(reference.vmid)) && !targets.has(reference.vmid)) {
-        targets.set(reference.vmid, id);
-      }
-    }
-    for (const [id, reference] of Object.entries(project.state.retainedServices ?? {})) {
-      if (reference?.vmid !== undefined && !dockerVmids.has(Number(reference.vmid)) && !targets.has(reference.vmid)) {
-        targets.set(reference.vmid, `${id} (retained)`);
-      }
+  }
+  for (const [id, reference] of Object.entries(project.state.retainedServices ?? {})) {
+    if (reference?.vmid !== undefined && !dockerVmids.has(Number(reference.vmid)) && !targets.has(reference.vmid)) {
+      targets.set(reference.vmid, `${id} (retained)`);
     }
   }
 
@@ -2008,7 +2031,7 @@ async function uninstallEverything(options, adapters) {
     }
     const confirmed = await confirmPrompt(
       prompts,
-      `Nuclear uninstall: STOP AND DESTROY LXC(s) ${targetList.length > 0 ? targetList.join(", ") : "(none)"} and delete all NominaConnect configuration, state, and secrets. Docker-bound LXCs and their applications are retained. This cannot be undone. Continue?`,
+      `Nuclear uninstall for ${projectDir}: STOP AND DESTROY LXC(s) ${targetList.length > 0 ? targetList.join(", ") : "(none)"} and delete this project's configuration, state, and connection secrets. Docker-bound LXCs and their applications are retained. This cannot be undone. Continue?`,
       false
     );
     if (!confirmed) {
@@ -2018,24 +2041,24 @@ async function uninstallEverything(options, adapters) {
 
   // Confirmation was collected above. The worker repeats only this authorized
   // operation, with prompts disabled and without inheriting the SSH terminal.
-  const deferred = deferSshOperation(adapters, projectDir, ["uninstall", "--yes", "--expected-targets", expectedTargets]);
-  if (deferred) return deferred;
   const destroyed = [];
   const failed = [];
-  if (project?.config.managedInventory.services.some((service) => service.exposure?.protocol === "ssh") && !adapters.providerAdapters?.hostSsh?.uninstall) {
-    throw new Error("Host SSH cleanup is unavailable; uninstall stopped before deleting recovery state.");
+  if (ownsHostSsh) {
+    const deferred = deferSshOperation(adapters, projectDir, ["uninstall", "--yes", "--expected-targets", expectedTargets]);
+    if (deferred) return deferred;
+    const hostSsh = adapters.providerAdapters?.hostSsh;
+    if (!hostSsh?.uninstall) throw new Error("Host SSH cleanup is unavailable; uninstall stopped before deleting recovery state.");
+    await hostSsh.uninstall();
   }
-  await adapters.providerAdapters?.hostSsh?.uninstall?.();
 
   // Tailnet DNS is admin-console state, not LXC state, so this is the last
   // moment it can be put back: the recovery snapshot lives in the state file
   // deleted below, and the adapter verifies against a gateway address it reads
   // from the LXC destroyed here.
   let dnsLine = "";
-  const vpn = project?.config.managedInventory?.platform?.vpn;
-  const vpnReference = project?.state.providerReferences?.[vpn?.id];
-  if (project !== null && (project.state.tailnetDnsSnapshot !== undefined ||
-      (vpn?.service === "tailscale" && vpnReference?.vmid !== undefined))) {
+  const vpnReference = project.state.providerReferences?.[vpn?.id];
+  if (project.state.tailnetDnsSnapshot !== undefined ||
+      (vpn?.service === "tailscale" && vpnReference?.vmid !== undefined)) {
     const snapshot = project.state.tailnetDnsSnapshot;
     const manual = snapshot === undefined
       ? "Change tailnet DNS manually so it no longer depends on this gateway before removing Tailscale."
@@ -2098,16 +2121,16 @@ async function uninstallEverything(options, adapters) {
     throw new Error(`Uninstall was incomplete: ${failed.join("; ")} Configuration, recovery state, and secrets were retained. Successfully destroyed LXC(s): ${destroyed.join(", ") || "none"}.`);
   }
 
-  if (project) await adapters.dnsRenewal?.remove(project.projectDirectory);
-  const removedPaths = [];
-  for (const path of [configPath, statePath, secretStorePath]) {
-    if (filesystem.exists(path)) {
-      filesystem.deletePath(resolveDeletionTarget(path, { secretStorePath, statePath, projectDir }));
-      if (!removedPaths.some((existing) => existing === path)) {
-        removedPaths.push(path);
-      }
-    }
+  await adapters.dnsRenewal?.remove(projectDir);
+  const secretReferences = new Set(Object.values(connectionSecrets));
+  if (vpn?.service === "tailscale" && connectionSecrets.tailscaleAdmin === undefined) {
+    secretReferences.add(`nominaconnect/tailscale-admin/${vpn.id}`);
   }
+  for (const reference of secretReferences) await adapters.secretStore?.remove?.(reference);
+
+  filesystem.deletePath(project.configPath);
+  filesystem.deletePath(path.posix.dirname(project.statePath));
+  const removedPaths = [project.configPath, project.statePath];
 
   const lines = [];
   if (dockerVmids.size > 0) lines.push(`Retained Docker LXC(s): ${[...dockerVmids].join(", ")}. Their applications are preserved.`);
@@ -2249,13 +2272,18 @@ async function publishExposure(options, adapters) {
     }
   };
 
-  writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
+  try {
+    writeAtomically(filesystem, project.configPath, serializeProjectConfiguration(updatedConfig));
+  } catch (error) {
+    if ("abortPublication" in result) await result.abortPublication(error);
+    throw error;
+  }
   writeAtomically(filesystem, project.statePath, `${JSON.stringify(updatedState, null, 2)}\n`);
   filesystem.chmod(project.statePath, 0o600);
 
   const proxyServiceForPersistence = project.config.managedInventory.platform.reverseProxy;
   if (isWebExposure(result.managedService.exposure) && proxyServiceForPersistence?.service === "caddy") {
-    persistCaddyLiveConfig(adapters.proxmox, project.state.providerReferences[proxyServiceForPersistence.id]?.vmid);
+    await persistCaddyLiveConfig(adapters.proxmox, project.state.providerReferences[proxyServiceForPersistence.id]?.vmid);
   }
 
   const actionLabel = result.isUpdate ? "updated" : "published";

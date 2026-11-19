@@ -5,12 +5,12 @@ export const isStreamExposure = (exposure) => ["tcp", "ssh"].includes(exposure?.
 /** Compare complete DNS names case-insensitively without treating missing values as equal. */
 export const sameHostname = (left, right) => typeof left === "string" && typeof right === "string" && left.toLowerCase() === right.toLowerCase();
 
-/** SOA/NS/TXT records can coexist with an A record; alternate address routes cannot. */
+/** SOA/NS/TXT records can coexist with an A record. With an IP, an A record at that address can also be shared. */
 export function conflictingDnsRecords(records, ip) {
   return records.filter((record) => {
     const type = record.locator?.type ?? record.record?.split(/\s+/)[1];
     if (["SOA", "NS", "TXT", "MX", "SRV", "CAA"].includes(type)) return false;
-    return type !== "A" || (record.rData?.ipAddress ?? record.record?.split(/\s+/)[2]) !== ip;
+    return type !== "A" || ip === undefined || (record.rData?.ipAddress ?? record.record?.split(/\s+/)[2]) !== ip;
   });
 }
 

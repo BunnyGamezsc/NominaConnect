@@ -129,6 +129,16 @@ test("inspectLxc reports the configured bootstrap nameserver", async () => {
   assert.equal(observed.nameserver, "1.1.1.1");
 });
 
+test("inspectLxc accepts a root filesystem without a reported disk size", async () => {
+  const { proxmox } = createProductionAdapters({ commandRunner: {
+    async run() { return { stdout: "memory: 1024\nrootfs: local-lvm:vm-150-disk-0\n" }; }
+  } });
+
+  const observed = await proxmox.inspectLxc(150);
+  assert.equal(observed.storage, "local-lvm");
+  assert.deepEqual(observed.resources, { memoryMb: 1024 });
+});
+
 test("root-local secret resolution accepts configured references without exposing them", () => {
   const resolver = createLocalSecretResolver({
     isRoot: () => true,

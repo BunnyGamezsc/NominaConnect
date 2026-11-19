@@ -164,6 +164,9 @@ function Clear-Links([switch]$Removing) {
     $state.links = @(); Save
 }
 function Get-ShortcutFolder { Join-Path ([Environment]::GetFolderPath('CommonPrograms')) "Nomina $id" }
+function Get-ShortcutHash($bytes) {
+    return [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-','')
+}
 function Install-Links {
     $folder = Get-ShortcutFolder
     foreach ($s in $cfg.shortcuts) {
@@ -173,7 +176,7 @@ function Install-Links {
         $content = "[InternetShortcut]" + [Environment]::NewLine + "URL=$($s.url)" + [Environment]::NewLine
         if ($s.ico) { $content += "IconFile=$assets\$($s.ico)" + [Environment]::NewLine + 'IconIndex=0' + [Environment]::NewLine }
         $bytes = [Text.Encoding]::Unicode.GetPreamble() + [Text.Encoding]::Unicode.GetBytes($content)
-        $hash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-','')
+        $hash = Get-ShortcutHash $bytes
         $state.links = @($state.links) + @{path=$link;hash=$hash}; Save
         [IO.File]::WriteAllBytes($link,$bytes)
     }
@@ -193,6 +196,106 @@ function Register-Helper {
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
     Register-ScheduledTask -TaskName $taskName -Action (New-ScheduledTaskAction -Execute $ps -Argument $command) -Trigger $triggers -Settings $settings -User SYSTEM -RunLevel Highest | Out-Null
     $state.taskXml = Export-ScheduledTask -TaskName $taskName; Save
+}
+
+function Install-Revision([Guid]$requestedRevision) {
+    $previousRevision = $state.revision
+    $previousRemoving = $state.removing
+    $previousRoots = @($state.roots)
+    $previousLinks = @($state.links)
+    $previousTaskXml = $state.taskXml
+    if ($requestedRevision -eq [Guid]::Empty) {
+        if (!$previousRevision) { throw 'No active package revision to repair. Rerun setup.' }
+        $requestedRevision = [Guid]$previousRevision
+    }
+    $revision = $requestedRevision.ToString()
+    $assets = Join-Path $dir $revision
+    $cfg = Read-Json (Join-Path $assets 'package.json')
+    $state.revisions = @(@($state.revisions) + $revision | Select-Object -Unique)
+    Save
+
+    $previousCfg = $null
+    if ($previousRevision -and !$previousRemoving) {
+        $previousAssets = Join-Path $dir ([Guid]$previousRevision).ToString()
+        $previousCfg = Read-Json (Join-Path $previousAssets 'package.json')
+    }
+    $previousTask = Managed-Task
+    $backups = @{}
+    foreach ($link in $previousLinks) {
+        if (Test-Path -LiteralPath $link.path) {
+            $bytes = [IO.File]::ReadAllBytes($link.path)
+            if ((Get-ShortcutHash $bytes) -ne $link.hash) { throw "Preserved edited shortcut: $($link.path)" }
+            $backups[$link.path] = $bytes
+        }
+    }
+    $folder = Get-ShortcutFolder
+    foreach ($shortcut in $cfg.shortcuts) {
+        $path = Join-Path $folder ($shortcut.name + '.url')
+        if ((Test-Path -LiteralPath $path) -and !$backups.ContainsKey($path)) { throw "Shortcut already exists: $path" }
+    }
+
+    $linksTouched = $false
+    $linksCleared = $false
+    $taskAttempted = $false
+    $dnsAttempted = $false
+    try {
+        $key = Claim-Root
+        $linksTouched = $true
+        Clear-Links
+        $linksCleared = $true
+        Install-Links
+        $taskAttempted = $true
+        Register-Helper
+        $dnsAttempted = $true
+        Update-Dns
+        $state.revision = $revision
+        $state.removing = $false
+        Save
+    } catch {
+        $failure = $_
+        $rollbackErrors = @()
+        $state.revision = $previousRevision
+        $state.removing = $previousRemoving
+        if ($dnsAttempted) {
+            try {
+                if ($previousCfg) { $cfg = $previousCfg; Update-Dns }
+                else { Clear-Rule }
+            } catch { $rollbackErrors += $_.Exception.Message }
+        }
+        if ($taskAttempted -and !$previousTask) {
+            try {
+                if (Managed-Task) { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false }
+                $state.taskXml = $previousTaskXml
+            } catch { $rollbackErrors += $_.Exception.Message }
+        }
+        if ($linksTouched) {
+            if ($linksCleared) {
+                try { Clear-Links -Removing } catch { $rollbackErrors += $_.Exception.Message }
+            }
+            foreach ($path in $backups.Keys) {
+                if (!(Test-Path -LiteralPath $path)) {
+                    try {
+                        $file = [IO.File]::Open($path,'CreateNew','Write','None')
+                        try { $file.Write($backups[$path],0,$backups[$path].Length) } finally { $file.Dispose() }
+                    } catch { $rollbackErrors += $_.Exception.Message }
+                }
+            }
+            $state.links = $previousLinks
+        }
+        foreach ($root in @($state.roots)) {
+            if ($root -notin $previousRoots) {
+                try { Release-Root $root } catch { $rollbackErrors += $_.Exception.Message }
+            }
+        }
+        try { Save } catch { $rollbackErrors += $_.Exception.Message }
+        if ($rollbackErrors.Count) { throw "$($failure.Exception.Message) Rollback needs attention. $($rollbackErrors -join '. ')" }
+        throw $failure
+    }
+    foreach ($old in $previousRoots) {
+        if ($old -ne $key) {
+            try { Release-Root $old } catch { Set-Status "Setup active. Unable to release the previous root. $($_.Exception.Message)" }
+        }
+    }
 }
 
 if ($MyInvocation.InvocationName -eq '.') { return }
@@ -243,20 +346,13 @@ try {
         }
         return
     }
-    if ($Action -eq 'Install' -and $Revision) {
-        $state.removing = $false
-        $state.revision = $Revision.ToString()
-        $state.revisions = @(@($state.revisions) + $state.revision | Select-Object -Unique)
-        Save
+    if ($Action -eq 'Install') {
+        if ([int](Get-ItemPropertyValue 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' CurrentBuildNumber) -lt 22000) { throw 'Windows 11 required.' }
+        Install-Revision $Revision
+        return
     }
     $assets = Join-Path $dir ([Guid]$state.revision).ToString()
     $cfg = Read-Json "$assets\package.json"
-    if ($Action -eq 'Install') {
-        if ([int](Get-ItemPropertyValue 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' CurrentBuildNumber) -lt 22000) { throw 'Windows 11 required.' }
-        $key = Claim-Root
-        Clear-Links; Install-Links; Register-Helper
-        foreach ($old in @($state.roots)) { if ($old -ne $key) { Release-Root $old } }
-    }
     Update-Dns
 } catch { Set-Status $_.Exception.Message; throw }
 finally { $lock.Dispose() }

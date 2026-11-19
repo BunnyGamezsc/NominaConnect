@@ -1,11 +1,27 @@
 import { randomUUID } from "node:crypto";
-import { runAdoptionPass } from "./adoption.js";
+import { isDeepStrictEqual } from "node:util";
+import { adoptPlatformDeployment, adoptServiceExposure, applyProviderReferenceChange, runAdoptionPass } from "./adoption.js";
 import { loadProject } from "./config.js";
-import { adoptPlatformDeployment, adoptServiceExposure, applyProviderReferenceChange } from "./adoption.js";
 import { updateProject } from "./project-write.js";
 
+function observationContext(project, { platformKey, serviceId }) {
+  const { managedInventory, connectionSecretReferences, baseLocalDomain } = project.config;
+  const references = project.state.providerReferences ?? {};
+  const providerKey = serviceId === undefined || platformKey === "dns" ? platformKey : "reverseProxy";
+  const providerContext = (role) => {
+    const platform = managedInventory.platform[role];
+    return [platform, references[platform?.id], connectionSecretReferences?.[platform?.id]];
+  };
+  const provider = providerContext(providerKey);
+  if (serviceId === undefined) return provider;
+
+  const service = managedInventory.services?.find(({ id }) => id === serviceId);
+  const proxy = providerKey === "reverseProxy" ? provider : providerContext("reverseProxy");
+  return [service?.name, service?.exposure, references[serviceId], baseLocalDomain, provider, proxy, providerContext("vpn")];
+}
+
 /** Inspect providers without a write lock, then reload and apply observed changes under the shared project update lock. */
-export async function runTrackingJob({ filesystem, projectDir, providerAdapters = {}, retryOptions = {}, commitRetryOptions = {} }) {
+export async function runTrackingJob({ filesystem, projectDir, providerAdapters = {}, proxmox = undefined, retryOptions = {}, commitRetryOptions = {} }) {
   let project;
   try {
     project = loadProject(filesystem, projectDir);
@@ -13,18 +29,28 @@ export async function runTrackingJob({ filesystem, projectDir, providerAdapters 
     return { changes: [], warnings: [], notices: [] };
   }
 
-  const adoptionResult = await runAdoptionPass({ project, providerAdapters, retryOptions });
-  const notices = [];
+  const adoptionResult = await runAdoptionPass({ project, providerAdapters, proxmox, retryOptions });
+  let changes = [];
+  let warnings = [];
 
   if (adoptionResult.changes.length > 0 || adoptionResult.warnings.length > 0) {
-    // Re-read rather than reusing the pre-adoption snapshot: the pass itself
-    // can take a while, and the file on disk is the one being updated.
     await updateProject(filesystem, project.projectDirectory, (currentProject) => {
+      // An operation can change an inspection target while provider calls are in flight.
+      const stillCurrent = (observation) => isDeepStrictEqual(
+        observationContext(project, observation), observationContext(currentProject, observation)
+      );
+      changes = adoptionResult.changes.filter(stillCurrent);
+      warnings = adoptionResult.warnings.filter(stillCurrent);
       let updatedConfig = currentProject.config;
       let updatedProviderReferences = currentProject.state.providerReferences ?? {};
-      for (const change of adoptionResult.changes) {
+      for (const change of changes) {
         if (change.kind === "platform-deployed" || change.kind === "platform-changed") {
           updatedConfig = adoptPlatformDeployment(updatedConfig, change.platformKey, change.after);
+          const reference = updatedProviderReferences[change.managedItemId];
+          if ("providerIpBefore" in change && reference !== undefined &&
+              reference.ip === change.providerIpBefore && change.after.ip !== undefined && reference.ip !== change.after.ip) {
+            updatedProviderReferences = { ...updatedProviderReferences, [change.managedItemId]: { ...reference, ip: change.after.ip } };
+          }
         } else if (change.kind === "exposure-changed" || change.kind === "service-changed") {
           updatedConfig = adoptServiceExposure(updatedConfig, change.serviceId, change.after?.exposure ?? change.after);
         } else if (change.kind === "provider-reference-changed") {
@@ -41,7 +67,7 @@ export async function runTrackingJob({ filesystem, projectDir, providerAdapters 
           ...currentProject.state.tracking,
           notices: coalesceWarnings([
             ...currentProject.state.tracking.notices,
-            ...adoptionResult.changes.map((change) => ({
+            ...changes.map((change) => ({
               id: `nc_${randomUUID()}`,
               kind: change.kind,
               serviceName: change.serviceName,
@@ -50,7 +76,7 @@ export async function runTrackingJob({ filesystem, projectDir, providerAdapters 
               timestamp: change.timestamp,
               summary: formatChangeSummary(change)
             })),
-            ...adoptionResult.warnings.map((warning) => ({
+            ...warnings.map((warning) => ({
               id: `nc_${randomUUID()}`,
               kind: "verification-warning",
               serviceName: warning.serviceName,
@@ -69,16 +95,16 @@ export async function runTrackingJob({ filesystem, projectDir, providerAdapters 
   }
 
   return {
-    changes: adoptionResult.changes,
-    warnings: adoptionResult.warnings,
+    changes,
+    warnings,
     notices: [
-      ...adoptionResult.changes.map((change) => ({
+      ...changes.map((change) => ({
         kind: change.kind,
         serviceName: change.serviceName,
         verified: change.verified,
         summary: formatChangeSummary(change)
       })),
-      ...adoptionResult.warnings.map((warning) => ({
+      ...warnings.map((warning) => ({
         kind: "verification-warning",
         serviceName: warning.serviceName,
         verified: false,

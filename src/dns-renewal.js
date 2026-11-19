@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { findProjectDirectory, loadProject } from "./config.js";
 import { hasManagedDnsCertificate, renewDnsCertificate } from "./dns-certificate.js";
 import { cliInvocation } from "./ssh-operation.js";
@@ -47,28 +47,58 @@ export function createDnsRenewalScheduler({ commandRunner, filesystem = fs, unit
       throw new Error(`Preserving existing systemd unit ${file}.`);
     return true;
   };
+  const serviceContents = directory => {
+    const launcher = invocation.map(file => {
+      const resolved = filesystem.realpathSync(file);
+      trustedPath(filesystem, resolved);
+      return resolved;
+    });
+    const args = [...launcher, "ca", "dns-renewal", "check", "--project-dir", directory].map(systemdArgument);
+    return `${unitHeader}[Unit]\nDescription=Renew the Nomina DNS-over-TLS certificate\n\n[Service]\nType=oneshot\nUMask=0077\nTimeoutStartSec=5min\nExecStart=:${args.join(" ")}\n`;
+  };
+  const replaceService = (file, content) => {
+    const temporary = `${file}.${randomUUID()}.tmp`;
+    try {
+      filesystem.writeFileSync(temporary, content, { flag: "wx", mode: 0o644 });
+      filesystem.renameSync(temporary, file);
+    } finally {
+      if (filesystem.existsSync(temporary)) filesystem.unlinkSync(temporary);
+    }
+  };
   return {
     projectPath,
     isRegistered(projectDirectory) {
-      const unit = unitName(filesystem.realpathSync(projectDirectory));
+      const directory = filesystem.realpathSync(projectDirectory);
+      const unit = unitName(directory);
       return isManaged(unitPath(unit, "service")) && isManaged(unitPath(unit, "timer")) &&
+        filesystem.readFileSync(unitPath(unit, "service"), "utf8") === serviceContents(directory) &&
         filesystem.existsSync(path.join(unitsDirectory, "timers.target.wants", `${unit}.timer`));
     },
     async register(projectDirectory) {
       const directory = projectPath(projectDirectory);
       const unit = unitName(directory);
       if (this.isRegistered(directory)) return unit;
-      const launcher = invocation.map(file => {
-        const resolved = filesystem.realpathSync(file);
-        trustedPath(filesystem, resolved);
-        return resolved;
-      });
       trustedPath(filesystem, unitsDirectory, true);
-      const args = [...launcher, "ca", "dns-renewal", "check", "--project-dir", directory].map(systemdArgument);
       const service = unitPath(unit, "service");
       const timer = unitPath(unit, "timer");
-      if (!isManaged(service)) filesystem.writeFileSync(service, `${unitHeader}[Unit]\nDescription=Renew the Nomina DNS-over-TLS certificate\n\n[Service]\nType=oneshot\nUMask=0077\nTimeoutStartSec=5min\nExecStart=:${args.join(" ")}\n`, { flag: "wx", mode: 0o644 });
-      if (!isManaged(timer)) filesystem.writeFileSync(timer, `${unitHeader}[Unit]\nDescription=Check the Nomina DNS-over-TLS certificate\n\n[Timer]\nOnActiveSec=1min\nOnUnitInactiveSec=15min\n\n[Install]\nWantedBy=timers.target\n`, { flag: "wx", mode: 0o644 });
+      const hasTimer = isManaged(timer);
+      const wanted = serviceContents(directory);
+      if (isManaged(service)) {
+        const previous = filesystem.readFileSync(service, "utf8");
+        if (previous !== wanted) {
+          replaceService(service, wanted);
+          try {
+            await systemctl("daemon-reload");
+          } catch (error) {
+            replaceService(service, previous);
+            throw error;
+          }
+          if (this.isRegistered(directory)) return unit;
+        }
+      } else {
+        filesystem.writeFileSync(service, wanted, { flag: "wx", mode: 0o644 });
+      }
+      if (!hasTimer) filesystem.writeFileSync(timer, `${unitHeader}[Unit]\nDescription=Check the Nomina DNS-over-TLS certificate\n\n[Timer]\nOnActiveSec=1min\nOnUnitInactiveSec=15min\n\n[Install]\nWantedBy=timers.target\n`, { flag: "wx", mode: 0o644 });
       try {
         await systemctl("enable", "--now", `${unit}.timer`);
       } catch (error) {

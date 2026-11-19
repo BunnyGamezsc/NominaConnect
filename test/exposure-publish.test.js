@@ -423,10 +423,19 @@ const PROVISIONED_STATE = {
   tracking: { notices: [] }
 };
 
-function seedProvisionedProject(filesystem, projectDir = "/projects/bunnyhome", { proxyService = "caddy", proxyHostname = "caddy" } = {}) {
+function seedProvisionedProject(filesystem, projectDir = "/projects/bunnyhome", { proxyService = "caddy", proxyHostname = "caddy", managedPhotos = false } = {}) {
   filesystem.mkdir(projectDir);
   filesystem.mkdir(`${projectDir}/.nomina`);
-  filesystem.writeFile(`${projectDir}/nomina.yaml`, createProvisionedProjectYaml(proxyService, proxyHostname));
+  const yaml = createProvisionedProjectYaml(proxyService, proxyHostname);
+  filesystem.writeFile(`${projectDir}/nomina.yaml`, managedPhotos ? yaml.replace("  services: []", `  services:
+    - id: nc_photos
+      name: photos
+      exposure:
+        hostname: photos.bunnyhome.test
+        protocol: https
+        backend:
+          ip: 10.0.0.99
+          port: 8080`) : yaml);
   filesystem.writeFile(`${projectDir}/.nomina/state.json`, `${JSON.stringify(PROVISIONED_STATE, null, 2)}\n`);
 }
 
@@ -446,8 +455,14 @@ function createTechnitiumAdapter(overrides = {}) {
     publishRecord(request) {
       state.publishCalls.push(request);
       state.resources = state.resources.filter((resource) => resource.id !== request.hostname);
-      state.resources.push({ id: request.hostname, record: `${request.hostname} A ${request.ip}` });
-      return { id: request.hostname, record: `${request.hostname} A ${request.ip}` };
+      const record = `${request.hostname} A ${request.ip}`;
+      state.resources.push({ id: request.hostname, record });
+      return { id: request.hostname, record, fingerprint: record };
+    },
+    deleteRecord(request) {
+      const existing = state.resources.find(({ id }) => id === request.hostname);
+      if (request.fingerprint !== existing?.record) throw new Error("Record fingerprint changed");
+      state.resources = state.resources.filter(({ id }) => id !== request.hostname);
     },
     healthCheckExposure(request) {
       return overrides.exposureHealth?.(request) ?? { dns: "reachable", status: "healthy" };
@@ -577,6 +592,67 @@ test("nomina exposure publish creates Technitium record and Caddy HTTPS route to
   assert.ok(proxyInspection.some((resource) => resource.id === "photos.bunnyhome.test"));
 });
 
+test("manual HTTPS publication preserves an unmanaged A record even if its address already matches", async () => {
+  for (const ip of ["10.0.0.9", "10.0.0.54"]) {
+    const filesystem = new FakeFilesystem();
+    seedProvisionedProject(filesystem);
+    const existing = { id: "Photos.bunnyhome.test", record: `Photos.bunnyhome.test A ${ip}` };
+    const technitium = createTechnitiumAdapter({ resources: [existing] });
+    const caddy = createCaddyAdapter();
+    const configPath = "/projects/bunnyhome/nomina.yaml";
+    const before = filesystem.read(configPath);
+
+    await assert.rejects(runCli([
+      "exposure", "publish", "--project-dir", "/projects/bunnyhome", "--source", "manual",
+      "--name", "photos", "--hostname", "photos.bunnyhome.test", "--backend-ip", "10.0.0.100", "--backend-port", "8080"
+    ], { filesystem, runtime: proxmoxRootRuntime(), providerAdapters: { technitium, caddy } }), /unmanaged address records/);
+
+    assert.deepEqual(technitium.inspect().resources, [existing]);
+    assert.deepEqual(technitium.publishCalls, []);
+    assert.deepEqual(caddy.publishCalls, []);
+    assert.equal(filesystem.read(configPath), before);
+  }
+});
+
+for (const stage of ["proxy write", "DNS inspection", "proxy inspection", "config save"]) {
+  test(`manual HTTPS publication can be retried after a failed ${stage}`, async () => {
+    const filesystem = new FakeFilesystem();
+    seedProvisionedProject(filesystem);
+    const configPath = "/projects/bunnyhome/nomina.yaml";
+    const before = filesystem.read(configPath);
+    const technitium = createTechnitiumAdapter();
+    const caddy = createCaddyAdapter();
+    const publishRoute = caddy.publishRoute;
+    const inspectDns = technitium.inspect;
+    const inspectProxy = caddy.inspect;
+    const rename = filesystem.rename.bind(filesystem);
+    let fail = true;
+    const check = (currentStage) => {
+      if (fail && stage === currentStage) throw new Error(`Failed ${stage}`);
+    };
+    caddy.publishRoute = (request) => { check("proxy write"); return publishRoute(request); };
+    caddy.inspect = () => { check("proxy inspection"); return inspectProxy(); };
+    technitium.inspect = () => {
+      if (caddy.publishCalls.length) check("DNS inspection");
+      return inspectDns();
+    };
+    filesystem.rename = (from, to) => {
+      if (to === configPath) check("config save");
+      rename(from, to);
+    };
+
+    const args = ["exposure", "publish", "--project-dir", "/projects/bunnyhome", "--name", "photos",
+      "--hostname", "photos.bunnyhome.test", "--backend-ip", "10.0.0.100", "--backend-port", "8080"];
+    const adapters = { filesystem, runtime: proxmoxRootRuntime(), providerAdapters: { technitium, caddy } };
+    await assert.rejects(runCli(args, adapters), new RegExp(`Failed ${stage}`));
+    assert.equal(filesystem.read(configPath), before);
+    assert.equal(inspectDns().resources.some(({ id }) => id === "photos.bunnyhome.test"), false);
+    assert.equal(inspectDns().resources.some(({ id }) => id === "legacy.bunnyhome.test"), true);
+    fail = false;
+    assert.match((await runCli(args, adapters)).stdout, /published/i);
+  });
+}
+
 test("an opted-out Tailscale exposure stays opted out on edit and can be enabled later", async () => {
   const filesystem = new FakeFilesystem();
   seedProvisionedProject(filesystem);
@@ -614,7 +690,7 @@ test("an opted-out Tailscale exposure stays opted out on edit and can be enabled
 
 test("nomina exposure publish updates an existing managed hostname", async () => {
   const filesystem = new FakeFilesystem();
-  seedProvisionedProject(filesystem);
+  seedProvisionedProject(filesystem, undefined, { managedPhotos: true });
   const technitium = createTechnitiumAdapter({
     resources: [
       { id: "bunnyhome.test", record: "bunnyhome.test NS localhost" },
@@ -762,7 +838,7 @@ test("nomina exposure publish creates Technitium record and Traefik HTTPS route 
 
 test("nomina exposure publish updates an existing managed hostname with Traefik", async () => {
   const filesystem = new FakeFilesystem();
-  seedProvisionedProject(filesystem, "/projects/bunnyhome", { proxyService: "traefik", proxyHostname: "traefik" });
+  seedProvisionedProject(filesystem, undefined, { proxyService: "traefik", proxyHostname: "traefik", managedPhotos: true });
   const technitium = createTechnitiumAdapter({
     resources: [
       { id: "bunnyhome.test", record: "bunnyhome.test NS localhost" },

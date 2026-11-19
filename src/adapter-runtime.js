@@ -677,14 +677,23 @@ function parsePctConfig(stdout) {
     values[line.slice(0, index).trim()] = line.slice(index + 1).trim();
   }
   const net0 = values.net0 ?? "";
+  const size = values.rootfs?.match(/(?:^|,)size=(\d+(?:\.\d+)?)([KMGT])?(?:,|$)/i);
+  const gigabytesPerUnit = { K: 1 / 1024 ** 2, M: 1 / 1024, G: 1, T: 1024 };
+  const diskGb = size == null ? undefined : Number(size[1]) * (gigabytesPerUnit[size[2]?.toUpperCase()] ?? 1 / 1024 ** 3);
   return {
     hostname: values.hostname,
     unprivileged: values.unprivileged === "1",
-    ip: net0.match(/ip=([^/,]+)/)?.[1],
+    ip: net0.match(/(?:^|,)ip=([^/,]+)/)?.[1],
     networkInterface: net0.match(/(?:^|,)name=([^,]+)/)?.[1],
-    bridge: net0.match(/bridge=([^,]+)/)?.[1],
+    bridge: net0.match(/(?:^|,)bridge=([^,]+)/)?.[1],
+    ...(values.net0 === undefined ? {} : { gateway: net0.match(/(?:^|,)gw=([^,]+)/)?.[1] }),
     nameserver: values.nameserver,
-    storage: values.rootfs?.split(":")[0]
+    storage: values.rootfs?.match(/^([^:,]+):/)?.[1],
+    resources: {
+      ...(/^\d+$/.test(values.cores) ? { cpus: Number(values.cores) } : {}),
+      ...(/^\d+$/.test(values.memory) ? { memoryMb: Number(values.memory) } : {}),
+      ...(diskGb === undefined ? {} : { diskGb })
+    }
   };
 }
 

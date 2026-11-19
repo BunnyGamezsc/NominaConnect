@@ -11,6 +11,8 @@ import {
   formatChangeSummary,
   clearPendingNotices
 } from "../src/tracking.js";
+import { loadProject } from "../src/config.js";
+import { updateProject } from "../src/project-write.js";
 import {
   collectPlatformServices,
   collectExposedServices,
@@ -573,6 +575,69 @@ test("runTrackingJob records adoption changes in state notices", async () => {
   assert.equal(result.changes.length, 0);
   assert.equal(result.warnings.length, 0);
   assert.equal(result.notices.length, 0);
+});
+
+test("tracking skips stale exposure changes and keeps warnings for unchanged targets", async () => {
+  const filesystem = new FakeFilesystem();
+  const projectDir = "/projects/bunnyhome";
+  seedProvisionedProject(filesystem, projectDir);
+  await updateProject(filesystem, projectDir, ({ config }) => {
+    config.managedInventory.services = ["app", "missing"].map((name) => ({
+      id: `nc_${name}`,
+      name,
+      exposure: { hostname: `${name}.bunnyhome.test`, backend: { ip: "10.0.0.10", port: 8080 } }
+    }));
+  });
+
+  const caddy = createCaddyAdapter({
+    resources: [{ id: "app.bunnyhome.test", backendIp: "10.0.0.20", backendPort: 8080 }]
+  });
+  const inspect = caddy.inspect;
+  let editPending = true;
+  caddy.inspect = async () => {
+    if (editPending) {
+      editPending = false;
+      await updateProject(filesystem, projectDir, ({ config }) => {
+        config.managedInventory.services[0].exposure.backend.ip = "10.0.0.30";
+      });
+    }
+    return inspect();
+  };
+
+  const result = await runTrackingJob({ filesystem, projectDir, providerAdapters: { caddy } });
+
+  const { config, state } = loadProject(filesystem, projectDir);
+  assert.equal(config.managedInventory.services[0].exposure.backend.ip, "10.0.0.30");
+  assert.deepEqual(result.changes, []);
+  const proxyWarnings = (notices) => notices.filter(({ platformKey }) => platformKey === "reverseProxy")
+    .map(({ serviceName }) => serviceName);
+  assert.deepEqual(proxyWarnings(result.warnings), ["missing"]);
+  assert.deepEqual(proxyWarnings(state.tracking.notices), ["missing"]);
+});
+
+test("tracking removes the old route fields when a backend and redirect replace each other", async () => {
+  const filesystem = new FakeFilesystem();
+  const projectDir = "/projects/bunnyhome";
+  seedProvisionedProject(filesystem, projectDir);
+  const hostname = "app.bunnyhome.test";
+  const backend = { ip: "10.0.0.10", port: 8080 };
+  const redirect = { to: "https://other.bunnyhome.test", code: 308 };
+  await updateProject(filesystem, projectDir, ({ config }) => {
+    config.managedInventory.services = [{ id: "nc_app", name: "app", exposure: { hostname, backend } }];
+  });
+
+  const readExposure = () => loadProject(filesystem, projectDir).config.managedInventory.services[0].exposure;
+  const track = (resource) => runTrackingJob({ filesystem, projectDir, providerAdapters: {
+    caddy: createCaddyAdapter({ resources: [{ id: hostname, ...resource }] })
+  } });
+
+  await track({ redirect });
+  assert.equal(readExposure().redirect.to, redirect.to);
+  assert.equal(readExposure().backend, undefined);
+
+  await track({ backend });
+  assert.equal(readExposure().backend.ip, backend.ip);
+  assert.equal(readExposure().redirect, undefined);
 });
 
 test("runTrackingJob persists verification warnings to state", async () => {

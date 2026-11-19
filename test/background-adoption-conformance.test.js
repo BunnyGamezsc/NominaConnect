@@ -352,6 +352,25 @@ for (const proxy of ["caddy", "traefik"]) {
     assert.ok(environment.providers[proxy].preservedUnmanaged());
   });
 
+  test(`background tracking preserves the exposure when an unrelated ${proxy} route takes over its hostname`, async () => {
+    const environment = createConformanceEnvironment();
+    const filesystem = await seedProject(environment, { proxy });
+    const provider = environment.providers[proxy];
+    if (proxy === "traefik") {
+      provider.duplicate();
+      provider.removeManaged();
+    } else {
+      const route = provider.routes.find(route => route["@id"] === EXPOSED_HOSTNAME);
+      delete route["@id"];
+      route.handle[0].upstreams[0].dial = "10.0.0.91:9091";
+    }
+    const before = readState(filesystem).providerReferences.nc_service_photos.integrations.reverseProxy;
+    const result = await track(filesystem, environment);
+    assert.ok(result.warnings.some(warning => /unmanaged.*route/i.test(warning.message)));
+    assert.ok(!result.changes.some(change => change.serviceId === "nc_service_photos" && change.platformKey === "reverseProxy"));
+    assert.deepEqual(readState(filesystem).providerReferences.nc_service_photos.integrations.reverseProxy, before);
+  });
+
   test(`background tracking refuses an ambiguous ${proxy} route`, async () => {
     const environment = createConformanceEnvironment();
     const filesystem = await seedProject(environment, { proxy });
