@@ -102,7 +102,43 @@ export async function queryPlainDns(ip, zone) {
   await resolver.resolveSoa(zone);
 }
 
-export function listenerPlan(settings, addresses) {
+const wildcard = { "0.0.0.0": 4, "::": 6 };
+
+function listenerAddress(endpoint) {
+  const ip = endpoint.match(/^\[([^\]]+)\]:53$/)?.[1] ?? endpoint.match(/^([\d.]+):53$/)?.[1];
+  if (!ip || !net.isIP(ip)) throw new Error(`The existing listener ${endpoint} requires a separate review.`);
+  const [address, scope] = ip.split("%");
+  return address.toLowerCase() + (scope ? `%${scope}` : "");
+}
+
+function isPrivateListener(ip) {
+  return /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.|f[cd][0-9a-f]{2}:)/i.test(ip) ||
+    ip === "::1" || /^fe[89ab][0-9a-f]:.+%[a-z\d_.-]+$/i.test(ip);
+}
+
+function wildcardAddresses(ips, interfaces) {
+  if (!Array.isArray(interfaces) || !interfaces.length)
+    throw new Error("Could not identify the Technitium LXC's current DNS listening addresses safely.");
+  const expanded = ips.flatMap(ip => {
+    const family = wildcard[ip];
+    if (!family) return [ip];
+    return interfaces.flatMap(({ ifname, addr_info = [] }) => addr_info
+      .filter(info => net.isIP(info.local) === family)
+      .map(info => {
+        const local = info.local.toLowerCase();
+        if (family === 6 && /^fe[89ab][0-9a-f]:/.test(local)) {
+          if (!/^[a-z\d_.-]+$/i.test(ifname)) throw new Error("Cannot keep a scoped IPv6 listener with an unknown interface name.");
+          return `${local}%${ifname}`;
+        }
+        return local;
+      }));
+  });
+  const unsafe = expanded.find(ip => !isPrivateListener(ip));
+  if (unsafe) throw new Error(`DNS-over-TLS would also listen on ${unsafe}. Nomina kept the existing DNS listeners and needs a private-only resolver to continue.`);
+  return [...new Set(expanded)].sort();
+}
+
+export function listenerPlan(settings, addresses, interfaces = undefined) {
   if (
     !/^15\.(?:4|6)(?:\.|$)/.test(settings.version) ||
     settings.clusterInitialized !== false
@@ -121,29 +157,26 @@ export function listenerPlan(settings, addresses) {
     throw new Error(
       "Require TCP 853 and private-network-only recursion. Review the existing settings in Technitium.",
     );
-  const ips = settings.dnsServerLocalEndPoints.map((endpoint) =>
-    endpoint
-      .replace(/^\[([^\]]+)\]:53$/, "$1")
-      .replace(/^(\d+\.\d+\.\d+\.\d+):53$/, "$1"),
-  );
+  const before = settings.dnsServerLocalEndPoints;
+  const ips = before.map(listenerAddress);
+  const hasWildcard = ips.some(ip => wildcard[ip]);
+  if (hasWildcard && settings.enableDnsOverTls)
+    throw new Error("The existing DNS-over-TLS listener uses wildcard addresses. Review the active listener before changing it.");
+  const listeners = hasWildcard ? wildcardAddresses(ips, interfaces) : ips.slice().sort();
   if (
-    !ips.every(
-      (ip) =>
-        net.isIP(ip) &&
-        (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.|f[cd][0-9a-f]{2}:)/i.test(
-          ip,
-        ) ||
-          ip === "::1"),
-    ) ||
-    !addresses.every((ip) => ips.includes(ip))
+    !listeners.every(isPrivateListener) ||
+    !addresses.every(ip => listeners.includes(ip.toLowerCase()))
   )
     throw new Error(
-      "Explicitly bind Technitium to the selected private LAN addresses first. Wildcard or public binds are ineligible for automated setup.",
+      "The selected resolver addresses must be present on private Technitium listeners. Check the DNS addresses in the package.",
     );
   return {
     enabled: settings.enableDnsOverTls,
     version: settings.version,
-    listeners: ips,
+    listeners,
     certificate: settings.dnsTlsCertificatePath,
+    ...(hasWildcard ? { bindings: {
+      from: before, to: listeners.map(ip => net.isIP(ip) === 6 ? `[${ip}]:53` : `${ip}:53`),
+    } } : {}),
   };
 }

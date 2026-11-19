@@ -229,30 +229,56 @@ export async function profileCommand(args, adapters, upgradeTechnitium) {
     connectionSecretReference:
       project.config.connectionSecretReferences[dns.id],
   };
-  const inspect = async () =>
-    listenerPlan(await provider.inspectTlsListener(request), pkg.addresses);
+  const inspect = async (recover = false) => {
+    const settings = await provider.inspectTlsListener(request);
+    let interfaces;
+    if (settings.dnsServerLocalEndPoints?.some(endpoint => endpoint === "0.0.0.0:53" || endpoint === "[::]:53") &&
+        (!settings.enableDnsOverTls || recover)) {
+      const { stdout } = await adapters.proxmox.pctExec(ref.vmid, {
+        binary: "/usr/bin/ip", args: ["-j", "address", "show"], timeoutMs: 5000, maxOutputBytes: 65536,
+      });
+      interfaces = JSON.parse(stdout);
+    }
+    const reviewed = listenerPlan(recover ? { ...settings, enableDnsOverTls: false } : settings, pkg.addresses, interfaces);
+    return { ...reviewed, enabled: settings.enableDnsOverTls };
+  };
+  const observed = plan => ({ enabled: plan.enabled, version: plan.version,
+    listeners: [...plan.listeners].sort(), certificate: plan.certificate });
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const checkPlainDns = async (ip = ref.ip) => {
+    try {
+      await (adapters.devicePlainDnsCheck ?? queryPlainDns)(ip, domain(project.config.baseLocalDomain));
+    } catch (error) {
+      throw new Error(`Ordinary DNS failed at ${ip}: ${error.message}`);
+    }
+  };
+  const checkBindingDns = async () => {
+    for (const ip of new Set([ref.ip, ...pkg.addresses])) await checkPlainDns(ip);
+  };
   let plan = await inspect();
+  const pendingPlan = record.listener?.status === "pending" && record.listener.vmid === ref.vmid
+    ? record.listener.plan : undefined;
+  // A prior process may have stopped after Technitium saved the addresses.
+  const interruptedBindings = pendingPlan?.bindings && same(plan, observed(pendingPlan));
   const upgrade = v["upgrade-technitium"];
   const reviewCommand =
     "Repeat resolver-setup" +
     (upgrade ? " --upgrade-technitium" : "") +
     " with --approve ";
   if (plan.enabled) {
-    const pending =
-      record.listener?.status === "pending" &&
-      record.listener.vmid === ref.vmid &&
-      JSON.stringify({ ...plan, enabled: false }) ===
-        JSON.stringify(record.listener.plan);
+    const pending = pendingPlan && same({ ...plan, enabled: false }, observed(pendingPlan));
     try {
       await verify();
+      if (pending && pendingPlan.bindings) await checkBindingDns();
     } catch (error) {
       if (!pending || upgrade) throw error;
       const summary = JSON.stringify({
-        change: "Roll back interrupted listener enable on TCP 853",
+        change: "Roll back interrupted listener setup on TCP 853",
         impact:
           "Technitium restarts its DNS listeners when the setting changes.",
         vmid: ref.vmid,
         ...plan,
+        restoreBindings: pendingPlan.bindings?.from,
       });
       const token = createHash("sha256").update(summary).digest("hex");
       if (!v.approve)
@@ -265,10 +291,17 @@ export async function profileCommand(args, adapters, upgradeTechnitium) {
         );
       if (token !== v.approve)
         throw new Error("Review the pending rollback again.");
-      await provider.setTlsEnabled(request, false);
+      if (!same(await inspect(), plan)) throw new Error("Technitium settings changed. Review the pending rollback again.");
+      await provider.setTlsEnabled(request, false, pendingPlan.bindings?.from);
+      if (!same(await inspect(), { ...pendingPlan, listeners: [...pendingPlan.listeners].sort() }))
+        throw new Error("Could not verify the restored Technitium listeners. Review the current settings again.");
       record.listener.status = "rolled back";
       save();
       return result("Interrupted listener change rolled back.");
+    }
+    if (pending) {
+      record.listener.status = "verified";
+      save();
     }
     if (!upgrade)
       return result("Existing listener verified. No settings changed.");
@@ -282,19 +315,8 @@ export async function profileCommand(args, adapters, upgradeTechnitium) {
       throw new Error("TCP 853 already has a listener in the Technitium LXC.");
   };
   if (!plan.enabled) await checkPort();
-  const checkPlainDns = async () => {
-    try {
-      await (adapters.devicePlainDnsCheck ?? queryPlainDns)(
-        ref.ip,
-        domain(project.config.baseLocalDomain),
-      );
-    } catch (error) {
-      throw new Error(
-        "Ordinary DNS failed at " + ref.ip + ": " + error.message,
-      );
-    }
-  };
-  if (upgrade) await checkPlainDns();
+  if (plan.bindings || interruptedBindings) await checkBindingDns();
+  else if (upgrade) await checkPlainDns();
   const summary = JSON.stringify({
     change: upgrade
       ? "Run the vendor's in-place Technitium updater, then verify or enable DNS over TLS on TCP 853"
@@ -302,6 +324,8 @@ export async function profileCommand(args, adapters, upgradeTechnitium) {
     impact: upgrade
       ? "Requests a Proxmox snapshot when supported. The update and any listener change restart DNS."
       : "Technitium restarts its DNS listeners when the setting changes.",
+    addressChange: plan.bindings && "Use the current private addresses explicitly. Address changes on the DNS LXC may require a new review.",
+    restoreBindings: interruptedBindings ? pendingPlan.bindings.from : undefined,
     ...plan,
     vmid: ref.vmid,
     ip: ref.ip,
@@ -349,15 +373,18 @@ export async function profileCommand(args, adapters, upgradeTechnitium) {
       throw new Error(upgradeOutput + error.message);
     }
   }
-  record.listener = { plan, vmid: ref.vmid, status: "pending" };
+  if (!same(await inspect(), plan)) throw new Error("Technitium listener addresses changed. Review setup again.");
+  const originalPlan = interruptedBindings ? { ...pendingPlan, version: plan.version } : plan;
+  record.listener = { plan: originalPlan, vmid: ref.vmid, status: "pending" };
   save();
   try {
-    await provider.setTlsEnabled(request, true);
+    await provider.setTlsEnabled(request, true, plan.bindings?.to);
     let failure;
     for (let attempt = 0; attempt < 4; attempt++) {
       try {
         await verify();
-        if (upgrade) await checkPlainDns();
+        if (originalPlan.bindings) await checkBindingDns();
+        else if (upgrade) await checkPlainDns();
         failure = undefined;
         break;
       } catch (e) {
@@ -366,7 +393,7 @@ export async function profileCommand(args, adapters, upgradeTechnitium) {
       await new Promise((r) => setTimeout(r, 500));
     }
     if (failure) throw failure;
-    if (!(await inspect()).enabled)
+    if (!same(await inspect(), { ...observed(plan), enabled: true }))
       throw new Error(
         "Technitium did not retain the reviewed listener setting.",
       );
@@ -376,12 +403,12 @@ export async function profileCommand(args, adapters, upgradeTechnitium) {
       upgradeOutput + "Reviewed Technitium listener enabled and verified.",
     );
   } catch (error) {
-    const current = await inspect();
-    if (
-      current.enabled &&
-      JSON.stringify({ ...current, enabled: false }) === JSON.stringify(plan)
-    ) {
-      await provider.setTlsEnabled(request, false);
+    const current = await inspect(true);
+    const onlyToggleChanged = current.enabled && same({ ...current, enabled: false }, plan);
+    const bindingsChanged = originalPlan.bindings && same({ ...current, enabled: false }, observed(plan));
+    if (onlyToggleChanged || bindingsChanged) {
+      await provider.setTlsEnabled(request, false, bindingsChanged ? originalPlan.bindings.from : undefined);
+      if (!same(await inspect(), originalPlan)) throw new Error(`${error.message} Could not verify restoration of the reviewed DNS settings.`);
       record.listener.status = "rolled back";
       save();
     }

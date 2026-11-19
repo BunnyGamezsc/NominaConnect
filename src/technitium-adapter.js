@@ -32,12 +32,14 @@ export function createTechnitiumAdapter({ httpClient, secretResolver, enableNest
     async inspectTlsListener(request) {
       const session = await authenticate(httpClient, secretResolver, request);
       const {response} = await apiGet(httpClient, session, "/api/settings/get");
-      const {version, clusterInitialized, dnsServerLocalEndPoints, dnsTlsCertificatePath, dnsOverTlsPort, enableDnsOverTls, enableDnsOverHttps, enableDnsOverQuic, recursion} = response;
-      return {version, clusterInitialized, dnsServerLocalEndPoints, dnsTlsCertificatePath, dnsOverTlsPort, enableDnsOverTls, enableDnsOverHttps, enableDnsOverQuic, recursion};
+      const {version, clusterInitialized, dnsServerLocalEndPoints, dnsTlsCertificatePath, dnsOverTlsPort, enableDnsOverTls, enableDnsOverHttps, enableDnsOverHttpsUnixSocket, enableDnsOverQuic, recursion} = response;
+      return {version, clusterInitialized, dnsServerLocalEndPoints, dnsTlsCertificatePath, dnsOverTlsPort, enableDnsOverTls, enableDnsOverHttps, enableDnsOverHttpsUnixSocket, enableDnsOverQuic, recursion};
     },
-    async setTlsEnabled(request, enabled) {
+    async setTlsEnabled(request, enabled, endpoints = undefined) {
       const session = await authenticate(httpClient, secretResolver, request);
-      await apiGet(httpClient, session, "/api/settings/set", {enableDnsOverTls: enabled});
+      await apiGet(httpClient, session, "/api/settings/set", {
+        enableDnsOverTls: enabled, dnsServerLocalEndPoints: endpoints?.join(",")
+      });
     },
     async setTlsCertificate(request, path) {
       const session = await authenticate(httpClient, secretResolver, request);

@@ -11,6 +11,8 @@ import { PNG } from "pngjs";
 import { runCli } from "../src/cli.js";
 import { runInteractiveApp } from "../src/tui.js";
 import { deviceMenu } from "../src/device-menu.js";
+import { renewDnsCertificate } from "../src/dns-certificate.js";
+import { createDnsRenewalScheduler } from "../src/dns-renewal.js";
 import {
   fetchProfileRoot,
   validateRoot,
@@ -21,6 +23,7 @@ import {
   serializeProjectConfiguration,
   parseProjectConfiguration,
   writeDevicePackageSelections,
+  loadProject,
 } from "../src/config.js";
 import { exportBundle } from "../src/device-export.js";
 
@@ -558,11 +561,12 @@ test("DoT fixture requires authenticated TLS, matching question and a usable DNS
     await new Promise((r) => server.close(r));
   }
 });
-test("DoT issuance reviews first and rotates only the managed certificate with rollback on failure", async () => {
+test("DoT issuance and upgrade migration verify renewal and roll back a failed replacement", async () => {
   const { adapters, projectDirectory } = mockProject();
   const settings = { version: "15.6.2", clusterInitialized: false, dnsTlsCertificatePath: "", enableDnsOverTls: false, dnsOverTlsPort: 853 };
   const csr = fs.readFileSync(path.join(dir, "leaf.req"), "utf8");
   const operations = [];
+  const stagedLeaves = new Map();
   let chain = leaf.toString();
   let verifies = true;
   const toolsDir = fs.mkdtempSync(path.join(dir, "dns-tools-"));
@@ -575,7 +579,8 @@ test("DoT issuance reviews first and rotates only the managed certificate with r
       pctExec: async (vmid, { binary, args, stdin }) => {
         if (binary === "/bin/cat") return { stdout: pem };
         const script = args[2];
-        if (script.startsWith("cat --")) return { stdout: leaf.toString() + pem };
+        if (script.includes("printf present")) return { stdout: "present" };
+        if (script.startsWith("cat --")) return { stdout: (stagedLeaves.get(args.at(-1)) ?? leaf.toString()) + pem };
         operations.push(vmid === "201" ? "sign" : script.includes("openssl req") ? "csr" : script.includes("openssl verify") ? "stage" : "discard");
         if (script.includes("openssl req")) return { stdout: csr };
         if (vmid === "201") {
@@ -585,7 +590,7 @@ test("DoT issuance reviews first and rotates only the managed certificate with r
           return { stdout: chain };
         }
         if (script.includes("openssl verify")) {
-          assert.equal(stdin, pem.trimEnd() + "\n" + leaf.toString().trimEnd() + "\n");
+          assert.equal(stdin, pem.trimEnd() + "\n" + chain.trimEnd() + "\n");
           const stage = fs.mkdtempSync(path.join(dir, "dns-stage-"));
           fs.writeFileSync(path.join(stage, "key.pem"), key, { mode: 0o600 });
           execFileSync(binary, [...args.slice(0, -2), stage, args.at(-1)], {
@@ -595,6 +600,7 @@ test("DoT issuance reviews first and rotates only the managed certificate with r
           execFileSync("openssl", ["pkcs12", "-in", pfx, "-passin", "pass:", "-noout"], { stdio: "pipe" });
           assert.equal(fs.statSync(pfx).mode & 0o777, 0o600);
           assert.equal(fs.existsSync(path.join(stage, "key.pem")), false);
+          stagedLeaves.set(args.at(-2), fs.readFileSync(path.join(stage, "leaf.pem"), "utf8"));
         }
         return { stdout: "" };
       },
@@ -609,7 +615,8 @@ test("DoT issuance reviews first and rotates only the managed certificate with r
       },
     },
     deviceTlsQuery: async (ip, host, zone, root, port, fingerprint) => {
-      assert.deepEqual([ip, host, zone, root, port, fingerprint], [base.addresses[0], base.resolver, "home.test", cert.toString(), 853, new X509Certificate(leaf).fingerprint256]);
+      const selected = stagedLeaves.get(path.dirname(settings.dnsTlsCertificatePath));
+      assert.deepEqual([ip, host, zone, root, port, fingerprint], [base.addresses[0], base.resolver, "home.test", cert.toString(), 853, new X509Certificate(selected).fingerprint256]);
       if (!verifies) throw new Error("Fixture verification failed");
       return true;
     },
@@ -650,9 +657,81 @@ test("DoT issuance reviews first and rotates only the managed certificate with r
   assert.notEqual(settings.dnsTlsCertificatePath, initial);
   assert.equal(settings.enableDnsOverTls, true);
   assert.equal(operations.at(-1), "discard");
+  operations.length = 0;
+
+  const migrated = [];
+  const upgraded = { ...fixture, dnsRenewal: {
+    isRegistered: dir => migrated.includes(dir),
+    projectPath: dir => dir,
+    register: async dir => { migrated.push(dir); return "nomina-dns-renewal-fixture"; },
+  } };
+  const renewCommand = action => runCli(["ca", "dns-renewal", action, "--project-dir", projectDirectory], upgraded);
+  settings.enableDnsOverTls = false;
+  assert.match((await renewCommand("migrate")).stdout, /renewal enabled/);
+  assert.equal((await renewCommand("migrate")).stdout, "");
+  assert.deepEqual(migrated, [projectDirectory]);
+  assert.equal((await renewCommand("check")).stdout, "");
+  assert.deepEqual(operations, []);
+
+  execFileSync("openssl", ["x509", "-req", "-in", "leaf.req", "-CA", "ca.crt", "-CAkey", "ca.key", "-days", "2", "-extfile", "extensions", "-out", "renewed.crt"], { cwd: dir, stdio: "pipe" });
+  chain = fs.readFileSync(path.join(dir, "renewed.crt"), "utf8");
+  const project = loadProject(fixture.filesystem, projectDirectory);
+  const oldExpiry = Date.parse(new X509Certificate(leaf).validTo);
+  settings.enableDnsOverTls = true;
+  const beforeRenewal = settings.dnsTlsCertificatePath;
+  verifies = false;
+  await assert.rejects(renewDnsCertificate(project, upgraded, oldExpiry - 3600_000), /Fixture verification failed/);
+  assert.equal(settings.dnsTlsCertificatePath, beforeRenewal);
+  verifies = true;
+  assert.match((await renewDnsCertificate(project, upgraded, oldExpiry + 1000)).stdout, /Renewed the certificate/);
+  assert.notEqual(settings.dnsTlsCertificatePath, beforeRenewal);
+  assert.equal(settings.enableDnsOverTls, true);
+  assert.equal((await renewDnsCertificate(project, upgraded, oldExpiry + 1000)).stdout, "");
 
   settings.dnsTlsCertificatePath = "/etc/dns/manual.pfx";
   await assert.rejects(command(), /managed outside Nomina/);
+  assert.equal((await renewDnsCertificate(project, upgraded, oldExpiry + 1000)).stdout, "");
+});
+test("the DNS renewal timer is root-owned, idempotent and recoverable after an interrupted enable", async () => {
+  const project = "/projects/my lab $HOME%";
+  const unitsDirectory = "/etc/systemd/system";
+  const invocation = ["/usr/local/bin/nomina"];
+  const files = new Map(invocation.concat([`${project}/nomina.yaml`, `${project}/.nomina/state.json`]).map(file => [file, ""]));
+  const calls = [];
+  let unsafeDirectory;
+  const scheduler = createDnsRenewalScheduler({
+    unitsDirectory, invocation,
+    filesystem: /** @type {any} */ ({
+      realpathSync: file => file,
+      lstatSync: file => ({ uid: 0, mode: file === unsafeDirectory ? 0o777 : 0o755, isFile: () => files.has(file), isDirectory: () => !files.has(file) }),
+      existsSync: file => files.has(file),
+      readFileSync: file => files.get(file),
+      writeFileSync: (file, value) => { assert.equal(files.has(file), false); files.set(file, value); },
+      unlinkSync: file => files.delete(file),
+    }),
+    commandRunner: { run: async ({ args }) => {
+      calls.push(args[0]);
+      const link = `${unitsDirectory}/timers.target.wants/${args.at(-1)}`;
+      if (args[0] === "enable") files.set(link, "");
+      if (args[0] === "disable") files.delete(link);
+    } },
+  });
+  unsafeDirectory = "/projects";
+  await assert.rejects(scheduler.register(project), /requires a trusted root-owned path/);
+  unsafeDirectory = undefined;
+  const unit = await scheduler.register(project);
+  assert.match(files.get(`${unitsDirectory}/${unit}.service`), /ExecStart=:"\/usr\/local\/bin\/nomina" "ca" "dns-renewal" "check" "--project-dir" "\/projects\/my lab \$HOME%%"/);
+  assert.match(files.get(`${unitsDirectory}/${unit}.timer`), /OnActiveSec=1min\nOnUnitInactiveSec=15min/);
+  assert.equal(await scheduler.register(project), unit);
+  assert.deepEqual(calls, ["enable"]);
+  files.delete(`${unitsDirectory}/timers.target.wants/${unit}.timer`);
+  assert.equal(scheduler.isRegistered(project), false);
+  assert.equal(await scheduler.register(project), unit);
+  assert.equal(scheduler.isRegistered(project), true);
+  await scheduler.remove(project);
+  assert.deepEqual(calls, ["enable", "enable", "disable", "daemon-reload"]);
+  assert.equal(scheduler.isRegistered(project), false);
+  assert.equal(files.size, 3);
 });
 test("Technitium change requires a fresh review, reuses compatible listener and rolls back only its toggle", async () => {
   const { cmd, configure, adapters } = mockProject();
@@ -705,6 +784,52 @@ test("Technitium change requires a fresh review, reuses compatible listener and 
   await setup("--approve", token);
   await setup();
   assert.deepEqual(changes, [true, false, true]);
+});
+test("wildcard Technitium setup discovers private listeners, reviews once, and restores both settings on failure", async () => {
+  const { cmd, adapters, configure } = mockProject();
+  await configure();
+  const before = ["0.0.0.0:53", "[::]:53"];
+  const ip = base.addresses[0];
+  const interfaces = [
+    { ifname: "lo", addr_info: [{ local: "127.0.0.1" }, { local: "::1" }] },
+    { ifname: "eth0", addr_info: [{ local: ip }, { local: "fe80::1" }] },
+  ];
+  const after = ["127.0.0.1:53", `${ip}:53`, "[::1]:53", "[fe80::1%eth0]:53"];
+  const settings = { version: "15.6.2", clusterInitialized: false, dnsTlsCertificatePath: "/pfx",
+    dnsOverTlsPort: 853, recursion: "AllowOnlyForPrivateNetworks", dnsServerLocalEndPoints: before, enableDnsOverTls: false };
+  const changes = [];
+  let failPlain = false;
+  const exec = adapters.proxmox.pctExec;
+  Object.assign(adapters.proxmox, { pctExec: (vmid, command) => command.binary === "/usr/bin/ip" ?
+    { stdout: JSON.stringify(interfaces) } : exec(vmid, command) });
+  Object.assign(adapters, { devicePlainDnsCheck: async () => {
+    if (failPlain && settings.enableDnsOverTls) throw new Error("port 53 fixture failure");
+  }, providerAdapters: { technitium: {
+    inspectTlsListener: async () => ({ ...settings }),
+    setTlsEnabled: async (_, enabled, endpoints) => {
+      changes.push([enabled, endpoints]);
+      settings.enableDnsOverTls = enabled;
+      settings.dnsServerLocalEndPoints = endpoints ?? settings.dnsServerLocalEndPoints;
+    },
+  } } });
+  const setup = (...args) => cmd("resolver-setup", "--name", "family", ...args);
+  const review = (await setup()).stdout;
+  assert.deepEqual(JSON.parse(review.split("\n")[0]).bindings, { from: before, to: after });
+  const token = review.split("--approve ")[1].trim();
+  interfaces[1].addr_info.push({ local: "10.1.2.3" });
+  await assert.rejects(setup("--approve", token), /review has changed/i);
+  interfaces[1].addr_info.pop();
+  interfaces[1].addr_info.push({ local: "2001:db8::8" });
+  await assert.rejects(setup(), /2001:db8::8/);
+  interfaces[1].addr_info.pop();
+  assert.deepEqual(changes, []);
+  failPlain = true;
+  await assert.rejects(setup("--approve", token), /port 53 fixture failure/);
+  assert.deepEqual(changes.splice(0), [[true, after], [false, before]]);
+  failPlain = false;
+  assert.match((await setup("--approve", token)).stdout, /enabled and verified/);
+  assert.match((await setup()).stdout, /Existing listener verified/);
+  assert.deepEqual(changes, [[true, after]]);
 });
 test("post-CA skip and cancel do not run any device command", async () => {
   for (const select of [

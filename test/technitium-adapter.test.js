@@ -557,10 +557,12 @@ test("encrypted listener inspection filters credentials and writes only the sele
   assert.doesNotMatch(JSON.stringify(settings),/redacted-fixture/);
   await adapter.setTlsEnabled(request,true);
   await adapter.setTlsEnabled(request,false);
+  await adapter.setTlsEnabled(request,true,["192.168.4.90:53","[::1]:53"]);
   await adapter.setTlsCertificate(request,"/var/lib/nomina-dns-tls/example/resolver.pfx");
   await adapter.setTlsCertificate(request,"");
   assert.deepEqual(calls.filter(url=>url.pathname==="/api/settings/set").map(url=>[...url.searchParams]),[
     [["enableDnsOverTls","true"]],[["enableDnsOverTls","false"]],
+    [["enableDnsOverTls","true"],["dnsServerLocalEndPoints","192.168.4.90:53,[::1]:53"]],
     [["dnsTlsCertificatePath","/var/lib/nomina-dns-tls/example/resolver.pfx"],["dnsTlsCertificatePassword",""]],
     [["dnsTlsCertificatePath",""],["dnsTlsCertificatePassword",""]]
   ]);

@@ -15,6 +15,15 @@ REPO="BunnyGamezsc/NominaConnect"
 BRANCH="main"
 INSTALL_DIR="${NOMINA_INSTALL_DIR:-/opt/nominaconnect}"
 BIN_LINK="${NOMINA_BIN_LINK:-/usr/local/bin/nomina}"
+INSTALL_START_DIR="$PWD"
+
+migrate_dns_renewal() {
+  if [ -x "$BIN_LINK" ] && "$BIN_LINK" --help | grep -q 'nomina ca dns-renewal migrate'; then
+    local launcher
+    launcher="$(realpath "$BIN_LINK")"
+    (cd "$INSTALL_START_DIR" && "$launcher" ca dns-renewal migrate) || echo "Automatic DNS certificate renewal setup can be retried from the Nomina project."
+  fi
+}
 
 echo ""
 echo "  ╔═══════════════════════════════════════╗"
@@ -118,6 +127,7 @@ case "$CURRENT_VERSION" in
       echo "✔  NominaConnect $CURRENT_VERSION is already installed — up to date."
       echo "   Force reinstall:          ... | FORCE=1 bash"
       echo "   Install another version:  ... | bash -s v1.0.0"
+      migrate_dns_renewal
       exit 0
     fi
     echo "🔄 Reinstalling NominaConnect $CURRENT_VERSION (forced)..."
@@ -162,6 +172,7 @@ pnpm install --frozen-lockfile --prod 2>/dev/null || pnpm install --prod
 chmod +x "$INSTALL_DIR/bin/nomina.js"
 mkdir -p "$(dirname "$BIN_LINK")"
 ln -sf "$INSTALL_DIR/bin/nomina.js" "$BIN_LINK"
+migrate_dns_renewal
 
 INSTALLED="$(installed_version)"
 ACTION="installed"

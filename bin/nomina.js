@@ -10,6 +10,7 @@ import { createProductionAdapters } from "../src/adapter-runtime.js";
 import { acquireProjectLock } from "../src/project-lock.js";
 import { createCommandRunner } from "../src/adapter-runtime.js";
 import { createSshOperationController, runSshOperationWorker } from "../src/ssh-operation.js";
+import { createDnsRenewalScheduler } from "../src/dns-renewal.js";
 
 const filesystem = {
   acquireProjectLock,
@@ -22,7 +23,8 @@ const filesystem = {
   deletePath: (path) => fs.rmSync(path, { recursive: true, force: true })
 };
 
-const productionAdapters = createProductionAdapters();
+const commandRunner = createCommandRunner();
+const productionAdapters = createProductionAdapters({ commandRunner });
 
 const adapters = {
   filesystem,
@@ -32,7 +34,8 @@ const adapters = {
     isProxmoxHost: () => fs.existsSync("/usr/sbin/pct") || fs.existsSync("/usr/bin/pct")
   },
   ...productionAdapters,
-  sshOperations: createSshOperationController({ commandRunner: createCommandRunner() }),
+  sshOperations: createSshOperationController({ commandRunner }),
+  dnsRenewal: createDnsRenewalScheduler({ commandRunner }),
   prompts: process.env.NOMINA_SSH_OPERATION_WORKER === "1" ? undefined : createClackPrompts(clack),
   interactive: {
     run: (context) => runInteractiveApp({

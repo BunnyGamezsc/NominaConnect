@@ -63,7 +63,7 @@ rmdir -- "$1"
 
 function references(project) {
   const { certificateAuthority: ca, dns } = project.config.managedInventory.platform;
-  const refs = project.state.providerReferences;
+  const refs = project.state.providerReferences ?? {};
   return { ca, dns, caRef: refs[ca?.id], dnsRef: refs[dns?.id] };
 }
 
@@ -73,13 +73,14 @@ export function canProvisionDnsCertificate(project) {
     dns?.service === "technitium" && dnsRef?.vmid && dnsRef.ip && !dnsRef.provisioningPending);
 }
 
-async function inspectCertificate(provider, request, runDns) {
+async function inspectCertificate(provider, request, runDns, managedOnly) {
   const settings = await provider.inspectTlsListener(request);
+  const path = settings.dnsTlsCertificatePath ?? "";
+  if (managedOnly && !ownedPath.test(path)) return;
   if (!/^15\.(?:4|6)(?:\.|$)/.test(settings.version) || settings.clusterInitialized !== false)
     throw new Error("Certificate provisioning requires standalone Technitium 15.4.x or 15.6.x.");
-  if (settings.enableDnsOverHttps || settings.enableDnsOverQuic)
+  if (settings.enableDnsOverHttps || settings.enableDnsOverHttpsUnixSocket || settings.enableDnsOverQuic)
     throw new Error("Technitium shares its TLS certificate with active DNS-over-HTTPS or DNS-over-QUIC. Manage that shared certificate in Technitium.");
-  const path = settings.dnsTlsCertificatePath ?? "";
   let current;
   if (path) {
     if (!ownedPath.test(path))
@@ -90,11 +91,28 @@ async function inspectCertificate(provider, request, runDns) {
     const leaf = new X509Certificate(leafPem);
     current = {
       hostname: leaf.subjectAltName?.match(/^DNS:([a-z0-9.-]+)$/)?.[1],
-      fingerprint: leaf.fingerprint256, rootFingerprint: new X509Certificate(rootPem).fingerprint256, expires: leaf.validTo,
+      fingerprint: leaf.fingerprint256, rootFingerprint: new X509Certificate(rootPem).fingerprint256,
+      issued: leaf.validFrom, expires: leaf.validTo,
     };
     if (!current.hostname) throw new Error("The current Nomina certificate has no expected DNS name.");
   }
   return { path, current, version: settings.version, enabled: settings.enableDnsOverTls, port: settings.dnsOverTlsPort };
+}
+
+function certificateContext(project, adapters) {
+  const provider = adapters.providerAdapters?.technitium;
+  if (!canProvisionDnsCertificate(project) || !provider?.setTlsCertificate)
+    throw new Error("Provision managed step-ca and Technitium before requesting a DNS-over-TLS certificate.");
+  const { dns, caRef, dnsRef } = references(project);
+  const { proxmox } = adapters;
+  const run = (vmid, script, params = [], stdin = undefined) => proxmox.pctExec(vmid, {
+    binary: "/bin/bash", args: ["-eu", "-c", script, "nomina-dns-certificate", ...params],
+    stdin, timeoutMs: 60_000, maxOutputBytes: 32_768,
+  });
+  const runDns = (script, params, stdin = undefined) => run(dnsRef.vmid, script, params, stdin);
+  const request = { ip: dnsRef.ip, connectionSecretReference: project.config.connectionSecretReferences[dns.id] };
+  const inspect = (managedOnly = false) => inspectCertificate(provider, request, runDns, managedOnly);
+  return { caRef, dnsRef, inspect, provider, request, run, runDns, zone: domain(project.config.baseLocalDomain) };
 }
 
 export async function dnsCertificateCommand(args, adapters) {
@@ -103,21 +121,10 @@ export async function dnsCertificateCommand(args, adapters) {
     throw new Error("Specify only one project directory.");
   const fs = adapters.filesystem;
   const project = loadProject(fs, values["project-dir"] ?? findProjectDirectory(fs, adapters.cwd ?? "."));
-  const provider = adapters.providerAdapters?.technitium;
-  if (!canProvisionDnsCertificate(project) || !provider?.setTlsCertificate)
-    throw new Error("Provision managed step-ca and Technitium before requesting a DNS-over-TLS certificate.");
-  const { dns, caRef, dnsRef } = references(project);
-  const { proxmox } = adapters;
-  const root = await fetchProfileRoot(project, proxmox);
-  const run = (vmid, script, params = [], stdin = undefined) => proxmox.pctExec(vmid, {
-    binary: "/bin/bash", args: ["-eu", "-c", script, "nomina-dns-certificate", ...params],
-    stdin, timeoutMs: 60_000, maxOutputBytes: 32_768,
-  });
-  const runDns = (script, params, stdin = undefined) => run(dnsRef.vmid, script, params, stdin);
-  const request = { ip: dnsRef.ip, connectionSecretReference: project.config.connectionSecretReferences[dns.id] };
-  const inspect = () => inspectCertificate(provider, request, runDns);
+  const context = certificateContext(project, adapters);
+  const { caRef, dnsRef, inspect, zone } = context;
+  const root = await fetchProfileRoot(project, adapters.proxmox);
   const previous = await inspect();
-  const zone = domain(project.config.baseLocalDomain);
   const hostname = domain(values.hostname ?? previous.current?.hostname ?? `dns.${zone}`);
   if (previous.enabled && previous.current?.hostname !== hostname)
     throw new Error("Keep the current DNS-over-TLS hostname while it is in use. Existing profiles depend on it.");
@@ -137,7 +144,46 @@ export async function dnsCertificateCommand(args, adapters) {
     };
   }
   if (values.approve !== approval) throw new Error("Certificate review has changed. Review it again before provisioning.");
+  const { leaf, warning } = await replaceCertificate(context, adapters, { root, hostname, previous });
+  let renewal = "";
+  if (adapters.dnsRenewal) {
+    try {
+      const unit = await adapters.dnsRenewal.register(project.projectDirectory);
+      renewal = `\nAutomatic renewal is configured through ${unit}.timer.`;
+    } catch (error) {
+      renewal = `\nAutomatic renewal could not be scheduled. ${error.message}\nRun nomina ca dns-renewal migrate from the project to retry.`;
+    }
+  }
+  const message = previous.enabled ? "Verified the new certificate over DNS-over-TLS." : "DNS-over-TLS remains off. Use the device setup workflow when you want to enable it.";
+  return { stdout: `Selected the certificate for ${hostname}. Expires ${leaf.validTo}.\n${message}${renewal}${warning}\n`, hostname };
+}
 
+/** Identify an existing managed certificate without applying a certificate or listener change. */
+export async function hasManagedDnsCertificate(project, adapters) {
+  if (!canProvisionDnsCertificate(project)) return false;
+  const { runDns, inspect } = certificateContext(project, adapters);
+  const { stdout } = await runDns('if [ -d "$1" ] && [ ! -L "$1" ]; then printf present; fi', [storage]);
+  return stdout === "present" && Boolean(await inspect(true));
+}
+
+export async function renewDnsCertificate(project, adapters, now = Date.now()) {
+  if (!canProvisionDnsCertificate(project)) return { stdout: "" };
+  const context = certificateContext(project, adapters);
+  const previous = await context.inspect(true);
+  if (!previous) return { stdout: "" };
+  const expiry = Date.parse(previous.current.expires);
+  const lifetime = expiry - Date.parse(previous.current.issued);
+  if (expiry - now > lifetime / 3) return { stdout: "" };
+  const root = await fetchProfileRoot(project, adapters.proxmox);
+  if (previous.current.rootFingerprint !== root.fingerprint256)
+    throw new Error("The CA root has changed. Review the resolver certificate and device trust before rotating it.");
+  const hostname = domain(previous.current.hostname);
+  const { leaf, warning } = await replaceCertificate(context, adapters, { root, hostname, previous, minimumExpiry: expiry });
+  return { stdout: `Renewed the certificate for ${hostname}. Expires ${leaf.validTo}.${warning}\n` };
+}
+
+async function replaceCertificate(context, adapters, { root, hostname, previous, minimumExpiry = 0 }) {
+  const { caRef, dnsRef, inspect, provider, request, run, runDns, zone } = context;
   const directory = `${storage}/${randomUUID()}`;
   const path = `${directory}/resolver.pfx`;
   const discard = folder => runDns(discardCertificate, [folder]);
@@ -150,6 +196,8 @@ export async function dnsCertificateCommand(args, adapters) {
     leaf = new X509Certificate(bundle);
     if (leaf.ca || leaf.subjectAltName !== `DNS:${hostname}`)
       throw new Error("step-ca did not issue a leaf certificate for the reviewed hostname.");
+    if (Date.parse(leaf.validTo) <= minimumExpiry)
+      throw new Error("step-ca did not issue a certificate that extends the current expiration date.");
     await runDns(stageCertificate, [directory, hostname], `${root.toString().trimEnd()}\n${bundle.trim()}\n`);
     if (JSON.stringify(await inspect()) !== JSON.stringify(previous))
       throw new Error("Technitium certificate settings changed during issuance. Review them again.");
@@ -191,8 +239,7 @@ export async function dnsCertificateCommand(args, adapters) {
       warning = `\nCould not remove the superseded certificate at ${previous.path}.`;
     }
   }
-  const message = previous.enabled ? "Verified the new certificate over DNS-over-TLS." : "DNS-over-TLS remains off. Use the device setup workflow when you want to enable it.";
-  return { stdout: `Selected the certificate for ${hostname}. Expires ${leaf.validTo}.\n${message}\nRun this command again before expiry to replace it.${warning}\n`, hostname };
+  return { leaf, warning };
 }
 
 export async function dnsCertificateMenu(adapters, project, initialHostname = undefined) {

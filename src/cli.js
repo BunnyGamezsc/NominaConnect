@@ -1,5 +1,6 @@
 import { profileCommand } from "./device-commands.js";
 import { dnsCertificateCommand } from "./dns-certificate.js";
+import { checkDnsRenewal, migrateDnsRenewal } from "./dns-renewal.js";
 import { HOST_SSH_PORT } from "./host-ssh-adapter.js";
 import { findExposure, resolveExposure, sameHostname, isWebExposure, isStreamExposure } from "./exposure-identity.js";
 import { tcpRequest, preflightTcpExposure } from "./tcp-exposure.js";
@@ -60,10 +61,19 @@ export async function runCli(argumentsList, adapters) {
     if (adapters.interactive?.run === undefined) {
       throw new Error("Run nomina from an interactive terminal, or pass a command such as init or service add.");
     }
+    try {
+      const migration = await migrateDnsRenewal(adapters);
+      if (migration.stdout) adapters.prompts?.info?.(migration.stdout.trim());
+    } catch (error) {
+      adapters.prompts?.warn?.(`Automatic DNS certificate renewal could not be enabled. ${error.message}`);
+    }
     return adapters.interactive.run(adapters);
   }
 
   const [command, ...rest] = argumentsList;
+  // Migration discovers and locks each project separately.
+  if (command === "ca" && rest[0] === "dns-renewal" && rest[1] === "migrate")
+    return runCommand(command, rest, adapters);
   // Tracking acquires this lock only to reload and commit, never while it is
   // inspecting providers. Docker takes short write locks and a separate
   // lifecycle lock so a VMID is saved before installation begins.
@@ -81,7 +91,7 @@ export async function runCli(argumentsList, adapters) {
     try { release?.(); } finally { releaseOperation?.(); }
   }
   // These CA commands run only their reviewed workflows, including read-only checks.
-  if (command === "ca" && ["profile", "dns-certificate"].includes(rest[0])) return commandResult;
+  if (command === "ca" && ["profile", "dns-certificate", "dns-renewal"].includes(rest[0])) return commandResult;
   if ("sshOperation" in commandResult) return adapters.sshOperations.launch(commandResult.sshOperation);
   if (!("cancelled" in commandResult && commandResult.cancelled) && !("reviewOnly" in commandResult && commandResult.reviewOnly)) startTrackingJobInBackground(adapters);
   return commandResult;
@@ -99,7 +109,7 @@ async function runCommand(command, rest, adapters) {
   if (command === "--version" || command === "-v" || command === "version") {
     return { stdout: `${VERSION}\n` };
   }
-  if (command === "--help" || command === "help" || command === "-h") return { stdout: "nomina ssh enable [--hostname HOST] [--ssh-user root] [--host-ip PRIVATE_IP]\nnomina ssh export --output /absolute/path/nomina_ssh\nnomina ssh prepare-key --output /absolute/path/new_nomina_ssh\nDownload the prepared key before activation.\nnomina ssh activate-key\nnomina ssh replace-key --output /absolute/path/new_nomina_ssh (immediate; independent administrator access required)\nnomina ssh disable\nHost SSH uses one generated key, LAN and optional Nomina VPN access; no router port forwarding.\nnomina exposure publish --name NAME --protocol https|tcp|smb|ssh --hostname HOST --backend-ip IP [--backend-port PORT] [--listener-port PORT] [--tailnet true|false]\nHTTPS is the default. HTTPS and generic TCP require a backend port. TCP listens on the backend port by default; Minecraft Java uses 25565. Raw TCP selects a backend by listener address and port.\nSMB uses client TCP 445, with backend port 445 by default, and supports existing Samba/NAS/VM servers. Windows: \\\\files.bunny.internal\\SHARE. macOS: smb://files.bunny.internal/SHARE. Shares, credentials and permissions stay on the server. Configure Samba hostname aliases; see docs/smb-live-verification.md.\nRemove with: nomina service remove NAME\n" + DOCKER_EXPOSURE_HELP + "\nDevice setup: nomina ca profile configure|list|inspect|resolver-check|resolver-setup|export.\nProvisions a DNS-over-TLS certificate for managed Technitium: nomina ca dns-certificate [--hostname HOST] [--approve DIGEST]. See docs/device-setup.md.\n" };
+  if (command === "--help" || command === "help" || command === "-h") return { stdout: "nomina ssh enable [--hostname HOST] [--ssh-user root] [--host-ip PRIVATE_IP]\nnomina ssh export --output /absolute/path/nomina_ssh\nnomina ssh prepare-key --output /absolute/path/new_nomina_ssh\nDownload the prepared key before activation.\nnomina ssh activate-key\nnomina ssh replace-key --output /absolute/path/new_nomina_ssh (immediate; independent administrator access required)\nnomina ssh disable\nHost SSH uses one generated key, LAN and optional Nomina VPN access; no router port forwarding.\nnomina exposure publish --name NAME --protocol https|tcp|smb|ssh --hostname HOST --backend-ip IP [--backend-port PORT] [--listener-port PORT] [--tailnet true|false]\nHTTPS is the default. HTTPS and generic TCP require a backend port. TCP listens on the backend port by default; Minecraft Java uses 25565. Raw TCP selects a backend by listener address and port.\nSMB uses client TCP 445, with backend port 445 by default, and supports existing Samba/NAS/VM servers. Windows: \\\\files.bunny.internal\\SHARE. macOS: smb://files.bunny.internal/SHARE. Shares, credentials and permissions stay on the server. Configure Samba hostname aliases; see docs/smb-live-verification.md.\nRemove with: nomina service remove NAME\n" + DOCKER_EXPOSURE_HELP + "\nDevice setup: nomina ca profile configure|list|inspect|resolver-check|resolver-setup|export.\nProvisions a DNS-over-TLS certificate for managed Technitium: nomina ca dns-certificate [--hostname HOST] [--approve DIGEST].\nDNS certificate renewal: nomina ca dns-renewal migrate [--project-dir DIRECTORY]. See docs/device-setup.md.\n" };
   switch (command) {
     case "docker":
       return handleDockerCommand(rest, adapters);
@@ -253,6 +263,16 @@ async function handleCaCommand(argumentsList, adapters) {
   if (subcommand === "dns-certificate") {
     assertProxmoxShell(adapters.runtime);
     return dnsCertificateCommand(rest, adapters);
+  }
+  if (subcommand === "dns-renewal") {
+    const [action, ...args] = rest;
+    const options = optionParser({ flags: [] })(args);
+    if (action === "migrate") return migrateDnsRenewal(adapters, options.projectDir, true);
+    if (action === "check") {
+      assertProxmoxShell(adapters.runtime);
+      return checkDnsRenewal(adapters, options.projectDir);
+    }
+    throw new Error("Use nomina ca dns-renewal migrate|check [--project-dir DIRECTORY].");
   }
   if (subcommand !== "guide" && subcommand !== "trust" && subcommand !== "cert" && subcommand !== "export" && subcommand !== undefined) {
     throw new Error("Run nomina for the interactive menu, or use: nomina ca guide|cert|export");
@@ -2078,6 +2098,7 @@ async function uninstallEverything(options, adapters) {
     throw new Error(`Uninstall was incomplete: ${failed.join("; ")} Configuration, recovery state, and secrets were retained. Successfully destroyed LXC(s): ${destroyed.join(", ") || "none"}.`);
   }
 
+  if (project) await adapters.dnsRenewal?.remove(project.projectDirectory);
   const removedPaths = [];
   for (const path of [configPath, statePath, secretStorePath]) {
     if (filesystem.exists(path)) {
