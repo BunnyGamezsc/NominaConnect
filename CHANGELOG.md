@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.6.4] - 2026-11-20
+
+### Fixed
+- Scope uninstall to the selected project so other projects' credentials and
+  host SSH access are preserved.
+- Preserve unmanaged DNS records during HTTPS publication and refuse to adopt
+  unrelated proxy routes. Verify DNS changes against the intended listener and
+  write Caddy configuration atomically.
+- Track the selected project, revalidate provider observations before
+  committing, adopt live Proxmox deployment settings and route-type changes,
+  and keep platform LXCs while managed exposures depend on them.
+- Refresh DNS renewal units when the installed launcher changes, and activate
+  Windows installer revisions only after replacement succeeds.
+- Retry exposure publication safely and roll back newly created DNS records
+  when proxy setup fails.
+
 ## [2.6.1] - 2026-11-18
 
 ### Added
